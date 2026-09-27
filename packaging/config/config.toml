@@ -194,6 +194,12 @@ port = 9095
 # /usr/share/doc/kelixip-mod-mcu/ has the whole block key by key (mcu.md), the
 # control surface and what to look at when a call does not join (mcu_module_guide.md).
 
+#[module.mcu_presence]             # dnf install kelixip-mod-mcu_presence
+# Conference rooms as presentities: sip:<did>@<domain> is open while the room runs,
+# open and busy when it is full, closed while its media server is lost. Needs the
+# [module.mcu] and [module.presence] blocks: without either, it refuses to start.
+#domains = ["example.com"]          # absent: every domain the mcu holds rooms on
+
 # The media servers, declared here and nowhere else: point-to-point calls take one
 # per call (round-robin + health-check), and the mcu module opens one control channel
 # per `mendooze` entry. Not needed for a registrar-only node.

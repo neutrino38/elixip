@@ -9,6 +9,8 @@ RPM only so far) — from one `mix release` plus one `mix escript.build`:
 | `kelixip-mod-registrar` | `Kelix.Mod.Registrar` bytecode, dropped into `module_dir` |
 | `kelixip-mod-auth_db` / `kelixip-mod-auth-db` | `Kelix.Mod.AuthDb` bytecode, dropped into `module_dir` |
 | `kelixip-mod-mcu` | `Kelix.Mod.Mcu` bytecode — the conference mixer, which also needs a reachable media server |
+| `kelixip-mod-presence` | `Kelix.Mod.Presence` bytecode — the presence collection, with its reference scripts |
+| `kelixip-mod-mcu_presence` / `kelixip-mod-mcu-presence` | `Kelix.Mod.McuPresence` bytecode — conference rooms as presentities; requires the two above |
 | `elixipp` | the test-tool escript (`/usr/bin/elixipp`) + `ELIXIPP.md`/`FSL.md` |
 
 Each module package carries **its own document** under `/usr/share/doc/<package>/`,

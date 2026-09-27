@@ -7,6 +7,10 @@ kelixip (1.6.1-1) stable; urgency=low
     gain the source and status columns.
   * The registrar no longer renders an AOR's detail on every REGISTER when no
     registrations panel is open on its domain.
+  * New package kelixip-mod-mcu-presence: a conference room is a presentity
+    (open, busy when full, closed while its media server is lost).
+  * presence-subscribe.exs answers noresource to a presentity with no state,
+    instead of closed.
   * User-Agent is now Kelixip/1.6.1.
 
  -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 27 Sep 2026 18:00:00 +0200

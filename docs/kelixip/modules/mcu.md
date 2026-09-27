@@ -20,6 +20,9 @@ MCU functions and regular JSR 309 media functions.
 > limitations. The reference call script is
 > [`apps/kelixip/scripts/mcu.exs`](../../../apps/kelixip/scripts/mcu.exs).
 
+A room can be watched as a presentity — open, busy when full, closed while its
+media server is lost — with the [`mcu_presence`](mcu_presence.md) module.
+
 ## Installing and activating the module
 
 ### Installing the `kelixip-mod-mcu` package:

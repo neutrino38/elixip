@@ -62,8 +62,8 @@ Prometheus metrics.
 The core ships NO SIP function. The registrar, the authentication back-end, the
 conference mixer and the presence collection are loadable modules delivered as
 separate packages (kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu,
-kelixip-mod-presence) which drop their bytecode into the root-owned module
-directory; a deployment installs only what it uses.
+kelixip-mod-presence, kelixip-mod-mcu_presence) which drop their bytecode into the
+root-owned module directory; a deployment installs only what it uses.
 
 This package embeds its own Erlang runtime — no system Erlang or Elixir is needed.
 
@@ -114,6 +114,20 @@ with [[domain.presence]] blocks in domains.toml.
 
 Who may watch whom is NOT decided here: the reference scripts are, and that is
 where a deployment writes its rule.
+
+%package mod-mcu_presence
+Summary:        Conference rooms as presentities, for kelixip
+Requires:       %{name} = %{version}
+Requires:       %{name}-mod-mcu = %{version}
+Requires:       %{name}-mod-presence = %{version}
+
+%description mod-mcu_presence
+The link between the conference mixer and the presence collection: each
+conference room is a presentity, sip:<did>@<domain>, open while it runs, open and
+busy when it is full, closed while its media server is lost. A watcher subscribes
+to a room alone or in its buddy list, as it would to a user. Enable it with a
+[module.mcu_presence] block in config.toml, next to [module.mcu] and
+[module.presence].
 
 %prep
 %setup -q
@@ -265,7 +279,9 @@ fi
 
 %files mod-mcu
 %doc doc/modules/mcu.md doc/modules/mcu_module_guide.md
-%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu*.beam
+# Mcu and Mcu.* — not Mcu*, which would take McuPresence from its own package.
+%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu.beam
+%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu.*.beam
 # The reference conference scripts. They call the module's verbs and nothing else
 # provides them, so a host that has them can run them.
 %{_datadir}/%{name}/mcu*.exs
@@ -279,6 +295,10 @@ fi
 %{_datadir}/%{name}/presence-*.exs
 %{_datadir}/%{name}/registrar-presence.exs
 
+%files mod-mcu_presence
+%doc doc/modules/mcu_presence.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.McuPresence*.beam
+
 %changelog
 * Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.1-1
 - kelescope shows presence live: Kelix.Control.subscribe_presence/2 returns a
@@ -288,6 +308,10 @@ fi
   the source and status columns.
 - The registrar no longer renders an AOR's detail on every REGISTER when no
   registrations panel is open on its domain.
+- New subpackage kelixip-mod-mcu_presence: a conference room is a presentity
+  (open, busy when full, closed while its media server is lost).
+- presence-subscribe.exs answers noresource to a presentity with no state,
+  instead of closed.
 - User-Agent is now Kelixip/1.6.1.
 
 * Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-9

@@ -19,6 +19,10 @@ defmodule Kelix.Mod.Presence do
       N a list subscription names — and hand back the state as it stands;
     * `state_of/2` — the current document of a resource, for a script that wants
       it without subscribing;
+    * `report/4` — another module stating the presence of a resource on its own
+      authority (see *Reported states*);
+    * `exists?/2` — whether a presentity exists at all, the question a notifier
+      script asks before it accepts a subscription;
     * `watchers/2`, `presentities/1`, `remove/2` — what `kelictl presence` shows
       and does;
     * `subscribe_presentities/2` / `unsubscribe_presentities/2` — one domain's
@@ -48,18 +52,31 @@ defmodule Kelix.Mod.Presence do
   ## A resource nobody publishes
 
   A presence state is first what its presentity PUBLISHed. When nothing live is
-  published, it is **open** while the presentity is registered — which the
+  published, it is the state another module **reported** for it (see *Reported
+  states*); failing that, **open** while the presentity is registered — which the
   registrar script says, through `registration_changed/1` and
   `registration_ended/1` — and, on a domain that has a registrar, **closed** for a
   subscriber `Kelix.Mod.AuthDb` knows. Anywhere else — a domain with no
   registrar, a domain this node does not serve, a user nobody provisioned, a
-  package other than `presence` — there is no state, `nil`, which a list NOTIFY
+  package other than `presence` — there is no state, `nil`, which a notifier
   reports as `noresource`.
 
   A registration that opens or closes a watched resource nobody publishes is
   pushed like a publication. The collection never follows the registrar on its
   own: a domain whose registrar script does not report (`registrar.exs`) shows its
   subscribers closed.
+
+  ## Reported states
+
+  A module other than this one may state the presence of a resource on its own
+  authority — `Kelix.Mod.McuPresence` says a conference room is open, busy or
+  closed — through `report/4`. A reported state is held per `{resource, source}`,
+  ranks below a live publication and above the registration, and goes when its
+  source withdraws it (`nil`) or when the process that reported it dies: the
+  reporter is monitored, and a module that restarts reports again.
+
+  Watchers are pushed when the **resolved** state of the resource changes, and
+  only then: a source repeating what it said costs nobody a NOTIFY.
 
   ## Composition is not done here
 
@@ -81,6 +98,10 @@ defmodule Kelix.Mod.Presence do
   #   mons       %{monitor_ref => {domain, resource, pid}}  watcher instances
   #   registered MapSet of `presence` resources whose presentity holds a binding,
   #              as the registrar script reported it
+  #   reported   %{resource => %{source => %{doc, pid, seq, known?}}}, the states
+  #              `report/4` stated; `known?` is whether the subscriber base knows
+  #              the presentity, asked in the reporter's process at report time
+  #   reporters  %{pid => monitor_ref} of the processes that reported a state
   #   panel_subs %{domain => MapSet(pid)} subscribed via `subscribe_presentities/2`
   #   panel_mons %{monitor_ref => {domain, pid}}, dropped on death without an
   #              explicit `unsubscribe_presentities/2`
@@ -88,6 +109,8 @@ defmodule Kelix.Mod.Presence do
             watchers: %{},
             mons: %{},
             registered: MapSet.new(),
+            reported: %{},
+            reporters: %{},
             panel_subs: %{},
             panel_mons: %{},
             sweep_ms: @sweep_ms
@@ -128,6 +151,8 @@ defmodule Kelix.Mod.Presence do
         watch_many: 3,
         unwatch: 1,
         state_of: 2,
+        report: 4,
+        exists?: 2,
         registration_changed: 1,
         registration_changed: 2,
         registration_ended: 1,
@@ -470,6 +495,59 @@ defmodule Kelix.Mod.Presence do
   def state_of(_domain, {user, dom, event}),
     do: Kelix.Module.safe_call(__MODULE__, {:state_of, resource_key({user, dom, event})})
 
+  @doc """
+  State the presence of a resource on the calling module's own authority.
+
+  `user` is the user part of the presentity on `domain` — package `presence` —
+  `source` names who says so (`:mcu`), and `doc` is the document its watchers are
+  to be told; `nil` withdraws what `source` said. The state ranks below a live
+  publication and above the registration (see *Reported states*), and the watchers
+  are pushed when the resolved state changes, and only then.
+
+  The calling process is monitored: when it dies, every state it reported is
+  withdrawn and the watchers told what follows. A reporter that restarts reports
+  again.
+  """
+  @spec report(String.t(), String.t(), atom, SIP.Presence.Doc.t() | nil) ::
+          :ok | {:error, :down | :timeout}
+  def report(domain, user, source, doc)
+      when is_binary(domain) and is_binary(user) and is_atom(source) do
+    resource = resource_key({user, domain, "presence"})
+    {_user, rdomain, _event} = resource
+
+    # The existence question is a query on the subscriber base: asked HERE, in the
+    # reporter's process, and kept with the report, so that withdrawing it later —
+    # the reporter's death included — can tell a subscriber (closed) from a
+    # resource that only existed through the report (no state).
+    known? = doc != nil and registrar_domain?(rdomain) and subscriber?(elem(resource, 0), rdomain)
+
+    Kelix.Module.safe_call(__MODULE__, {:report, resource, source, doc, known?})
+  end
+
+  @doc """
+  Whether the presentity `aor` exists on the context's domain: a subscriber
+  `Kelix.Mod.AuthDb` knows, or a resource some source reports a state for (see
+  *Reported states*). What a notifier script asks before accepting a SUBSCRIBE —
+  a presentity that does not exist is a `404`, not a state a watcher would wait
+  on.
+
+  `aor` is the user part. A collection that cannot answer answers `false`.
+  """
+  @spec exists?(%SIP.Context{} | String.t(), String.t() | nil) :: boolean
+  def exists?(ctx_or_domain, aor)
+  def exists?(%SIP.Context{} = sip_ctx, aor), do: exists?(sip_ctx.domain, aor)
+
+  def exists?(domain, aor) when is_binary(domain) and is_binary(aor) do
+    {user, rdomain, _event} = resource = resource_key({aor, domain, "presence"})
+
+    # the collection first: a call on an in-memory map, where the subscriber base
+    # is a query
+    Kelix.Module.safe_call(__MODULE__, {:reported?, resource}) == true or
+      subscriber?(user, rdomain)
+  end
+
+  def exists?(_domain, _aor), do: false
+
   @doc "Every published state of a domain, as rendered rows (`kelictl presence list`)."
   @spec presentities(String.t()) :: [map] | {:error, :down | :timeout}
   def presentities(domain),
@@ -563,7 +641,7 @@ defmodule Kelix.Mod.Presence do
         {_resource, pubs} <- table_contents(state.states, domain),
         pub <- live_publications(pubs),
         do: render_publication(pub)
-      ) ++ registration_rows(state, domain, :_)
+      ) ++ reported_rows(state, domain, :_) ++ registration_rows(state, domain, :_)
 
     {:reply, Enum.sort_by(rows, & &1.presentity_uri), state}
   end
@@ -606,6 +684,14 @@ defmodule Kelix.Mod.Presence do
     {:reply, :ok, drop_panel_sub(state, domain, pid)}
   end
 
+  def handle_call({:report, resource, source, doc, known?}, {pid, _tag}, state) do
+    {:reply, :ok, do_report(state, resource, source, doc, known?, pid)}
+  end
+
+  def handle_call({:reported?, resource}, _from, state) do
+    {:reply, reported_doc(state, resource) != nil, state}
+  end
+
   # The registrar is asked HERE rather than in the reporting instance: two devices
   # of one AOR reporting at once are then answered in turn, each reading the store
   # as the other left it, and the last push is the true one.
@@ -620,16 +706,10 @@ defmodule Kelix.Mod.Presence do
   # a watcher instance died with its dialog: it watches nothing any more — or a
   # panel subscriber went away
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
-    case Map.pop(state.mons, ref) do
-      {nil, _} ->
-        case Map.get(state.panel_mons, ref) do
-          nil -> {:noreply, state}
-          {domain, pid} -> {:noreply, drop_panel_sub(state, domain, pid)}
-        end
-
-      {{domain, resource, pid}, mons} ->
-        {:noreply, forget_watcher(%{state | mons: mons}, domain, resource, pid)}
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    case Map.get(state.reporters, pid) do
+      ^ref -> {:noreply, withdraw_reporter(state, pid)}
+      _ -> {:noreply, watcher_down(state, ref)}
     end
   end
 
@@ -640,6 +720,19 @@ defmodule Kelix.Mod.Presence do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp watcher_down(state, ref) do
+    case Map.pop(state.mons, ref) do
+      {nil, _} ->
+        case Map.get(state.panel_mons, ref) do
+          nil -> state
+          {domain, pid} -> drop_panel_sub(state, domain, pid)
+        end
+
+      {{domain, resource, pid}, mons} ->
+        forget_watcher(%{state | mons: mons}, domain, resource, pid)
+    end
+  end
 
   # ── publish ─────────────────────────────────────────────────────────────────
 
@@ -823,7 +916,7 @@ defmodule Kelix.Mod.Presence do
 
   # A registration moved. It is news only when the status actually changed — the
   # registrar script reports every refreshing REGISTER — and only for a resource
-  # nobody publishes: a publication wins over the registration.
+  # nobody publishes nor reports: both win over the registration.
   defp set_registered(state, resource, open?) do
     if MapSet.member?(state.registered, resource) == open? do
       state
@@ -836,37 +929,121 @@ defmodule Kelix.Mod.Presence do
       state = %{state | registered: registered}
       watchers = watchers_of(state, resource)
 
-      if map_size(watchers) > 0 and current_doc(state, resource) == nil,
-        do: push(watchers, resource, known_state(state, resource))
+      if map_size(watchers) > 0 and current_doc(state, resource) == nil and
+           reported_doc(state, resource) == nil,
+         do: push(watchers, resource, known_state(state, resource))
 
       broadcast_panel(state, resource)
       state
     end
   end
 
-  # ── a resource nobody publishes ─────────────────────────────────────────────
+  # ── reported states ─────────────────────────────────────────────────────────
 
-  # The state as the collection alone can tell it: the publication, else open for
-  # a registered presentity, else closed on a domain with a registrar — the
-  # presentity being known to exist, since it published or registered — else nil.
-  defp known_state(state, resource) do
-    case current_doc(state, resource) do
-      nil -> status_doc(resource, registration_status(state, resource, true))
-      doc -> doc
+  # One source's statement about one resource. The watchers see the RESOLVED
+  # state, so they are pushed only when that moves: a report under a live
+  # publication, or one repeating what its source already said, is news to nobody.
+  defp do_report(state, resource, source, doc, known?, pid) do
+    # one reading of existence for both sides of the comparison: withdrawing the
+    # last report must not change it
+    known? = known? or reported_known?(state, resource)
+    before = resolved_state(state, resource, known?)
+
+    sources = Map.get(state.reported, resource, %{})
+
+    sources =
+      case doc do
+        nil ->
+          Map.delete(sources, source)
+
+        doc ->
+          entry = %{doc: doc, pid: pid, seq: System.unique_integer([:monotonic]), known?: known?}
+          Map.put(sources, source, entry)
+      end
+
+    state = if doc == nil, do: state, else: monitor_reporter(state, pid)
+
+    state = put_reported(state, resource, sources)
+    reported_changed(state, resource, before, resolved_state(state, resource, known?))
+  end
+
+  # Everything a dead reporter said goes with it, each resource pushed as it
+  # resolves without it.
+  defp withdraw_reporter(state, pid) do
+    state = %{state | reporters: Map.delete(state.reporters, pid)}
+
+    Enum.reduce(state.reported, state, fn {resource, sources}, st ->
+      {gone, kept} = Enum.split_with(sources, fn {_source, entry} -> entry.pid == pid end)
+
+      if gone == [] do
+        st
+      else
+        known? = Enum.any?(sources, fn {_source, entry} -> entry.known? end)
+        before = resolved_state(st, resource, known?)
+        st = put_reported(st, resource, Map.new(kept))
+        reported_changed(st, resource, before, resolved_state(st, resource, known?))
+      end
+    end)
+  end
+
+  defp reported_changed(state, resource, before, after_) do
+    if before != after_ do
+      watchers = watchers_of(state, resource)
+      if map_size(watchers) > 0, do: push(watchers, resource, after_)
+    end
+
+    broadcast_panel(state, resource)
+    state
+  end
+
+  defp put_reported(state, resource, sources) when map_size(sources) == 0,
+    do: %{state | reported: Map.delete(state.reported, resource)}
+
+  defp put_reported(state, resource, sources),
+    do: %{state | reported: Map.put(state.reported, resource, sources)}
+
+  defp monitor_reporter(state, pid) do
+    if Map.has_key?(state.reporters, pid),
+      do: state,
+      else: %{state | reporters: Map.put(state.reporters, pid, Process.monitor(pid))}
+  end
+
+  # The most recent source's document wins, as the most recent publication does:
+  # composing two sources is no more this collection's job than composing two
+  # publishers.
+  defp reported_doc(state, resource) do
+    case Map.get(state.reported, resource) do
+      nil -> nil
+      sources -> sources |> Map.values() |> Enum.max_by(& &1.seq) |> Map.get(:doc)
     end
   end
 
-  # What the collection answers a watcher: the publication, else open for a
-  # registered presentity, else nil — which the facade completes in the caller's
-  # process with `unpublished_state/1`.
-  defp held_state(state, resource) do
-    case current_doc(state, resource) do
-      nil ->
-        if MapSet.member?(state.registered, resource), do: status_doc(resource, :open)
+  defp reported_known?(state, resource) do
+    state.reported
+    |> Map.get(resource, %{})
+    |> Enum.any?(fn {_source, entry} -> entry.known? end)
+  end
 
-      doc ->
-        doc
-    end
+  # ── a resource nobody publishes ─────────────────────────────────────────────
+
+  # The state of a resource, in order: its live publication, a reported state,
+  # open for a registered presentity, closed on a domain with a registrar for a
+  # presentity known to exist — `known?`, which the caller answers — else nil.
+  defp resolved_state(state, resource, known?) do
+    current_doc(state, resource) || reported_doc(state, resource) ||
+      status_doc(resource, registration_status(state, resource, known?))
+  end
+
+  # The state as the collection alone can tell it, for a resource known to exist
+  # since it published or registered.
+  defp known_state(state, resource), do: resolved_state(state, resource, true)
+
+  # What the collection answers a watcher: the publication, else a reported
+  # state, else open for a registered presentity, else nil — which the facade
+  # completes in the caller's process with `unpublished_state/1`.
+  defp held_state(state, resource) do
+    current_doc(state, resource) || reported_doc(state, resource) ||
+      if MapSet.member?(state.registered, resource), do: status_doc(resource, :open)
   end
 
   # The same, for a watcher that just subscribed: a presentity that neither
@@ -1018,7 +1195,8 @@ defmodule Kelix.Mod.Presence do
           do: user
 
     registered = for {user, ^domain, _event} <- state.registered, do: user
-    users = Enum.uniq(held ++ registered)
+    reported = for {{user, ^domain, _event}, _sources} <- state.reported, do: user
+    users = Enum.uniq(held ++ registered ++ reported)
 
     users
     |> Enum.sort()
@@ -1034,7 +1212,7 @@ defmodule Kelix.Mod.Presence do
         {_resource, pubs} <- match_user(state.states, domain, user),
         pub <- live_publications(pubs),
         do: render_publication(pub)
-      ) ++ registration_rows(state, domain, user)
+      ) ++ reported_rows(state, domain, user) ++ registration_rows(state, domain, user)
 
     watchers =
       for {_resource, subs} <- match_user(state.watchers, domain, user),
@@ -1105,6 +1283,25 @@ defmodule Kelix.Mod.Presence do
         event: event,
         source: "registrar",
         status: "open",
+        etag: nil,
+        expires: nil,
+        sender: nil,
+        content_type: nil
+      }
+    end
+  end
+
+  # A state another module reported, one row per source — `source` names it
+  # (`mcu`), as `registrar` names the registration's.
+  defp reported_rows(state, domain, user) do
+    for {{u, ^domain, event}, sources} <- state.reported,
+        user == :_ or u == user,
+        {source, entry} <- Enum.sort(sources) do
+      %{
+        presentity_uri: "sip:#{u}@#{domain}",
+        event: event,
+        source: to_string(source),
+        status: doc_field(entry.doc, :status),
         etag: nil,
         expires: nil,
         sender: nil,

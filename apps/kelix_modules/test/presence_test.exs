@@ -694,6 +694,30 @@ defmodule Kelix.Mod.PresenceTest do
       assert [_other] = Kelix.Mod.Registrar.bindings("weshwesh.eu", "magali.buu")
     end
 
+    # Withdrawing a report falls back on what the registrar side says — and a
+    # resource that only ever existed through the report has no state left.
+    test "a withdrawn report leaves a subscriber closed and a room with no state" do
+      reporter = reporter_process()
+
+      {:ok, _} =
+        Presence.watch_many(@domain, subscription("rls", "bob"), [
+          "sip:magali.buu@weshwesh.eu",
+          "sip:8001@weshwesh.eu"
+        ])
+
+      for user <- ["magali.buu", "8001"] do
+        room = SIP.Presence.Doc.new("sip:#{user}@weshwesh.eu", :open, activity: :busy)
+        :ok = report_from(reporter, user, room, :mcu, "weshwesh.eu")
+        assert_receive {:presence, :state, {^user, "weshwesh.eu", "presence"}, %{activity: :busy}}
+      end
+
+      send(reporter, :stop)
+
+      assert_receive {:presence, :state, @magali, doc}
+      assert status(doc) == :closed
+      assert_receive {:presence, :state, {"8001", "weshwesh.eu", "presence"}, nil}
+    end
+
     test "a registration is not pushed over a live publication" do
       pub = %{publication("magali.buu") | domain: "weshwesh.eu"}
       {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
@@ -718,6 +742,148 @@ defmodule Kelix.Mod.PresenceTest do
 
       assert_receive {:presence, :state, @magali, doc}
       assert status(doc) == :open
+    end
+  end
+
+  describe "report/4 — a state another module states" do
+    @room {"8001", @domain, @package}
+
+    defp busy(user), do: SIP.Presence.Doc.new("sip:#{user}@#{@domain}", :open, activity: :busy)
+
+    test "a reported state is what a watcher is handed, and state_of/2 does not see it" do
+      reporter = reporter_process()
+      :ok = report_from(reporter, "8001", doc("8001", :open))
+
+      assert {:ok, doc} = Presence.watch(@domain, subscription("8001", "alice"))
+      assert status(doc) == :open
+      # state_of/2 is what is PUBLISHED about a resource
+      assert Presence.state_of(@domain, {"8001", @package}) == nil
+    end
+
+    test "a change of the resolved state is pushed, and only then" do
+      reporter = reporter_process()
+      {:ok, nil} = Presence.watch(@domain, subscription("8001", "alice"))
+
+      :ok = report_from(reporter, "8001", doc("8001", :open))
+      assert_receive {:presence, :state, @room, doc}
+      assert status(doc) == :open
+
+      # the same thing said again is news to nobody
+      :ok = report_from(reporter, "8001", doc("8001", :open))
+      refute_receive {:presence, :state, @room, _doc}, 100
+
+      :ok = report_from(reporter, "8001", busy("8001"))
+      assert_receive {:presence, :state, @room, %SIP.Presence.Doc{activity: :busy}}
+
+      # withdrawn: no state left, on a domain with no registrar
+      :ok = report_from(reporter, "8001", nil)
+      assert_receive {:presence, :state, @room, nil}
+    end
+
+    test "the reporter's death withdraws every state it reported" do
+      reporter = reporter_process()
+      :ok = report_from(reporter, "8001", doc("8001", :open))
+      :ok = report_from(reporter, "8002", doc("8002", :closed))
+      {:ok, _} = Presence.watch(@domain, subscription("8001", "alice"))
+      {:ok, _} = Presence.watch(@domain, subscription("8002", "alice"))
+
+      send(reporter, :stop)
+
+      assert_receive {:presence, :state, {"8001", @domain, @package}, nil}
+      assert_receive {:presence, :state, {"8002", @domain, @package}, nil}
+      refute Presence.exists?(@domain, "8001")
+    end
+
+    test "a publication wins over a report, which comes back when it expires" do
+      stop_supervised!(Presence)
+      start_supervised!({Presence, [sweep_ms: 50]})
+
+      reporter = reporter_process()
+      :ok = report_from(reporter, "8001", busy("8001"))
+      {:ok, _} = Presence.watch(@domain, subscription("8001", "alice"))
+
+      published = doc("8001", :closed, "maintenance")
+      {:ok, _etag, _} = Presence.publish(@domain, publication("8001", doc: published, expires: 1))
+      assert_receive {:presence, :state, @room, ^published}
+
+      # under a live publication, a report changes nothing a watcher can see
+      :ok = report_from(reporter, "8001", doc("8001", :open))
+      refute_receive {:presence, :state, @room, _doc}, 100
+
+      assert_receive {:presence, :state, @room, doc}, 2_000
+      assert status(doc) == :open
+      assert doc.activity == nil
+    end
+
+    test "the most recent source wins, and withdrawing it brings the other back" do
+      mcu = reporter_process()
+      other = reporter_process()
+      {:ok, _} = Presence.watch(@domain, subscription("8001", "alice"))
+
+      :ok = report_from(mcu, "8001", doc("8001", :open), :mcu)
+      assert_receive {:presence, :state, @room, _open}
+      :ok = report_from(other, "8001", doc("8001", :closed), :other)
+      assert_receive {:presence, :state, @room, closed}
+      assert status(closed) == :closed
+
+      :ok = report_from(other, "8001", nil, :other)
+      assert_receive {:presence, :state, @room, open}
+      assert status(open) == :open
+    end
+
+    test "exists?/2 answers for a reported resource" do
+      refute Presence.exists?(@domain, "8001")
+
+      reporter = reporter_process()
+      :ok = report_from(reporter, "8001", doc("8001", :open))
+
+      assert Presence.exists?(@domain, "8001")
+      assert Presence.exists?(%SIP.Context{domain: @domain}, "8001")
+
+      :ok = report_from(reporter, "8001", nil)
+      refute Presence.exists?(@domain, "8001")
+    end
+
+    test "list, show and the live panel carry the reported state with its source" do
+      {:ok, []} = Presence.subscribe_presentities(@domain, self())
+      reporter = reporter_process()
+      :ok = report_from(reporter, "8001", busy("8001"))
+
+      assert_receive {:kelix_presence, @domain,
+                      {:upsert,
+                       %{
+                         aor: "8001",
+                         status: "open",
+                         activity: "busy",
+                         states: [%{source: "mcu"}]
+                       }}}
+
+      assert {:ok, [row]} = Presence.handle_control("list", %{"domain" => @domain})
+      assert %{presentity_uri: "sip:8001@example.com", source: "mcu", status: "open"} = row
+
+      assert {:ok, %{states: [^row]}} =
+               Presence.handle_control("show", %{"domain" => @domain, "aor" => "8001"})
+
+      :ok = report_from(reporter, "8001", nil)
+      assert_receive {:kelix_presence, @domain, {:remove, "8001"}}
+    end
+  end
+
+  describe "exists?/2 against the subscriber base" do
+    setup do
+      Application.put_env(:kelixip, :authdb_ha1_lookup, fn
+        "bob", @domain -> {:ok, "0123456789abcdef0123456789abcdef"}
+        _user, _realm -> :notfound
+      end)
+
+      on_exit(fn -> Application.delete_env(:kelixip, :authdb_ha1_lookup) end)
+    end
+
+    test "a subscriber exists, a user nobody provisioned does not" do
+      assert Presence.exists?(@domain, "bob")
+      assert Presence.exists?(@domain, "BOB")
+      refute Presence.exists?(@domain, "nobody")
+      refute Presence.exists?(@domain, nil)
     end
   end
 
@@ -818,6 +984,35 @@ defmodule Kelix.Mod.PresenceTest do
       assert {:error, msg} = Presence.validate_config(%{"call_timeout_ms" => 0})
       assert msg =~ "positive integer"
     end
+  end
+
+  # A stand-in reporting module: `report/4` monitors its caller, so the report
+  # has to come from a process whose death a test can decide.
+  defp reporter_process() do
+    pid =
+      spawn(fn ->
+        reporter_loop()
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    pid
+  end
+
+  defp reporter_loop() do
+    receive do
+      {:report, from, domain, user, source, doc} ->
+        send(from, {:reported, self(), Presence.report(domain, user, source, doc)})
+        reporter_loop()
+
+      :stop ->
+        :ok
+    end
+  end
+
+  defp report_from(reporter, user, doc, source \\ :mcu, domain \\ @domain) do
+    send(reporter, {:report, self(), domain, user, source, doc})
+    assert_receive {:reported, ^reporter, result}
+    result
   end
 
   # A stand-in watcher instance: it forwards what the fan-out pushes to it, so a

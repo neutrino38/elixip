@@ -21,6 +21,8 @@ deployment installs only what it uses — the core itself implements no SIP func
 | `kelixip-mod-registrar` | the [registrar](modules/registrar.md) / user-location module |
 | `kelixip-mod-auth_db` (RPM)<br>`kelixip-mod-auth-db` (deb) | the [database authentication](modules/auth_db.md) module |
 | `kelixip-mod-mcu` | the [conference mixer](modules/mcu.md) — the one module that also needs a **reachable media server** |
+| `kelixip-mod-presence` | the [presence](modules/presence.md) collection |
+| `kelixip-mod-mcu_presence` (RPM)<br>`kelixip-mod-mcu-presence` (deb) | [conference rooms as presentities](modules/mcu_presence.md) — requires `kelixip-mod-mcu` and `kelixip-mod-presence` |
 
 ```bash
 # Alma Linux 9

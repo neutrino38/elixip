@@ -96,13 +96,18 @@ an entry with no state is reported `terminated;reason=noresource`.
 The state notified for a resource is, in order:
 
 1. the live document its presentity PUBLISHed;
-2. when nothing live is published, **open** while one of the user's devices is
-   registered, as reported by the registrar script (see
-   [Registrations as presence](#registrations-as-presence));
-3. otherwise, on a domain with a `[domain.registrar]` block and for a user known
-   to `auth_db`: **closed**;
-4. otherwise no state (`nil`): a domain with no registrar, a domain this node does
+2. a state another module reported for it with `report/4` — a conference room,
+   reported by [`mcu_presence`](mcu_presence.md);
+3. **open** while one of the user's devices is registered, as reported by the
+   registrar script (see [Registrations as presence](#registrations-as-presence));
+4. on a domain with a `[domain.registrar]` block and for a user known to
+   `auth_db`: **closed**;
+5. otherwise no state (`nil`): a domain with no registrar, a domain this node does
    not serve, an unknown user, or an event package other than `presence`.
+
+A resource with no state ends its subscription: the reference scripts notify
+`terminated;reason=noresource`, when the SUBSCRIBE is accepted as well as when the
+state goes while it is watched.
 
 ### Registrations as presence
 
@@ -158,7 +163,7 @@ Per-domain block — `[[domain.presence]]` (activates the function for a domain)
 
 ```elixir
 import Kelix.Mod.Presence,
-  only: [publish: 2, watch: 2, watch_many: 3, unwatch: 1, state_of: 2]
+  only: [publish: 2, watch: 2, watch_many: 3, unwatch: 1, state_of: 2, exists?: 2]
 ```
 
 Each facade is non-blocking: a collection that is down answers `{:error, :down}`
@@ -248,6 +253,30 @@ None states open or closed: the module asks the registrar whether any device of
 the AOR still holds a registration, leaving out the ending dialog's own bindings
 (`Kelix.Mod.Registrar.registered?/3`).
 
+### `exists?/2`
+
+```elixir
+exists?(sip_ctx, aor :: String.t()) :: boolean
+```
+
+Whether the presentity `aor` (a user part) exists on the context's domain: a
+subscriber known to `auth_db`, or a resource a module reports a state for. The
+reference subscribe script answers **404** when it does not. A collection that is
+down answers `false`.
+
+### `report/4`
+
+```elixir
+report(domain, user, source :: atom, document | nil) :: :ok | {:error, :down | :timeout}
+```
+
+For a module, not a script: states the presence of `sip:<user>@<domain>` on the
+module's own authority, under the name `source`. `nil` withdraws it. The state
+ranks as described in [State of a resource](#state-of-a-resource), and the
+watchers are pushed when the resulting state changes.
+
+Every state a process reported is withdrawn when that process ends.
+
 ### `state_of/2`
 
 ```elixir
@@ -271,9 +300,10 @@ The columns are kamailio's, under kamailio's names — `presentity_uri`, `event`
 
 A state has a `source`: `publish` for a PUBLISH, `registrar` for a registration
 reported by the registrar script (see
-[Registrations as presence](#registrations-as-presence)). A `registrar` state is
-`open`, has no `etag`, `expires` nor `sender`, and is listed beside a live
-publication of the same presentity, which it does not override.
+[Registrations as presence](#registrations-as-presence)), and the name a module
+reported it under — `mcu` for a conference room. A `registrar` or module state has
+no `etag`, `expires` nor `sender`, and is listed beside a live publication of the
+same presentity, which it does not override.
 
 `remove` drops the published state, not the subscriptions: a watcher stays
 subscribed and is told there is no state left.
@@ -288,10 +318,11 @@ from its own state:
 ```
 
 When the last publication goes — a removal, or a lifetime that lapsed — the
-document pushed is the [state](#state-of-a-resource) that follows: open or closed
-from the registrations, or `nil` where they do not apply. A registration change
-on a watched, unpublished resource is pushed the same way. What to notify for `nil` is the script's decision; the reference script
-sends an explicitly closed state.
+document pushed is the [state](#state-of-a-resource) that follows: a reported
+state, open or closed from the registrations, or `nil` where none applies. A
+reported state or a registration that changes on a watched resource is pushed the
+same way. What to notify for `nil` is the script's decision; the reference
+scripts end the subscription with `noresource`.
 
 ### Live presence panel
 
@@ -307,8 +338,9 @@ and then pushes their changes to `pid` (kelescope's presence panel):
 row :: %{domain, aor, presentity_uri, status, activity, note, states, watchers}
 ```
 
-A presentity is listed while it holds a publication, a watcher or a reported
-registration; `states` then holds a `registrar` state. `status` is
+A presentity is listed while it holds a publication, a watcher, a reported
+registration or a state a module reported; `states` then holds a `registrar` or
+an `mcu` state. `status` is
 `"open"`, `"closed"` or `nil`, as a watcher of the `presence` package is told;
 `states` and `watchers` carry the columns of `list` and `watchers`.
 `unsubscribe_presence(pid, domain)` stops the pushes; a subscriber that dies is
@@ -342,8 +374,12 @@ state subscribe do
        ) do
     {:ok, sub} ->
       case Kelix.Mod.Presence.watch(sip_ctx, sub) do
+        {:ok, nil} ->
+          terminate_subscription(:noresource)
+          goto(ending, "200 + NOTIFY noresource")
+
         {:ok, doc} ->
-          notify(doc || SIP.Presence.Doc.new(sub.presentity_uri, :closed))
+          notify(doc)
           goto(subscribed, "200 + NOTIFY")
 
         {:error, reason} ->
@@ -362,9 +398,12 @@ Sending the state on when it changes:
 ```elixir
 state subscribed do
   on_events do
+    {:presence, :state, _resource, nil} ->
+      terminate_subscription(:noresource)
+      goto(ending, "state gone: noresource")
+
     {:presence, :state, _resource, doc} ->
-      sub = last_subscription()
-      notify(doc || SIP.Presence.Doc.new(sub.presentity_uri, :closed))
+      notify(doc)
       stay("state pushed")
   end
 end
