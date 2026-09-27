@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.6.0"
+# user_agent = "Kelixip/1.6.1"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 # max_message_size = 64000   # biggest inbound SIP message, in bytes; 513 beyond it
 

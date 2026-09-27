@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.6.0
-Release:        9%{?dist}
+Version:        1.6.1
+Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,10 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sun Sep 27 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.1-1
+- Released together with kelixip 1.6.1-1.
+- User-Agent is now Elixipp-1.6.1.
+
 * Sun Sep 27 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-9
 - A scenario state that raises tears down what it had set up: teardown now runs
   on the context the failing state had built, so both legs and the media session

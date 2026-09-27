@@ -1,3 +1,16 @@
+kelixip (1.6.1-1) stable; urgency=low
+
+  * kelescope shows presence live: Kelix.Control.subscribe_presence/2 returns a
+    domain's presentities, then pushes each change.
+  * kelictl presence list shows a presentity reported registered by
+    registrar-presence.exs, as a state of source "registrar"; list and show
+    gain the source and status columns.
+  * The registrar no longer renders an AOR's detail on every REGISTER when no
+    registrations panel is open on its domain.
+  * User-Agent is now Kelixip/1.6.1.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 27 Sep 2026 18:00:00 +0200
+
 kelixip (1.6.0-9) stable; urgency=low
 
   * A scenario state that raises tears down what it had set up: teardown now

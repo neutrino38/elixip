@@ -72,7 +72,7 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.6.0",
+            user_agent: "Kelixip/1.6.1",
             max_calls: nil,
             # The largest inbound SIP message this node accepts, in bytes. Past it a
             # request is answered 513 instead of being parsed. Read by the framework
