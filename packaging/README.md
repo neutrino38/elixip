@@ -11,6 +11,7 @@ RPM only so far) — from one `mix release` plus one `mix escript.build`:
 | `kelixip-mod-mcu` | `Kelix.Mod.Mcu` bytecode — the conference mixer, which also needs a reachable media server |
 | `kelixip-mod-presence` | `Kelix.Mod.Presence` bytecode — the presence collection, with its reference scripts |
 | `kelixip-mod-mcu_presence` / `kelixip-mod-mcu-presence` | `Kelix.Mod.McuPresence` bytecode — conference rooms as presentities; requires the two above |
+| `kelixip-mod-dialog_state` / `kelixip-mod-dialog-state` | `Kelix.Mod.DialogState` bytecode — the call occupancy of the served users (BLF, on-the-phone); requires `kelixip-mod-presence` |
 | `elixipp` | the test-tool escript (`/usr/bin/elixipp`) + `ELIXIPP.md`/`FSL.md` |
 
 Each module package carries **its own document** under `/usr/share/doc/<package>/`,

@@ -511,6 +511,42 @@ while its media server is lost. Its plan is
 The registrar keeps its own path (`registration_changed/1`); moving it onto
 `report/4` is possible, and not done.
 
+### Call occupancy
+
+Whether a user is on the phone is one fact read through three doors: a BLF key
+(`Event: dialog`, RFC 4235), the composite presence (`on-the-phone`), and the
+ACD's feed. `dialog_state` produces it; the build order is
+[dialog-state-plan.md](dialog-state-plan.md).
+
+**Invariant: a dialog is reported under a user only when a module proved its far
+end is that user.** A dialog does not know who is at the other end. Its `From` is
+a claim, and on the outbound leg of a B2BUA its Request-URI is a Contact. Two
+modules prove it, and they stamp the dialog (`SIP.Dialog.set_remote_aor/2`):
+
+| The leg | Who proves it | With what |
+|---|---|---|
+| inbound — a user is calling | `auth_db`, `SBB.authenticate` | the digest |
+| outbound — a user is called | `registrar`, `targets/2` | the leg's contacts are that user's bindings |
+
+A dialog nobody stamped reports nothing, so a trunk carrying our domain in its
+`From` lights no key, and a trunk-to-trunk node pays one field per dialog. Reading
+"a user of the domain" off a host part is the mistake this rule exists to prevent.
+
+A stamped dialog pushes its call state through `SIP.Dialog.Events`, read as RFC
+4235 reads it. The call is `terminated` when a BYE leaves or arrives, not when
+the BYE is answered (RFC 3261 §15.1.1). A challenge (401/407) on the creating
+INVITE is no refusal, and a 487 to our CANCEL is `cancelled`.
+
+`dialog_state` aggregates every dialog of a user into one document per package,
+since presence keeps one report per source: "latest wins" would drop a waiting
+call. On the `dialog` package, a user `auth_db` knows and who is on no call
+resolves to an empty document, not to no state — `noresource` would end the
+subscription of every idle phone at subscribe time.
+
+Neither `presence` nor the B2BUA depends on `dialog_state`. It holds the link, as
+`mcu_presence` does, and its package is named so the `Presence*` glob of the
+presence package does not take it.
+
 ## The data model is kamailio's
 
 ```sql

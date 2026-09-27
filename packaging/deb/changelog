@@ -11,6 +11,14 @@ kelixip (1.6.1-1) stable; urgency=low
     (open, busy when full, closed while its media server is lost).
   * presence-subscribe.exs answers noresource to a presentity with no state,
     instead of closed.
+  * BLF keys: the dialog event package (RFC 4235) is served, with Event: dialog
+    in a [[domain.presence]] block. New package kelixip-mod-dialog-state
+    reports each served user's calls to it, and on-the-phone to presence.
+  * presence-publish.exs answers 403 to a PUBLISH about another user's state,
+    and both presence scripts log whose state changed to what.
+  * A notifier whose script ends keeps retransmitting its final NOTIFY, and one
+    whose script dies sends it (deactivated) instead of leaving the watcher
+    subscribed.
   * User-Agent is now Kelixip/1.6.1.
 
  -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 27 Sep 2026 18:00:00 +0200

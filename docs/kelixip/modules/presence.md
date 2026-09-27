@@ -111,13 +111,20 @@ The state notified for a resource is, in order:
 
 1. the live document its presentity PUBLISHed;
 2. a state another module reported for it with `report/4` — a conference room,
-   reported by [`mcu_presence`](mcu_presence.md);
+   reported by [`mcu_presence`](mcu_presence.md), or a user on the phone, reported
+   by [`dialog_state`](dialog_state.md);
 3. **open** while one of the user's devices is registered, as reported by the
    registrar script (see [Registrations as presence](#registrations-as-presence));
 4. on a domain with a `[domain.registrar]` block and for a user known to
    `auth_db`: **closed**;
 5. otherwise no state (`nil`): a domain with no registrar, a domain this node does
-   not serve, an unknown user, or an event package other than `presence`.
+   not serve, or an unknown user.
+
+On the `dialog` package (RFC 4235, a BLF key) the registration says nothing about
+a call, and the list is shorter: the state a module reported — the user's calls,
+from [`dialog_state`](dialog_state.md) — then, for a user `auth_db` knows, an
+**empty** dialog list, then no state. An idle phone is "no call", not
+`noresource`: the key stays subscribed. Any other package has no state.
 
 A resource with no state ends its subscription: the reference scripts notify
 `terminated;reason=noresource`, when the SUBSCRIBE is accepted as well as when the
@@ -289,14 +296,17 @@ the Request-URI's user part against the identity `assert_identity/1` recorded,
 case-insensitively. `false` when nothing was authenticated. What
 `presence-publish.exs` asks before it publishes anything.
 
-### `report/4`
+### `report/4`, `report/5`
 
 ```elixir
 report(domain, user, source :: atom, document | nil) :: :ok | {:error, :down | :timeout}
+report(domain, user, source :: atom, document | nil, package) :: :ok | {:error, :down | :timeout}
 ```
 
-For a module, not a script: states the presence of `sip:<user>@<domain>` on the
-module's own authority, under the name `source`. `nil` withdraws it. The state
+For a module, not a script: states the state of `sip:<user>@<domain>` on the
+module's own authority, under the name `source`. `report/4` is the `presence`
+package; `report/5` names the package (`"dialog"` takes a `%SIP.DialogInfo.Doc{}`).
+`nil` withdraws it. The state
 ranks as described in [State of a resource](#state-of-a-resource), and the
 watchers are pushed when the resulting state changes.
 

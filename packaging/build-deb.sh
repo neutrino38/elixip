@@ -169,6 +169,7 @@ for toml in config domains; do
       -e 's,dnf install,apt install,g' \
       -e 's,kelixip-mod-auth_db,kelixip-mod-auth-db,g' \
       -e 's,kelixip-mod-mcu_presence,kelixip-mod-mcu-presence,g' \
+      -e 's,kelixip-mod-dialog_state,kelixip-mod-dialog-state,g' \
       "$stage/config/$toml.toml" > "$root/etc/kelixip/$toml.toml"
   chmod 0640 "$root/etc/kelixip/$toml.toml"
 done
@@ -256,6 +257,8 @@ build_module kelixip-mod-mcu       'Elixir.Kelix.Mod.Mcu.beam Elixir.Kelix.Mod.M
 build_module kelixip-mod-presence  'Elixir.Kelix.Mod.Presence*.beam'  "$DEBDIR/control-mod-presence.in"  'presence.md' '*presence*.exs'
 build_module kelixip-mod-mcu-presence 'Elixir.Kelix.Mod.McuPresence*.beam' \
   "$DEBDIR/control-mod-mcu-presence.in" 'mcu_presence.md'
+build_module kelixip-mod-dialog-state 'Elixir.Kelix.Mod.DialogState*.beam' \
+  "$DEBDIR/control-mod-dialog-state.in" 'dialog_state.md'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

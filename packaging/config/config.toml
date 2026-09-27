@@ -200,6 +200,12 @@ port = 9095
 # [module.mcu] and [module.presence] blocks: without either, it refuses to start.
 #domains = ["example.com"]          # absent: every domain the mcu holds rooms on
 
+#[module.dialog_state]              # dnf install kelixip-mod-dialog_state
+# The calls of each served user, reported to presence: a BLF key (Event: dialog)
+# lights while the user rings or talks, presence shows on-the-phone while a call
+# is up. Needs the [module.presence] block: without it, it refuses to start.
+#domains = ["example.com"]          # absent: every served domain
+
 # The media servers, declared here and nowhere else: point-to-point calls take one
 # per call (round-robin + health-check), and the mcu module opens one control channel
 # per `mendooze` entry. Not needed for a registrar-only node.
