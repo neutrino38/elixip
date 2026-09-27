@@ -101,7 +101,7 @@ defmodule SIP.EventPackage do
   # The packages compiled into this library (design, *Scope for v1*). A kelixip
   # module does not register itself: it would be consuming an API meant for
   # third parties.
-  @builtins [SIP.EventPackage.Presence]
+  @builtins [SIP.EventPackage.Presence, SIP.EventPackage.Dialog]
 
   @doc """
   Add `module` to the table under the name it answers to `name/0`.

@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<dialog-info xmlns="urn:ietf:params:xml:ns:dialog-info"
+             version="2" state="partial"
+             entity="sip:alice@example.com">
+  <dialog id="as7d900as8" call-id="a84b4c76e66710"
+          local-tag="1928301774" remote-tag="456887766"
+          direction="initiator">
+    <state event="remote-bye">terminated</state>
+  </dialog>
+</dialog-info>
