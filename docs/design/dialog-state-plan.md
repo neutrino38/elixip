@@ -29,9 +29,9 @@ The fact is proven in exactly two places, and nowhere else:
 | outbound — a UA of the domain is called | `Kelix.Mod.Registrar` | `targets/2` built the `%SIP.B2bua.Peer{}` from the AOR's bindings |
 
 So the module that proves it **stamps the dialog**, and a dialog carrying no stamp
-reports nothing. `direct-call.exs`, which authenticates nobody, lights no key —
-correctly. `mcu.exs` stamps its caller, and its callee is a room `mcu_presence`
-already reports.
+reports nothing. `direct-call.exs`, which authenticates nobody, stamps only the
+leg it places: Bob's key lights, Alice's does not — correctly. `mcu.exs` stamps
+its caller, and its callee is a room `mcu_presence` already reports.
 
 ## 2. What a reader sees
 
@@ -141,7 +141,7 @@ No script changes. `config(uses_modules: …)` is untouched.
 Proved by: `apps/kelix_modules` — the authenticate block stamps the inbound
 dialog; `targets/2` returns the AOR; the reference `direct-call-with-auth.exs`
 run over the mockup produces a stamped leg on each side, and `direct-call.exs`
-none.
+an outbound one only.
 
 ### DS4 — presence: a report per package
 

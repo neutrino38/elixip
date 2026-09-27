@@ -512,6 +512,15 @@ defmodule Kelix.Mod.RegistrarTest do
       assert uri.tp_pid == flow
     end
 
+    # The peer says WHOSE contacts these are: the leg dialled with it is stamped
+    # as that AOR's (dialog-state-plan.md §1), in the form the store keys it.
+    test "names the AOR the contacts belong to, lower-cased" do
+      Registrar.save(register("alice", "10.0.0.9"), @domain)
+
+      assert {:ok, %Peer{aor: aor}} = Registrar.targets(@domain, invite("ALICE"))
+      assert aor == %SIP.Uri{scheme: "sip:", userpart: "alice", domain: @domain}
+    end
+
     # Both stated the same preference (none), so they are ONE group: RFC 3261
     # §16.6 rings equal-q contacts together, which is a subscriber's desk phone
     # and softphone ringing at the same time rather than one after the other.

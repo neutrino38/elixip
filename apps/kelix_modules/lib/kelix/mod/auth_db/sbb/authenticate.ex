@@ -21,7 +21,10 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
   serving, and composes the SIP each verdict means:
 
     * `{:ok, identity}` — records the identity (`assert_identity/1`, so the leg
-      the host places next carries a `P-Asserted-Identity`) and returns;
+      the host places next carries a `P-Asserted-Identity`), stamps the dialog
+      with it (`SIP.Dialog.set_remote_aor/2`: the digest is what proves the far
+      end of this leg to be that served AOR, docs/design/dialog-state-plan.md
+      §1) and returns;
     * `{:requireauth, stale}` — challenges and waits for the request to come back
       with credentials, on the same dialog: same Call-ID, a new CSeq, no To tag.
       An INVITE's ACK never reaches us — the server transaction absorbs the ACK of
@@ -102,6 +105,7 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
       {:ok, identity} ->
         SIP.Scenario.Monitor.note_account(identity.user)
         assert_identity(identity)
+        SIP.Dialog.set_remote_aor(ctx_get(:dialogpid), ctx_get(:asserted_identity))
         sbb_return({:auth, :authenticated, %{user: identity.user, realm: realm}})
 
       # `stale` tells the client its nonce merely aged, so it replays without

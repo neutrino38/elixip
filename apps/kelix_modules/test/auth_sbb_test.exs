@@ -27,6 +27,13 @@ defmodule Kelix.AuthSbbTest do
       {:reply, :ok, test}
     end
 
+    # The stamp of dialog-state-plan.md DS3: who the digest proved the far end
+    # of this leg to be.
+    def handle_call({:set_remote_aor, aor}, _from, test) do
+      send(test, {:stamped, aor})
+      {:reply, :ok, test}
+    end
+
     def handle_call(_msg, _from, test), do: {:reply, :ok, test}
     def handle_info(_msg, test), do: {:noreply, test}
   end
@@ -207,6 +214,7 @@ defmodule Kelix.AuthSbbTest do
     test "credentials that check out end the block, and record the identity" do
       {pid, dialog} = start_gate()
       challenge = challenge_received!()
+      refute_received {:stamped, _}
       resubmit(pid, dialog, credentials(challenge), 2)
 
       # The re-submitted INVITE gets its own 100: it is a new transaction.
@@ -222,6 +230,10 @@ defmodule Kelix.AuthSbbTest do
                userpart: @caller,
                domain: @domain
              }
+
+      # …and the dialog is stamped with it — the proof that its far end is a
+      # user of the domain, which is what its call state is reported under.
+      assert_received {:stamped, ^asserted}
     end
 
     test "a wrong password is answered 403 and the block keeps waiting" do
@@ -237,6 +249,8 @@ defmodule Kelix.AuthSbbTest do
       # One request's verdict is not the end of the conversation: the block is
       # still there, and a client that fixes its credentials is served.
       refute_receive {:outcome, _, _, _}, 300
+      # A refused digest proves nothing: the dialog stays unstamped.
+      refute_received {:stamped, _}
 
       resubmit(pid, dialog, credentials(challenge, nc: "00000002"), 3)
       assert_receive {:outcome, :authenticated, _data, _asserted}, 5_000
