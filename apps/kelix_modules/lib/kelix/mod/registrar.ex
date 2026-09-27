@@ -1116,19 +1116,20 @@ defmodule Kelix.Mod.Registrar do
   # registrar's hot path (every REGISTER), so a domain nobody is watching must
   # cost nothing beyond the `count_subs` push above.
   defp broadcast_detail(state, domain, aor) do
-    case Map.get(state.detail_subs, domain, MapSet.new()) do
-      subs when map_size(subs) == 0 ->
-        :ok
+    subs = Map.get(state.detail_subs, domain, MapSet.new())
 
-      subs ->
-        msg =
-          case live_contacts(state, domain, aor) do
-            [] -> {:remove, aor}
-            contacts -> {:upsert, render_registration(domain, aor, contacts)}
-          end
+    # `MapSet.size/1`: a MapSet is a struct, and `map_size/1` of it is never 0.
+    if MapSet.size(subs) == 0 do
+      :ok
+    else
+      msg =
+        case live_contacts(state, domain, aor) do
+          [] -> {:remove, aor}
+          contacts -> {:upsert, render_registration(domain, aor, contacts)}
+        end
 
-        for pid <- subs, do: send(pid, {:kelix_registrations, domain, msg})
-        :ok
+      for pid <- subs, do: send(pid, {:kelix_registrations, domain, msg})
+      :ok
     end
   end
 

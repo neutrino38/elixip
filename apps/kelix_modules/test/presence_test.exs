@@ -534,6 +534,58 @@ defmodule Kelix.Mod.PresenceTest do
       assert status(docs["sip:magali.buu@weshwesh.eu"]) == :closed
     end
 
+    # `kelictl presence list weshwesh.eu` answered `(none)` for a registered
+    # subscriber its watchers were told was open.
+    test "list and show carry a reported registration, unwatched and unpublished" do
+      :registered = register(device("10.0.0.9"))
+
+      assert {:ok, [row]} = Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
+
+      assert %{
+               presentity_uri: "sip:magali.buu@weshwesh.eu",
+               event: "presence",
+               source: "registrar",
+               status: "open",
+               etag: nil
+             } = row
+
+      assert {:ok, %{states: [^row], watchers: []}} =
+               Presence.handle_control("show", %{"domain" => "weshwesh.eu", "aor" => "magali.buu"})
+    end
+
+    test "the registration row goes with the last device" do
+      phone = device("10.0.0.9")
+      :registered = register(phone)
+      registration_ended(phone)
+
+      assert {:ok, []} = Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
+    end
+
+    test "the live panel shows a registration, and its end" do
+      {:ok, []} = Presence.subscribe_presentities("weshwesh.eu", self())
+
+      phone = device("10.0.0.9")
+      :registered = register(phone)
+
+      assert_receive {:kelix_presence, "weshwesh.eu",
+                      {:upsert,
+                       %{aor: "magali.buu", status: "open", states: [%{source: "registrar"}]}}}
+
+      registration_ended(phone)
+      assert_receive {:kelix_presence, "weshwesh.eu", {:remove, "magali.buu"}}
+    end
+
+    test "a publication and a registration are both listed" do
+      :registered = register(device("10.0.0.9"))
+      pub = %{publication("magali.buu", doc: doc("magali.buu", :closed)) | domain: "weshwesh.eu"}
+      {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
+
+      assert {:ok, rows} = Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
+
+      assert [%{source: "publish", status: "closed"}, %{source: "registrar", status: "open"}] =
+               Enum.sort_by(rows, & &1.source)
+    end
+
     test "a live publication wins over the registration" do
       :registered = register(device("10.0.0.9"))
 

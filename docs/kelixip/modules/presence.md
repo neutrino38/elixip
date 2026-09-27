@@ -261,13 +261,19 @@ subscribing.
 
 | Command | REST | Description |
 |---|---|---|
-| `kelictl presence list domain=D` | `GET /modules/presence/presentities` | Published states, one row per entity-tag |
+| `kelictl presence list domain=D` | `GET /modules/presence/presentities` | States held: one row per entity-tag, one per reported registration |
 | `kelictl presence show domain=D aor=bob` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
 | `kelictl presence watchers domain=D aor=bob` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
 | `kelictl presence remove domain=D aor=bob` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
 
 The columns are kamailio's, under kamailio's names — `presentity_uri`, `event`,
 `etag`, `expires`, `status`, `callid`.
+
+A state has a `source`: `publish` for a PUBLISH, `registrar` for a registration
+reported by the registrar script (see
+[Registrations as presence](#registrations-as-presence)). A `registrar` state is
+`open`, has no `etag`, `expires` nor `sender`, and is listed beside a live
+publication of the same presentity, which it does not override.
 
 `remove` drops the published state, not the subscriptions: a watcher stays
 subscribed and is told there is no state left.
@@ -286,6 +292,27 @@ document pushed is the [state](#state-of-a-resource) that follows: open or close
 from the registrations, or `nil` where they do not apply. A registration change
 on a watched, unpublished resource is pushed the same way. What to notify for `nil` is the script's decision; the reference script
 sends an explicitly closed state.
+
+### Live presence panel
+
+`Kelix.Control.subscribe_presence(pid, domain)` returns a domain's presentities
+and then pushes their changes to `pid` (kelescope's presence panel):
+
+```elixir
+{:ok, %{domain: "example.com", presentities: [row]}}
+
+{:kelix_presence, domain, {:upsert, row}}
+{:kelix_presence, domain, {:remove, aor}}
+
+row :: %{domain, aor, presentity_uri, status, activity, note, states, watchers}
+```
+
+A presentity is listed while it holds a publication, a watcher or a reported
+registration; `states` then holds a `registrar` state. `status` is
+`"open"`, `"closed"` or `nil`, as a watcher of the `presence` package is told;
+`states` and `watchers` carry the columns of `list` and `watchers`.
+`unsubscribe_presence(pid, domain)` stops the pushes; a subscriber that dies is
+dropped. Without the presence module, the list is empty.
 
 ## Examples
 

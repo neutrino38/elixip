@@ -156,6 +156,53 @@ defmodule Kelix.Control do
   end
 
   @doc """
+  Subscribe `pid` to one domain's presentities as they change (kelescope's live
+  presence panel) — the model of `subscribe_registrations/2`, answered by the
+  presence module, and an empty list when it is not loaded: nothing can be
+  published nor watched without it, so nothing is missed.
+
+  `domain` is matched the way inbound traffic is — name and aliases,
+  case-insensitively. Returns `%{domain, presentities}`, one row per AOR the
+  domain holds a publication or a watcher for:
+
+      %{domain, aor, presentity_uri, status, activity, note, states, watchers}
+
+  `status` is `"open"`, `"closed"` or `nil`, as a watcher of the `presence`
+  package would be told; `states` and `watchers` are the rows `kelictl presence
+  list` and `kelictl presence watchers` show. `pid` then receives
+  `{:kelix_presence, domain, {:upsert, row}}` (`domain` the canonical name) each
+  time a presentity changes, and `{:kelix_presence, domain, {:remove, aor}}` when
+  nothing is published about it and nobody watches it any more — no polling
+  needed.
+  """
+  @spec subscribe_presence(pid(), String.t()) :: {:ok, map} | {:error, :not_found}
+  def subscribe_presence(pid, domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain) do
+      rows =
+        case presence_facade(:subscribe_presentities, [name, pid], {:ok, []}) do
+          {:ok, rows} when is_list(rows) -> rows
+          _down -> []
+        end
+
+      {:ok, %{domain: name, presentities: rows}}
+    end
+  end
+
+  @doc "Stop a subscription started by `subscribe_presence/2`."
+  @spec unsubscribe_presence(pid(), String.t()) :: :ok
+  def unsubscribe_presence(pid, domain) when is_binary(domain) do
+    case resolve_domain(domain) do
+      {:ok, name} -> presence_facade(:unsubscribe_presentities, [name, pid], :ok)
+      {:error, _} -> :ok
+    end
+
+    :ok
+  end
+
+  defp presence_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("presence", fun, args, default) end, default)
+
+  @doc """
   Subscribe `pid` to the conference list as it changes (kelescope's conferencing
   page). Returns the current list;
   `pid` then receives `{:kelix_conferences, {:upsert, conf_row}}` and
