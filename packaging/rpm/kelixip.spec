@@ -32,7 +32,7 @@ Version:        1.6.0
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        8%{?dist}
+Release:        9%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -280,6 +280,13 @@ fi
 %{_datadir}/%{name}/registrar-presence.exs
 
 %changelog
+* Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-9
+- A scenario state that raises tears down what it had set up: teardown now runs
+  on the context the failing state had built, so both legs and the media session
+  are released and the caller can hang up.
+- A dialog monitors its application and ends with it, hung up first when there is
+  a session to end, instead of answering 503 to every later in-dialog request.
+
 * Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-8
 - Presence now follows real registrations. The registrar-presence.exs script read
   the REGISTER's To as a parsed URI, which only a test request carries: presence

@@ -1,3 +1,14 @@
+kelixip (1.6.0-9) stable; urgency=low
+
+  * A scenario state that raises tears down what it had set up: teardown now
+    runs on the context the failing state had built, so both legs and the media
+    session are released and the caller can hang up.
+  * A dialog monitors its application and ends with it, hung up first when there
+    is a session to end, instead of answering 503 to every later in-dialog
+    request.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 27 Sep 2026 12:00:00 +0200
+
 kelixip (1.6.0-8) stable; urgency=low
 
   * Presence now follows real registrations. The registrar-presence.exs script

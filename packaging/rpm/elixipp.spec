@@ -10,7 +10,7 @@
 
 Name:           elixipp
 Version:        1.6.0
-Release:        8%{?dist}
+Release:        9%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,16 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sun Sep 27 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-9
+- A scenario state that raises tears down what it had set up: teardown now runs
+  on the context the failing state had built, so both legs and the media session
+  are released and the caller can hang up.
+- A dialog monitors its application and ends with it, hung up first when there is
+  a session to end, instead of answering 503 to every later in-dialog request.
+- elixipp: the live monitor display is corrected, and a scenario may play and
+  record on the same leg at once.
+- elixipp: WebSocket text client leg (text_transport: :ws).
+
 * Sat Sep 26 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-8
 - Rebuild, released together with kelixip 1.6.0-8 (a REGISTER dialog ends
   with its registrar session).
