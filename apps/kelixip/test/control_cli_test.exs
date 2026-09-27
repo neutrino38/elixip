@@ -10,6 +10,7 @@ defmodule Kelix.Control.CLITest do
   test "status renders key lines, exit 0" do
     {0, out} = run(["status"])
     assert out =~ "node:"
+    assert out =~ "version:         #{Application.spec(:kelixip, :vsn)}"
     assert out =~ "active calls:"
     assert out =~ "media pool:"
   end
