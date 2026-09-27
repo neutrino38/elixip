@@ -653,6 +653,18 @@ defmodule SIP.Dialog do
     end
   end
 
+  @doc """
+  Every dialog process this node holds, once each — what a module resyncing
+  against the live dialogs walks, `info/1` on each (a REGISTER dialog is
+  registered twice, under its triplet and under its registration).
+  """
+  @spec pids() :: [pid()]
+  def pids() do
+    Registry.SIPDialog
+    |> Registry.select([{{:_, :"$1", :_}, [], [:"$1"]}])
+    |> Enum.uniq()
+  end
+
   # check_nonce/2 is gone with the per-dialog nonce map: a nonce carries its own
   # proof now, so validate it directly with SIP.Auth.Nonce.validate/3 — no dialog
   # round trip, and it also works across dialogs/nodes (design §7.5).

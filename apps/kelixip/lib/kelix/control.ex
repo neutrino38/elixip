@@ -204,6 +204,45 @@ defmodule Kelix.Control do
     do: safe(fn -> Kelix.ModuleRegistry.facade("presence", fun, args, default) end, default)
 
   @doc """
+  Subscribe `pid` to the live calls of a served domain's users, as the
+  `dialog_state` module follows them (docs/design/dialog-state-plan.md §2 — the
+  ACD's feed). Returns the rows as they stand; `pid` then receives
+  `{:kelix_dialogs, domain, {:upsert, row}}` on every transition of a dialog and
+  `{:kelix_dialogs, domain, {:remove, id}}` once it ended, no polling needed.
+
+  `owner` is the process holding the subscription — monitor it and re-subscribe
+  on `:DOWN`, or a module restart stops the push silently. `owner: nil` with an
+  empty list is the answer when the module is not loaded.
+  """
+  @spec subscribe_dialogs(pid(), String.t()) ::
+          {:ok, %{domain: String.t(), owner: pid() | nil, dialogs: [map]}} | {:error, :not_found}
+  def subscribe_dialogs(pid, domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain) do
+      case dialog_state_facade(:subscribe_dialogs, [name, pid], {:ok, %{owner: nil, dialogs: []}}) do
+        {:ok, %{owner: owner, dialogs: rows}} ->
+          {:ok, %{domain: name, owner: owner, dialogs: rows}}
+
+        _down ->
+          {:ok, %{domain: name, owner: nil, dialogs: []}}
+      end
+    end
+  end
+
+  @doc "Stop a subscription started by `subscribe_dialogs/2`."
+  @spec unsubscribe_dialogs(pid(), String.t()) :: :ok
+  def unsubscribe_dialogs(pid, domain) when is_binary(domain) do
+    case resolve_domain(domain) do
+      {:ok, name} -> dialog_state_facade(:unsubscribe_dialogs, [name, pid], :ok)
+      {:error, _} -> :ok
+    end
+
+    :ok
+  end
+
+  defp dialog_state_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("dialog_state", fun, args, default) end, default)
+
+  @doc """
   Subscribe `pid` to the conference list as it changes (kelescope's conferencing
   page). Returns the current list;
   `pid` then receives `{:kelix_conferences, {:upsert, conf_row}}` and

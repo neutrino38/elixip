@@ -43,6 +43,7 @@ on every transition:
   id: "a84b4c76e66710",            # Call-ID
   direction: :initiator | :recipient,   # from the AOR's point of view (RFC 4235)
   state: :trying | :proceeding | :early | :confirmed | :terminated,
+  event: nil | :local_bye | :remote_bye | :cancelled | :rejected | :timeout | :error,
   remote: "sip:alice@example.com", # the other party, as the request names it
   since: ~U[…]}
 ```
@@ -69,7 +70,7 @@ state, and when the report is withdrawn the resolution falls back to `open`.
 | 6 | Neither `presence` nor the B2BUA depends on the new module; `dialog_state` holds the link, as `mcu_presence` does | both halves are optional packages; a node with calls and no presence, or the reverse, must not change |
 | 7 | An AOR `auth_db` knows and no dialog resolves, on the `dialog` package, to an **empty** document | the reverse — `noresource` — would end the BLF subscription of every idle phone at subscribe time |
 | 8 | Module name `dialog_state` (`Kelix.Mod.DialogState`) | the RPM `%files` and deb globs match `Elixir.Kelix.Mod.Presence*.beam`: a module named `Presence…` is swallowed by the presence package (the `Mcu*`/`McuPresence` trap, `build-deb.sh:250`) |
-| 9 | On restart the module resyncs from `SIP.Dialog.dump/0` + `SIP.Dialog.info/1`, and monitors each stamped dialog | a dialog that crashes emits no `terminated`; a module that restarts has missed every event before it |
+| 9 | On restart the module resyncs from `SIP.Dialog.pids/0` + `SIP.Dialog.info/1`, and monitors each stamped dialog | a dialog that crashes emits no `terminated`; a module that restarts has missed every event before it |
 
 ## 4. Phases
 
@@ -80,7 +81,7 @@ state, and when the report is withdrawn the resolution falls back to `open`.
 ```elixir
 SIP.Dialog.set_remote_aor(pid, %SIP.Uri{} = aor) :: :ok
 SIP.Dialog.info(pid) :: %{callid, fromtag, totag, direction, state, remote_aor, msg, since}
-SIP.Dialog.subscribe_events() :: :ok         # Registry.register on the caller
+SIP.Dialog.Events.subscribe() :: :ok         # Registry.register on the caller
 ```
 
 Setting the stamp dispatches the dialog's **current** state at once: the inbound
@@ -170,7 +171,9 @@ on withdrawal, back to the empty document; `presence-subscribe.exs` accepting
 
 `Kelix.Mod.DialogState`: a GenServer, no SIP function, no script.
 
-- at start, `SIP.Dialog.subscribe_events/0`, then the resync of decision 9;
+- at start, `SIP.Dialog.Events.subscribe/0`, then the resync of decision 9 — in
+  that order, so a transition between the two waits in the mailbox, and a call
+  state that only goes forward drops the one the snapshot already passed;
 - each `{:sip_dialog, pid, ev}` on a served domain updates `dialogs` (`pid =>
   row`) and `by_aor` (`aor => MapSet of pid`); a `:DOWN` on a monitored dialog
   is a `terminated` with event `error`;
@@ -183,7 +186,8 @@ on withdrawal, back to the empty document; `presence-subscribe.exs` accepting
 - it monitors the presence module: a presence restart is a full re-report; while
   presence is down it keeps its state and retries, as `mcu_presence` does;
 - push for the ACD: `subscribe_dialogs(domain, pid) :: {:ok, %{owner, dialogs}}`,
-  then `{:kelix_dialogs, domain, {:upsert, row} | {:remove, id}}`, exposed by
+  then `{:kelix_dialogs, domain, {:upsert, row} | {:remove, id}}` — the last
+  upsert of a dialog is its `terminated` row, with its `event`, exposed by
   `Kelix.Control.subscribe_dialogs/2` through the module facade, as
   `subscribe_conferences` is.
 
