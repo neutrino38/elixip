@@ -14,6 +14,20 @@ and a PUBLISH are challenged with a **401**, in the realm of the served domain,
 through `Kelix.Mod.AuthDb` — so they need `kelixip-mod-auth_db` installed and a
 `[module.auth_db]` block. A refresh is challenged like the first request.
 
+A user publishes their **own** state only. `presence-publish.exs` answers **403**
+to a PUBLISH whose presentity is not the user the digest proved: Alice holding a
+valid password does not make her the authority on Bob's state. The presentity is
+the Request-URI's user part (RFC 3903 §4.1).
+
+Both scripts log one line per state change: the PUBLISH names the presentity, the
+new state and the entity-tag; the NOTIFY names the watcher, the presentity, the
+package and the state sent.
+
+```
+PUBLISH presence for sip:bob@example.com: new: open, on-the-phone (etag 3f2a…, 3600s)
+NOTIFY presence to sip:alice@example.com about sip:bob@example.com: open, on-the-phone
+```
+
 Its records are kamailio's `presentity` and `active_watchers` rows, held in
 memory. Nothing survives a restart: a dialog cannot be resurrected, so a watcher
 re-subscribes and a publisher re-publishes.
@@ -163,7 +177,7 @@ Per-domain block — `[[domain.presence]]` (activates the function for a domain)
 
 ```elixir
 import Kelix.Mod.Presence,
-  only: [publish: 2, watch: 2, watch_many: 3, unwatch: 1, state_of: 2, exists?: 2]
+  only: [publish: 2, watch: 2, watch_many: 3, unwatch: 1, state_of: 2, exists?: 2, own_state?: 1]
 ```
 
 Each facade is non-blocking: a collection that is down answers `{:error, :down}`
@@ -263,6 +277,17 @@ Whether the presentity `aor` (a user part) exists on the context's domain: a
 subscriber known to `auth_db`, or a resource a module reports a state for. The
 reference subscribe script answers **404** when it does not. A collection that is
 down answers `false`.
+
+### `own_state?/1`
+
+```elixir
+own_state?(sip_ctx) :: boolean
+```
+
+Whether the PUBLISH the instance serves is about the user its digest proved —
+the Request-URI's user part against the identity `assert_identity/1` recorded,
+case-insensitively. `false` when nothing was authenticated. What
+`presence-publish.exs` asks before it publishes anything.
 
 ### `report/4`
 
@@ -418,7 +443,7 @@ state publish do
       case Kelix.Mod.Presence.publish(sip_ctx, pub) do
         {:ok, etag, expires} ->
           reply_publish(200, etag: etag, expires: expires)
-          scenario_success("published (#{expires}s)")
+          scenario_success("published #{SIP.Publication.presentity_uri(pub)} (#{expires}s)")
 
         {:error, 412} ->
           reply_publish(412, "Conditional Request Failed")

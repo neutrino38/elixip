@@ -135,6 +135,11 @@ defmodule SIP.Subscription do
   def key(%__MODULE__{} = sub),
     do: {sub.callid, sub.to_tag, sub.from_tag, sub.event, sub.event_id}
 
+  @doc "The watcher as `sip:user@domain`, `nil` when the SUBSCRIBE named none."
+  @spec watcher_uri(t()) :: binary() | nil
+  def watcher_uri(%__MODULE__{watcher_username: nil}), do: nil
+  def watcher_uri(%__MODULE__{watcher_username: u, watcher_domain: d}), do: "sip:#{u}@#{d}"
+
   @doc "kamailio's `status` integer, read as an atom. An unknown value reads `:terminated`."
   @spec status(t() | non_neg_integer()) ::
           :active | :pending | :terminated | :waiting | :polite_block

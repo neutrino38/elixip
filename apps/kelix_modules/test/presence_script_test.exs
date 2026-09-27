@@ -248,17 +248,48 @@ defmodule Kelix.PresenceScriptTest do
       assert Presence.presentities(@domain) == []
     end
 
-    # bob is provisioned and proves it; the presentity he publishes about is not.
-    # The sender being someone else is the only way to reach this refusal now —
-    # a PUBLISH whose sender is unknown never gets past the digest.
-    test "a presentity nobody provisioned is 404", %{publish: m} do
+    # alice is provisioned and proves it: that makes her the authority on HER
+    # state, not on bob's.
+    test "a PUBLISH about someone else is 403, and nothing is published", %{publish: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = publish(user: @presentity, sender: @watcher)
+      pid = spawn_instance(m, dialog, req)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          submit(pid, dialog, req)
+          assert_receive {:replied, 403, "Forbidden", _, _}, 1000
+        end)
+
+      assert log =~ "PUBLISH for sip:bob@example.com by sip:alice@example.com refused"
+      assert Presence.presentities(@domain) == []
+    end
+
+    test "so is a PUBLISH about a user nobody provisioned", %{publish: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       req = publish(user: "nobody", sender: @presentity)
       pid = spawn_instance(m, dialog, req)
 
       submit(pid, dialog, req)
-      assert_receive {:replied, 404, _, _, _}, 1000
+      assert_receive {:replied, 403, _, _, _}, 1000
       assert Presence.presentities(@domain) == []
+    end
+
+    # The journal says whose state changed, and to what.
+    test "the log names the presentity, the new state and the tag", %{publish: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, publish())
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          submit(pid, dialog, publish())
+          assert_receive {:replied, 200, _, fields, _}, 1000
+          send(self(), {:etag, fields[:sipetag]})
+          Process.sleep(50)
+        end)
+
+      assert_received {:etag, etag}
+      assert log =~ "PUBLISH presence for sip:bob@example.com: new: open (etag #{etag}, 3600s)"
     end
 
     test "a store that is down answers 503 — never silence", %{publish: m} do
@@ -294,6 +325,19 @@ defmodule Kelix.PresenceScriptTest do
       # than left waiting for a NOTIFY that would never come.
       assert_receive {:notified, body, "application/pidf+xml"}, 1000
       assert body =~ "closed"
+    end
+
+    test "the log names the watcher, the presentity and the state notified", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          submit(pid, dialog, subscribe())
+          assert_receive {:notified, _body, _}, 1000
+        end)
+
+      assert log =~ "NOTIFY presence to sip:alice@example.com about sip:bob@example.com: closed"
     end
 
     test "one PUBLISH becomes one NOTIFY on the watcher's dialog", %{subscribe: sub, publish: pub} do

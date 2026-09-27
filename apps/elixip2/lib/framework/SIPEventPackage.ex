@@ -104,6 +104,19 @@ defmodule SIP.EventPackage do
   @builtins [SIP.EventPackage.Presence, SIP.EventPackage.Dialog]
 
   @doc """
+  One line saying what a document of a builtin package states, for a log.
+  `nil` — no state — is said as such; a document no builtin models is named by
+  its size or its type, never dumped.
+  """
+  @spec summary(term) :: binary()
+  def summary(nil), do: "no state"
+  def summary(%SIP.Presence.Doc{} = doc), do: SIP.Presence.Doc.summary(doc)
+  def summary(%SIP.DialogInfo.Doc{} = doc), do: SIP.DialogInfo.Doc.summary(doc)
+  def summary(body) when is_binary(body), do: "#{byte_size(body)}-byte body"
+  def summary(%module{}), do: "a #{inspect(module)}"
+  def summary(_other), do: "a document"
+
+  @doc """
   Add `module` to the table under the name it answers to `name/0`.
 
   `opts[:origin]` is `:third_party` by default — the case this function is

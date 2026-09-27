@@ -112,4 +112,19 @@ defmodule SIP.DialogInfo.Doc do
             version: 0,
             state: :full,
             dialogs: []
+
+  @doc """
+  One line saying what the document states, for a log: the dialogs and the
+  state of each, in document order.
+
+      iex> SIP.DialogInfo.Doc.summary(%SIP.DialogInfo.Doc{entity: "sip:bob@ives.fr"})
+      "no dialog"
+  """
+  @spec summary(t()) :: binary()
+  def summary(%__MODULE__{dialogs: []}), do: "no dialog"
+
+  def summary(%__MODULE__{dialogs: dialogs}) do
+    count = if length(dialogs) == 1, do: "1 dialog", else: "#{length(dialogs)} dialogs"
+    count <> ": " <> Enum.map_join(dialogs, ", ", &to_string(&1.state))
+  end
 end

@@ -118,10 +118,12 @@ defmodule Kelix.PresenceSubscribe do
         # the final NOTIFY, `terminated;reason=noresource`.
         case Kelix.Mod.Presence.watch(sip_ctx, sub) do
           {:ok, nil} ->
+            trace_notify(sub, nil)
             terminate_subscription(:noresource)
             goto(ending, "200 + NOTIFY noresource")
 
           {:ok, doc} ->
+            trace_notify(sub, doc)
             notify(doc)
             goto(subscribed, "200 + NOTIFY")
 
@@ -147,10 +149,12 @@ defmodule Kelix.PresenceSubscribe do
       # `nil` means the resource has no state any more — a room destroyed, the
       # module that reported it gone — and ends the subscription.
       {:presence, :state, _resource, nil} ->
+        trace_notify(last_subscription(), nil)
         terminate_subscription(:noresource)
         goto(ending, "state gone: noresource")
 
       {:presence, :state, _resource, doc} ->
+        trace_notify(last_subscription(), doc)
         notify(doc)
         stay("state pushed")
 
@@ -195,6 +199,17 @@ defmodule Kelix.PresenceSubscribe do
         Kelix.Mod.Presence.unwatch(sip_ctx)
         scenario_failure("subscription did not end")
     end
+  end
+
+  # One line per NOTIFY: to whom, about whom, on which package, saying what.
+  defp trace_notify(sub, doc) do
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "NOTIFY #{sub.event} to #{SIP.Subscription.watcher_uri(sub)} " <>
+          "about #{sub.presentity_uri}: " <>
+          if(doc, do: SIP.EventPackage.summary(doc), else: "no state, ending (noresource)")
+    )
   end
 
   # Cooperative shutdown (§5.3). The collection drops us on its own — it monitors

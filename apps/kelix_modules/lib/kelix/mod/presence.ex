@@ -164,6 +164,7 @@ defmodule Kelix.Mod.Presence do
         report: 4,
         report: 5,
         exists?: 2,
+        own_state?: 1,
         registration_changed: 1,
         registration_changed: 2,
         registration_ended: 1,
@@ -569,6 +570,30 @@ defmodule Kelix.Mod.Presence do
   end
 
   def exists?(_domain, _aor), do: false
+
+  @doc """
+  Whether the PUBLISH this instance serves is about the very user its digest
+  proved — the question a compositor script asks before it lets anyone state a
+  presence. The presentity is the Request-URI's user part (RFC 3903 §4.1, as
+  `check_publish/1` reads it); the publisher is the identity the authentication
+  recorded (`assert_identity/1`). Case-insensitive, as an AOR is.
+
+  The domains are not compared: the digest was checked against the realm of the
+  served domain, which is the domain the Request-URI routed to. `false` when
+  nothing was authenticated or the request names no user.
+  """
+  @spec own_state?(%SIP.Context{}) :: boolean
+  def own_state?(%SIP.Context{asserted_identity: %SIP.Uri{userpart: me}} = sip_ctx)
+      when is_binary(me) do
+    with %{} = req <- SIP.Session.CallUAS.stored_req(sip_ctx),
+         user when is_binary(user) <- SIP.Msg.Ops.target_aor(req) do
+      String.downcase(user) == String.downcase(me)
+    else
+      _ -> false
+    end
+  end
+
+  def own_state?(_sip_ctx), do: false
 
   @doc "Every published state of a domain, as rendered rows (`kelictl presence list`)."
   @spec presentities(String.t()) :: [map] | {:error, :down | :timeout}
@@ -1360,7 +1385,7 @@ defmodule Kelix.Mod.Presence do
   defp render_subscription(%SIP.Subscription{} = sub) do
     %{
       presentity_uri: sub.presentity_uri,
-      watcher: watcher_uri(sub),
+      watcher: SIP.Subscription.watcher_uri(sub),
       event: sub.event,
       event_id: sub.event_id,
       status: to_string(SIP.Subscription.status(sub)),
@@ -1368,9 +1393,6 @@ defmodule Kelix.Mod.Presence do
       callid: sub.callid
     }
   end
-
-  defp watcher_uri(%SIP.Subscription{watcher_username: nil}), do: nil
-  defp watcher_uri(%SIP.Subscription{watcher_username: u, watcher_domain: d}), do: "sip:#{u}@#{d}"
 
   # ── keys and storage ────────────────────────────────────────────────────────
 

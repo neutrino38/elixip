@@ -77,6 +77,19 @@ defmodule SIP.Publication do
   @typedoc "What a PUBLISH asks for (RFC 3903 §4.1)."
   @type operation :: :initial | :modify | :refresh | :remove
 
+  @doc """
+  What this publication does to the state, in one line for a log: the new state
+  of an initial or modifying PUBLISH, and what a refresh or a removal means.
+  """
+  @spec describe(t()) :: binary()
+  def describe(%__MODULE__{operation: :remove}), do: "removal"
+  def describe(%__MODULE__{operation: :refresh}), do: "refresh, state unchanged"
+
+  def describe(%__MODULE__{operation: :modify, doc: doc}),
+    do: "modified: " <> SIP.EventPackage.summary(doc)
+
+  def describe(%__MODULE__{doc: doc}), do: "new: " <> SIP.EventPackage.summary(doc)
+
   @doc "`presentity`'s unique key: `{username, domain, event, etag}`."
   @spec key(t()) :: {binary() | nil, binary() | nil, binary() | nil, binary() | nil}
   def key(%__MODULE__{} = pub), do: {pub.username, pub.domain, pub.event, pub.etag}
