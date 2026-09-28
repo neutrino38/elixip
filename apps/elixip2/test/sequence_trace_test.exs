@@ -53,23 +53,29 @@ defmodule SIP.Test.SequenceTrace do
     assert [invite, ok] = SipTrace.take()
 
     assert %{
-             kind: :sip,
+             kind: :message,
              dir: :out,
+             lane: "call-1",
+             party: nil,
+             peer: "10.0.0.1:5060/udp",
+             label: "INVITE #1 +SDP",
+             reply: false,
+             repeat: false,
              method: :INVITE,
              code: nil,
              cseq: "1 INVITE",
-             callid: "call-1",
-             peer: "10.0.0.1:5060/udp",
-             sdp: true,
-             retransmit: false
+             sdp: true
            } = invite
 
     assert %{
              dir: :in,
+             lane: "call-1",
+             peer: "10.0.0.2:5062/udp",
+             label: "200 OK / 1 INVITE",
+             reply: true,
              method: nil,
              code: 200,
              reason: "OK",
-             peer: "10.0.0.2:5062/udp",
              sdp: false
            } =
              ok
@@ -90,7 +96,7 @@ defmodule SIP.Test.SequenceTrace do
     :ok = SipTrace.bind(dialog, self(), :outbound)
 
     SipTrace.sent(transaction(dialog), @invite)
-    assert [%{tag: :outbound}] = SipTrace.take()
+    assert [%{party: "outbound"}] = SipTrace.take()
 
     # The binding went with the events.
     SipTrace.sent(transaction(dialog), @invite)
@@ -113,7 +119,7 @@ defmodule SIP.Test.SequenceTrace do
     :ok = SipTrace.adopt(dialog)
 
     SipTrace.sent(transaction(dialog), @invite)
-    assert [%{tag: :inbound}] = SipTrace.take()
+    assert [%{party: "inbound"}] = SipTrace.take()
     Process.exit(dialog, :kill)
   end
 
@@ -124,11 +130,12 @@ defmodule SIP.Test.SequenceTrace do
     assert [
              %{
                dir: :out,
+               lane: "call-1",
+               label: "200 OK / 1 INVITE (retransmission)",
+               reply: true,
+               repeat: true,
                code: 200,
-               reason: "OK",
-               cseq: "1 INVITE",
-               callid: "call-1",
-               retransmit: true
+               cseq: "1 INVITE"
              }
            ] =
              SipTrace.take()
@@ -218,10 +225,48 @@ defmodule SIP.Test.SequenceTrace do
     end
   end
 
-  describe "a scenario with debug: true" do
-    # FSL.Journal does not collect the trace yet: docs/design/debug-fsl-port-plan.md.
-    @describetag :skip
+  defmodule TracedUAS do
+    use SIP.Scenario
 
+    config(username: "bob", domain: "mydomain.com", debug: true)
+
+    state initial_state do
+      scenario_success("seen")
+    end
+  end
+
+  describe "a UAS instance with debug: true" do
+    test "draws the request it was spawned for as its first arrow" do
+      dialog = spawn(fn -> Process.sleep(:infinity) end)
+      parent = self()
+
+      spawn(fn ->
+        result =
+          SIP.Scenario.Runner.run_instance(TracedUAS,
+            dialog_pid: dialog,
+            inbound_request: @invite
+          )
+
+        send(parent, {:scenario_result, result, inspect(self())})
+      end)
+
+      assert_receive {:scenario_result, :ok, pid}, 5_000
+      Process.exit(dialog, :kill)
+
+      path = SequenceDiagram.filename(%{scenario: "SIP.Test.SequenceTrace.TracedUAS", pid: pid})
+      content = File.read!(path)
+      File.rm(path)
+
+      assert content =~ ~s(participant "peer 1" as peer1)
+      assert content =~ "'   peer1: peer 1 — call-1"
+
+      [_header, body] = String.split(content, "@startuml\n")
+      first = body |> String.split("\n") |> Enum.find(&(&1 =~ ~r/ : /))
+      assert first =~ ~r/^peer1 -> local : \+\d+ms INVITE #1 \+SDP$/
+    end
+  end
+
+  describe "a scenario with debug: true" do
     setup do
       SIP.Test.AppEnv.preserve_proxy()
       :ok = SIP.Scenario.start_stack()
@@ -260,20 +305,20 @@ defmodule SIP.Test.SequenceTrace do
       refute content =~ ~s(as peer\n)
 
       # The whole call, as sent and received — not as the script described it.
-      assert content =~ ~r/elixip -> peer1 : \+\d+ms INVITE #\d+ \+SDP/
-      assert content =~ ~r/peer1 --> elixip : \+\d+ms 100 Trying \/ \d+ INVITE/
-      assert content =~ ~r/peer1 --> elixip : \+\d+ms 180 Ringing \/ \d+ INVITE/
-      assert content =~ ~r/peer1 --> elixip : \+\d+ms 200 OK \/ \d+ INVITE \+SDP/
-      assert content =~ ~r/elixip -> peer1 : \+\d+ms ACK #\d+/
-      assert content =~ ~r/elixip -> peer1 : \+\d+ms BYE #\d+/
-      assert content =~ ~r/peer1 --> elixip : \+\d+ms 200 OK \/ \d+ BYE/
+      assert content =~ ~r/local -> peer1 : \+\d+ms INVITE #\d+ \+SDP/
+      assert content =~ ~r/peer1 --> local : \+\d+ms 100 Trying \/ \d+ INVITE/
+      assert content =~ ~r/peer1 --> local : \+\d+ms 180 Ringing \/ \d+ INVITE/
+      assert content =~ ~r/peer1 --> local : \+\d+ms 200 OK \/ \d+ INVITE \+SDP/
+      assert content =~ ~r/local -> peer1 : \+\d+ms ACK #\d+/
+      assert content =~ ~r/local -> peer1 : \+\d+ms BYE #\d+/
+      assert content =~ ~r/peer1 --> local : \+\d+ms 200 OK \/ \d+ BYE/
 
       # The script's commands and states are still there, beside the arrows.
-      assert content =~ ~r/hnote over elixip : \+\d+ms send_INVITE/
-      assert content =~ ~r/hnote over elixip : \+\d+ms send_BYE/
-      assert content =~ ~r/note over elixip : \+\d+ms call_progress -> hangup_call/
+      assert content =~ ~r/hnote over local : \+\d+ms send_INVITE/
+      assert content =~ ~r/hnote over local : \+\d+ms send_BYE/
+      assert content =~ ~r/note over local : \+\d+ms call_progress -> hangup_call/
       assert content =~ "succeeded: 200 OK for BYE"
-      refute content =~ "elixip <-- peer"
+      refute content =~ "local <-- peer"
     end
   end
 end

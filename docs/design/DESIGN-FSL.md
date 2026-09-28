@@ -99,7 +99,7 @@ start there.
 
 ## 3. `SIP.FSL.Host` — what SIP adds to the state machine
 
-`lib/framework/SIPFSLHost.ex`. Eleven callbacks of the `FSL.Host` behaviour, and
+`lib/framework/SIPFSLHost.ex`. Thirteen callbacks of the `FSL.Host` behaviour, and
 the reason this module exists is as much readability as decoupling: the same
 answers used to be spread across three files and two macro expansions — three
 `use` lines, three calls injected into every `on_events` clause, one on state
@@ -265,6 +265,59 @@ So the three doors a scenario writes this context through — `SIP.Context.set/3
 back with `FSL.Context.latest/1`. A scenario whose `place_call` state raised
 after setting both legs up released neither of them, held its MCU session until
 the RTP watchdog, and left the caller unable to hang up (dev71, 2026-09-21).
+
+### 3.9 `journal_started/1` and `journal_collect/0` — the SIP trace
+
+The sequence journal lives in the scenario's process; the SIP messages never pass
+through it. The transaction layer sends and receives them on behalf of a dialog,
+so what a traced run put on the wire has to be recorded elsewhere and handed over.
+`SIP.Scenario.SipTrace` is that elsewhere, and these two callbacks are how it is
+plugged into `FSL.Journal` — which knows nothing of SIP beyond a `:message` event
+it draws as it is told.
+
+`SipTrace` is one public ETS table, `:sip_scenario_trace`, with two kinds of row:
+who traces for whom (`{:watch, pid}` → `{scenario_pid, leg_tag}`), and the
+recorded events, in order.
+
+- **`journal_started/1`**, called in the scenario's process when its journal
+  starts: the scenario watches itself. A dialog that learns its application
+  (`SIP.DialogImpl.bind_app/2`, the one place it does) binds itself to the
+  scenario that application is traced under, with its leg tag. Two things predate
+  the journal and are caught up here: the dialog already in the context — a UAS
+  instance's, or a UAC's when `debug` was set mid-run — is adopted; the request a
+  UAS instance was spawned for, which crossed its transaction before anyone
+  traced, goes straight in with `FSL.Journal.record/1`.
+- **The transaction layer records**, against its `app` pid, every message it puts
+  on or takes off the wire — first copy and retransmissions alike: through
+  `SIP.Transac.Common.sendout_msg/2`, the two retransmission timers of
+  `SIP.Trans.Timer`, the last-response resend of `SIP.IST` and `SIP.NIST`, and
+  the eight `{:onsipmsg, …}` clauses. A retransmission is re-sent from its wire
+  form, and read back through `SIPMsg.parse/2`, not a regex of its own.
+- **`journal_collect/0`** hands the rows over at flush, and forgets them and the
+  bindings. `FSL.Journal` merges them with its own events on the timestamps, and
+  calls it again at `clear/0` so a run that never flushes leaves nothing behind.
+
+The event is built here, in SIP terms, and drawn there without them: `lane` is
+the Call-ID, `party` the leg tag, `peer` the address and transport
+(`10.0.0.1:5060/udp`), `label` the line a reader expects (`INVITE #1 +SDP`,
+`200 OK / 1 INVITE`, `(retransmission)`), `reply` for a response, `repeat` for a
+retransmission. The renderer gives each Call-ID a lane, so a B2BUA shows its two
+legs side by side and a registration next to a call gets a lane of its own.
+
+**Why the transaction layer.** It is the one that has both what went out and for
+whom. A transport instance sees every byte but knows only a socket; a dialog
+knows its scenario but sees a copy of each message, without the retransmissions
+or the ACK of a non-2xx. A transaction sees everything the wire carries and knows
+its dialog, which knows its scenario: two hops, one table. The price is what a
+transaction never sees — a stateless reply of the dialog layer (a 481 to a request
+no dialog matches), an out-of-dialog OPTIONS — documented in
+[ELIXIPP.md](../../ELIXIPP.md).
+
+**The cost when nobody traces.** The table does not exist until the first scenario
+watches itself, so every hook stops at an `:ets.whereis`. Once it exists, a message
+of an untraced dialog costs one key lookup. The GenServer that owns the table
+monitors each watched scenario and drops the rows of one that dies without
+flushing.
 
 ---
 

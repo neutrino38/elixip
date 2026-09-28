@@ -525,23 +525,23 @@ instance started:
 '   username: "bob"
 '   domain: "mydomain.com"
 '   passwd: ****
-' SIP peers (one per Call-ID):
-'   peer1: 10.0.0.1:5060/udp — Call-ID 4f3a…@10.0.0.7
+' Peers (one per conversation):
+'   peer1: 10.0.0.1:5060/udp — 4f3a…@10.0.0.7
 '
 @startuml
-participant "bob" as elixip
+participant "bob" as local
 participant "10.0.0.1:5060/udp" as peer1
 
-note over elixip : +0ms initial_state
-note over elixip : +1ms initial_state -> calling
-hnote over elixip : +2ms send_INVITE
-elixip -> peer1 : +3ms INVITE #1 +SDP
-peer1 --> elixip : +9ms 100 Trying / 1 INVITE
-peer1 --> elixip : +110ms 180 Ringing / 1 INVITE
-peer1 --> elixip : +412ms 200 OK / 1 INVITE +SDP
-elixip -> peer1 : +413ms ACK #1
-note over elixip : +414ms calling -> answered
-note over elixip #LightGreen : +415ms succeeded: answered
+note over local : +0ms initial_state
+note over local : +1ms initial_state -> calling
+hnote over local : +2ms send_INVITE
+local -> peer1 : +3ms INVITE #1 +SDP
+peer1 --> local : +9ms 100 Trying / 1 INVITE
+peer1 --> local : +110ms 180 Ringing / 1 INVITE
+peer1 --> local : +412ms 200 OK / 1 INVITE +SDP
+local -> peer1 : +413ms ACK #1
+note over local : +414ms calling -> answered
+note over local #LightGreen : +415ms succeeded: answered
 @enduml
 ```
 

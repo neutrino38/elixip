@@ -1,7 +1,9 @@
 defmodule SIP.Scenario.SipTrace do
   @moduledoc """
   Cross-process sink for the SIP messages a traced scenario instance exchanges,
-  feeding `SIP.Scenario.SequenceJournal` with what really went on the wire.
+  feeding the scenario's `FSL.Journal` with what really went on the wire.
+  `SIP.FSL.Host` plugs it in: `c:FSL.Host.journal_started/1` watches,
+  `c:FSL.Host.journal_collect/0` takes.
 
   The journal lives in the scenario process, but the messages go through the
   dialog and transaction processes. This module bridges the two with one public
@@ -16,7 +18,10 @@ defmodule SIP.Scenario.SipTrace do
       scenario itself. A message whose `app` is bound to no watched scenario
       costs one ETS lookup.
 
-  `take/0` hands the recorded events back to the scenario at flush time.
+  `take/0` hands the recorded events back to the scenario at flush time. They
+  are `FSL.Journal` `:message` events (see `FSL.Diagram`): one lane per Call-ID,
+  labelled with the leg tag and the peer address, the label built here — the
+  renderer knows nothing of SIP.
 
   Zero cost when nobody traces: the table does not exist until the first
   `watch/0`, and every recording helper returns on that check. The owning
@@ -27,19 +32,25 @@ defmodule SIP.Scenario.SipTrace do
 
   @table :sip_scenario_trace
 
-  @typedoc "One SIP message, as recorded for the sequence diagram."
+  @typedoc """
+  One SIP message, as an `FSL.Journal` `:message` event. The first block is what
+  the renderers draw; `method`, `code`, `reason`, `cseq` and `sdp` are the SIP
+  reading of it, kept for whoever inspects the events.
+  """
   @type event :: %{
-          kind: :sip,
+          kind: :message,
           at: integer(),
           dir: :in | :out,
+          lane: String.t() | nil,
+          party: String.t() | nil,
+          peer: String.t() | nil,
+          label: String.t(),
+          reply: boolean(),
+          repeat: boolean(),
           method: atom() | nil,
           code: non_neg_integer() | nil,
           reason: String.t() | nil,
           cseq: String.t() | nil,
-          callid: String.t() | nil,
-          peer: String.t() | nil,
-          tag: atom() | nil,
-          retransmit: boolean(),
           sdp: boolean()
         }
 
@@ -122,6 +133,7 @@ defmodule SIP.Scenario.SipTrace do
   @doc """
   Build the event for a message without recording it — how the journal writes
   the request that spawned a UAS instance, seen before any trace was armed.
+  Options: `:peer`, `:tag` (the leg), `:retransmit`.
   """
   @spec event(:in | :out, map() | binary(), keyword()) :: event() | nil
   def event(dir, msg, opts \\ []) do
@@ -129,14 +141,19 @@ defmodule SIP.Scenario.SipTrace do
       nil ->
         nil
 
-      fields ->
+      {callid, fields} ->
+        repeat = Keyword.get(opts, :retransmit, false)
+
         Map.merge(fields, %{
-          kind: :sip,
+          kind: :message,
           at: System.monotonic_time(:microsecond),
           dir: dir,
+          lane: callid,
+          party: party(Keyword.get(opts, :tag)),
           peer: Keyword.get(opts, :peer),
-          tag: Keyword.get(opts, :tag),
-          retransmit: Keyword.get(opts, :retransmit, false)
+          label: label(fields, repeat),
+          reply: is_integer(fields.code),
+          repeat: repeat
         })
     end
   end
@@ -237,14 +254,34 @@ defmodule SIP.Scenario.SipTrace do
   end
 
   defp describe(msg) when is_map(msg) do
-    %{
-      method: method_of(msg),
-      code: Map.get(msg, :response),
-      reason: Map.get(msg, :reason),
-      cseq: cseq_label(Map.get(msg, :cseq)),
-      callid: Map.get(msg, :callid),
-      sdp: sdp?(Map.get(msg, :contenttype))
-    }
+    {Map.get(msg, :callid),
+     %{
+       method: method_of(msg),
+       code: Map.get(msg, :response),
+       reason: Map.get(msg, :reason),
+       cseq: cseq_label(Map.get(msg, :cseq)),
+       sdp: sdp?(Map.get(msg, :contenttype))
+     }}
+  end
+
+  defp party(nil), do: nil
+  defp party(tag), do: to_string(tag)
+
+  # `200 OK / 1 INVITE +SDP` for a response, `INVITE #1 +SDP` for a request.
+  defp label(%{code: code} = fields, repeat) when is_integer(code) do
+    "#{code} #{fields.reason} / #{fields.cseq}" <> suffixes(fields, repeat)
+  end
+
+  defp label(fields, repeat) do
+    cseq = if fields.cseq, do: " ##{fields.cseq |> String.split(" ") |> hd()}", else: ""
+    "#{fields.method}#{cseq}" <> suffixes(fields, repeat)
+  end
+
+  defp suffixes(fields, repeat) do
+    Enum.join([
+      if(fields.sdp, do: " +SDP", else: ""),
+      if(repeat, do: " (retransmission)", else: "")
+    ])
   end
 
   defp method_of(%{method: method}) when is_atom(method) and method not in [false, nil],

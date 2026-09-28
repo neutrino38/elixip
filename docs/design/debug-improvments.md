@@ -3,8 +3,12 @@
 Ce document consigne le chantier « débogage des scénarios » d'`elixipp`. Il décrit
 ce qui existe, comment c'est construit, ce qui manque, et ce qui vient ensuite.
 La référence d'usage est dans [ELIXIPP.md](../../ELIXIPP.md), section
-« Sequence diagram ». La conception des puits d'observabilité est dans
-[DESIGN-FSL.md](DESIGN-FSL.md) §7.
+« Sequence diagram ». La conception côté SIP est dans
+[DESIGN-FSL.md](DESIGN-FSL.md), section « `journal_started/1` and
+`journal_collect/0` — the SIP trace » ; le journal et le rendu sont ceux du
+package `finite_state_language` (`FSL.Journal`, `FSL.Diagram`). Le portage
+après l'extraction de FSL est décrit dans
+[debug-fsl-port-plan.md](debug-fsl-port-plan.md).
 
 ## Besoin
 
@@ -36,10 +40,11 @@ Trois façons, équivalentes :
 
 - l'option `--log-sequence` de la ligne de commande ;
 - `debug: true` dans le bloc `config` du scénario ;
-- `ctx_set(:debug, true)` dans un état. La boucle du runner relit le drapeau
-  après chaque état. Posé dans `initial_state`, le diagramme est complet. Posé
-  plus tard, il commence à la transition qui suit, et le dialogue déjà ouvert est
-  suivi à partir de là.
+- `ctx_set(:debug, true)` dans un état. La boucle de `FSL.Runner` relit le
+  drapeau après chaque état. Posé dans `initial_state`, le diagramme est
+  complet. Posé plus tard, il commence à la transition qui suit — dessinée comme
+  l'état atteint, sans son état d'origine — et le dialogue déjà ouvert est suivi
+  à partir de là.
 
 Le fichier est écrit dans le répertoire courant à la fin de l'instance.
 
@@ -54,8 +59,8 @@ Chaque ligne porte le temps écoulé depuis le début de l'instance (`+412ms`).
 - **Un participant par Call-ID.** Un B2BUA montre ses deux pattes côte à côte. Une
   inscription suivie d'un appel donne deux voies. L'étiquette est le tag de patte
   quand le framework en a donné un au dialogue (`outbound`), puis l'adresse du
-  pair et son transport (`10.0.0.1:5060/udp`). L'en-tête du fichier donne le
-  Call-ID de chaque voie.
+  pair et son transport (`10.0.0.1:5060/udp`), ou `peer N` quand aucun n'est
+  connu. L'en-tête du fichier donne le Call-ID de chaque voie.
 - **Les commandes du script** (`send_INVITE`, `send_BYE`) en notes hexagonales à
   côté des flèches qu'elles ont produites. On relie ainsi une ligne du script à
   ce qui est sorti.
@@ -65,18 +70,18 @@ Chaque ligne porte le temps écoulé depuis le début de l'instance (`+412ms`).
 Exemple d'un appel sortant :
 
 ```plantuml
-participant "bob" as elixip
+participant "bob" as local
 participant "10.0.0.1:5060/udp" as peer1
 
-note over elixip : +0ms initial_state
-hnote over elixip : +2ms send_INVITE
-elixip -> peer1 : +3ms INVITE #1 +SDP
-peer1 --> elixip : +9ms 100 Trying / 1 INVITE
-peer1 --> elixip : +110ms 180 Ringing / 1 INVITE
-peer1 --> elixip : +412ms 200 OK / 1 INVITE +SDP
-elixip -> peer1 : +413ms ACK #1
-note over elixip : +414ms calling -> answered
-note over elixip #LightGreen : +415ms succeeded: answered
+note over local : +0ms initial_state
+hnote over local : +2ms send_INVITE
+local -> peer1 : +3ms INVITE #1 +SDP
+peer1 --> local : +9ms 100 Trying / 1 INVITE
+peer1 --> local : +110ms 180 Ringing / 1 INVITE
+peer1 --> local : +412ms 200 OK / 1 INVITE +SDP
+local -> peer1 : +413ms ACK #1
+note over local : +414ms calling -> answered
+note over local #LightGreen : +415ms succeeded: answered
 ```
 
 Sans aucun message tracé, par exemple un scénario qui n'a jamais atteint la
@@ -86,16 +91,24 @@ devient une flèche entrante.
 
 ## Construction
 
-### Trois puits
+### Ce que fait FSL, ce que fait SIP
 
-| Module | Rôle | Où il vit |
+Le journal et le rendu appartiennent au package `finite_state_language`, qui ne
+connaît pas SIP. Il a appris une chose générique : des événements enregistrés
+hors du processus de la machine, qu'une liaison lui remet. SIP s'y branche par
+deux callbacks de `FSL.Host`.
+
+| Module | Côté | Rôle |
 |---|---|---|
-| `SIP.Scenario.SequenceJournal` | Journal chronologique de l'instance : commandes, transitions, issue. Chaque événement est horodaté. | Dictionnaire du processus scénario |
-| `SIP.Scenario.SipTrace` | Recueille les messages SIP émis et reçus pour le compte d'une instance. | Une table ETS publique, un GenServer propriétaire |
-| `SIP.Scenario.SequenceDiagram` | Rendu PlantUML pur, sans dépendance à la pile. | Fonction pure |
+| `FSL.Journal` | FSL | Journal chronologique de l'instance : commandes, transitions, issue. Chaque événement porte `:at` (µs monotones), les métadonnées `:t0`. Au `flush`, fusionne sur `:at` ce que l'hôte lui remet. |
+| `FSL.Diagram.PlantUML`, `FSL.Diagram.Mermaid` | FSL | Rendu pur. Un événement `:message` passe le rendu en mode tracé : une voie par conversation, commandes en notes. |
+| `SIP.Scenario.SipTrace` | SIP | Recueille les messages SIP émis et reçus pour le compte d'une instance, et construit les événements `:message`. Une table ETS publique, un GenServer propriétaire. |
+| `SIP.FSL.Host` | SIP | `journal_started/1` : l'instance se déclare, adopte son dialogue, inscrit la requête qui l'a créée. `journal_collect/0` : `SipTrace.take/0`. |
 
-Le journal et le rendu existaient. `SipTrace` est le puits qui traverse les
-processus : les messages SIP ne passent pas par le processus scénario.
+L'événement `:message` porte `dir`, `lane` (le Call-ID), `party` (le tag de
+patte), `peer` (l'adresse et le transport), `label` (`INVITE #1 +SDP`,
+`200 OK / 1 INVITE`), `reply` (réponse : pointillé), `repeat` (retransmission :
+grisé). SIP décide de ce que dit chaque champ ; le rendu dessine.
 
 ### Le point d'accroche : la couche transaction
 
@@ -128,15 +141,16 @@ couche message.
 La table ETS `:sip_scenario_trace` porte deux sortes de lignes :
 
 - `{:watch, pid}` → `{scenario_pid, tag}` : qui trace pour qui. Le scénario s'y
-  déclare lui-même au démarrage du journal. Un dialogue s'y lie quand il apprend
-  son pid applicatif, avec son tag de patte, dans les trois endroits de
-  `SIP.DialogImpl` où ce pid est appris. Une instance UAS adopte le dialogue qui
-  l'a fait naître, car ce dialogue existait avant elle.
+  déclare lui-même au démarrage du journal (`journal_started/1`). Un dialogue
+  s'y lie quand il apprend son pid applicatif, avec son tag de patte, dans
+  `SIP.DialogImpl.bind_app/2`. Une instance UAS adopte le dialogue qui l'a fait
+  naître, car ce dialogue existait avant elle.
 - `{:event, scenario_pid, seq}` → événement : les messages, dans l'ordre.
 
-Le journal reprend les lignes au `flush`, les fusionne avec ses propres
-événements sur l'horodatage monotone, et rend le fichier. Une instance UAS
-inscrit aussi la requête qui l'a créée : elle a traversé la transaction avant
+`FSL.Journal` reprend les lignes au `flush` par `journal_collect/0`, les
+fusionne avec ses propres événements sur `:at`, et rend le fichier. Il les
+reprend aussi à `clear/0`, pour les jeter. Une instance UAS inscrit la requête
+qui l'a créée avec `FSL.Journal.record/1` : elle a traversé la transaction avant
 que quiconque ne trace.
 
 ### Coût quand personne ne trace
@@ -151,12 +165,16 @@ s'il meurt sans `flush`.
 ## Vérification
 
 - Tests unitaires du puits : `apps/elixip2/test/sequence_trace_test.exs`.
-  Enregistrement, liaison d'un dialogue, adoption, retransmission relue depuis
-  le fil, nettoyage à la mort du scénario.
-- Tests du rendu : `apps/elixip2/test/sequence_diagram_test.exs`. Une voie par
-  Call-ID, flèches, retransmissions, notes, horodatage.
-- Test de bout en bout : un appel complet contre le transport factice (INVITE,
-  100, 180, 200, ACK, BYE, 200), chaque flèche vérifiée dans le fichier produit.
+  Enregistrement, forme `:message`, liaison d'un dialogue, adoption,
+  retransmission relue depuis le fil, nettoyage à la mort du scénario.
+- Tests du journal et du rendu, dans le package :
+  `test/journal_trace_test.exs`. Horodatage, démarrage tardif, appel des deux
+  callbacks, fusion sur `:at`, une voie par conversation, flèches, répétitions,
+  notes, pour PlantUML et Mermaid ; un type d'événement inconnu est ignoré.
+- Tests de bout en bout, dans `sequence_trace_test.exs` : un appel complet contre
+  le transport factice (INVITE, 100, 180, 200, ACK, BYE, 200), chaque flèche
+  vérifiée dans le fichier produit ; une instance UAS dont la première flèche est
+  la requête qui l'a créée.
 
 Aucun essai en trafic réel avec l'escript n'a encore été fait.
 

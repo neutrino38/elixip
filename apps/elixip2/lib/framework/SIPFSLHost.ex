@@ -430,6 +430,38 @@ defmodule SIP.FSL.Host do
   defp variable?({name, _meta, ctx_arg}) when is_atom(name) and is_atom(ctx_arg), do: true
   defp variable?(_), do: false
 
+  # ── The sequence journal ────────────────────────────────────────────────────
+
+  @doc """
+  The journal of this instance has just started: trace its SIP messages.
+
+  The messages go through the dialog and transaction processes, never through
+  this one, so `SIP.Scenario.SipTrace` records them there for whoever watches.
+  Watching is this process declaring itself; its dialogs bind to it as they
+  learn their application. Two things predate the journal and are caught up
+  here: the dialog already in the context (a UAS instance's, or a UAC's when
+  `debug` was set mid-run), adopted; and the request a UAS instance was spawned
+  for, which crossed its transaction before anybody traced, recorded directly.
+  """
+  @impl true
+  def journal_started(sip_ctx) do
+    :ok = SIP.Scenario.SipTrace.watch()
+
+    if is_pid(Map.get(sip_ctx, :dialogpid)),
+      do: SIP.Scenario.SipTrace.adopt(sip_ctx.dialogpid)
+
+    with %{} = req <- inbound_request(sip_ctx),
+         %{} = event <- SIP.Scenario.SipTrace.event(:in, req) do
+      SIP.Scenario.SequenceJournal.record(event)
+    end
+
+    :ok
+  end
+
+  @doc "The SIP messages traced for this instance, handed to the journal and forgotten."
+  @impl true
+  def journal_collect, do: SIP.Scenario.SipTrace.take()
+
   # ── The monitor's columns ───────────────────────────────────────────────────
 
   @doc """

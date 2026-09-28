@@ -162,7 +162,7 @@ promises about "no file needed" with it.
 Apache-2.0 and declared as a dependency in `apps/elixip2/mix.exs`. The package
 knows nothing about SIP: it calls back into an `FSL.Host` implementation for
 everything it must not know, and `SIP.FSL.Host` (`framework/SIPFSLHost.ex`) is
-SIP's — eleven callbacks that read, top to bottom, as the answer to "what does SIP
+SIP's — thirteen callbacks that read, top to bottom, as the answer to "what does SIP
 add to the state machine".
 
 That separation is enforced rather than hoped for: `:fsl` does not depend on
