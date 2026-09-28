@@ -207,9 +207,10 @@ defmodule Kelix.Mod.Presence do
         args: [%{name: "domain", required: true}],
         render: %{
           kind: :table,
-          columns: ~w(presentity_uri event source status etag expires sender content_type)
+          columns: ~w(aor status activity calls watchers sources)
         },
-        help: "The states held for a domain: one row per entity-tag, one per registration"
+        help:
+          "The presentities of a domain, one row each: what a watcher is told, and who says so"
       },
       %{
         name: "show",
@@ -221,7 +222,9 @@ defmodule Kelix.Mod.Presence do
           kind: :detail,
           fields: ~w(presentity_uri states watchers),
           nested: %{
-            "states" => %{columns: ~w(event source status etag expires sender content_type)},
+            "states" => %{
+              columns: ~w(event source status activity etag expires sender content_type)
+            },
             "watchers" => %{columns: ~w(watcher event status expires callid)}
           }
         },
@@ -258,7 +261,7 @@ defmodule Kelix.Mod.Presence do
   this view and quite different on the wire.
   """
   @impl Kelix.Module
-  def handle_control("list", %{"domain" => domain}), do: {:ok, presentities(domain)}
+  def handle_control("list", %{"domain" => domain}), do: {:ok, overview(domain)}
 
   def handle_control("watchers", %{"domain" => domain, "aor" => aor}),
     do: {:ok, watchers(domain, aor)}
@@ -595,10 +598,24 @@ defmodule Kelix.Mod.Presence do
 
   def own_state?(_sip_ctx), do: false
 
-  @doc "Every published state of a domain, as rendered rows (`kelictl presence list`)."
+  @doc """
+  Every state held for a domain, as rendered rows: one per entity-tag, one per
+  reported state, one per registration (`kelictl presence show`).
+  """
   @spec presentities(String.t()) :: [map] | {:error, :down | :timeout}
   def presentities(domain),
     do: Kelix.Module.safe_call(__MODULE__, {:presentities, served_domain(domain)})
+
+  @doc """
+  One row per presentity of a domain (`kelictl presence list`): the state a watcher
+  of the `presence` package is told (`status`, `activity`), the dialogs of its
+  resolved `dialog` document (`calls`, nil for none), its live subscriptions
+  (`watchers`) and the sources of its states (`sources`). The same presentities
+  as the live panel.
+  """
+  @spec overview(String.t()) :: [map] | {:error, :down | :timeout}
+  def overview(domain),
+    do: Kelix.Module.safe_call(__MODULE__, {:overview, served_domain(domain)})
 
   @doc "The live watchers of an AOR, as rendered rows (`kelictl presence watchers`)."
   @spec watchers(String.t(), String.t()) :: [map] | {:error, :down | :timeout}
@@ -691,6 +708,22 @@ defmodule Kelix.Mod.Presence do
       ) ++ reported_rows(state, domain, :_) ++ registration_rows(state, domain, :_)
 
     {:reply, Enum.sort_by(rows, & &1.presentity_uri), state}
+  end
+
+  def handle_call({:overview, domain}, _from, state) do
+    rows =
+      for row <- panel_rows(state, domain) do
+        %{
+          aor: row.aor,
+          status: row.status,
+          activity: row.activity,
+          calls: calls(state, domain, row.aor),
+          watchers: length(row.watchers),
+          sources: row.states |> Enum.map(& &1.source) |> Enum.uniq() |> Enum.join(", ")
+        }
+      end
+
+    {:reply, rows, state}
   end
 
   def handle_call({:watchers, domain, aor}, _from, state) do
@@ -1312,6 +1345,14 @@ defmodule Kelix.Mod.Presence do
     end
   end
 
+  # The dialogs a watcher of the `dialog` package is told of; nil for none.
+  defp calls(state, domain, user) do
+    case known_state(state, {user, domain, "dialog"}) do
+      %SIP.DialogInfo.Doc{dialogs: [_ | _] = dialogs} -> length(dialogs)
+      _ -> nil
+    end
+  end
+
   # The document is opaque to the collection; only a PIDF one has these fields,
   # and a dialog-info one is shown by what it lists.
   defp doc_field(%SIP.Presence.Doc{} = doc, :status),
@@ -1336,6 +1377,7 @@ defmodule Kelix.Mod.Presence do
       event: pub.event,
       source: "publish",
       status: doc_field(pub.doc, :status),
+      activity: doc_field(pub.doc, :activity),
       etag: pub.etag,
       expires: SIP.Publication.remaining(pub),
       sender: pub.sender,
@@ -1355,6 +1397,7 @@ defmodule Kelix.Mod.Presence do
         event: event,
         source: "registrar",
         status: "open",
+        activity: nil,
         etag: nil,
         expires: nil,
         sender: nil,
@@ -1374,6 +1417,7 @@ defmodule Kelix.Mod.Presence do
         event: event,
         source: to_string(source),
         status: doc_field(entry.doc, :status),
+        activity: doc_field(entry.doc, :activity),
         etag: nil,
         expires: nil,
         sender: nil,

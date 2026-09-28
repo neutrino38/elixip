@@ -86,7 +86,7 @@ None.
 The columns are the room's address, its `status` (`open` / `closed`), its
 `activity` (`busy` or empty) and the conference `uid`, as `kelictl mcu` names it.
 
-`kelictl presence list <domain>` lists the rooms too, with the source `mcu`.
+`kelictl presence list <domain>` lists the rooms too, with `mcu` among their `sources`.
 
 ## Events
 

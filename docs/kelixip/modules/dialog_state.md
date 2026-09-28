@@ -133,8 +133,10 @@ The columns are the user's address (`aor`), the Call-ID, the `direction`, the
 `state`, the other party (`remote`), `since`, and `presence` — `on_the_phone`
 while the user's presence says so.
 
-`kelictl presence list <domain>` lists the same users too, with the source
-`dialog_state`: one row on the `dialog` package ("N dialogs"), one on `presence`.
+`kelictl presence list <domain>` names `dialog_state` among a user's `sources`
+and counts its `calls`; `kelictl presence show <user>@<domain>` shows its two
+states: one on the `dialog` package ("N dialogs"), one on `presence` whose
+`activity` is `on_the_phone` while a call is up.
 
 ## Events
 

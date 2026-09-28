@@ -325,20 +325,38 @@ subscribing.
 
 | Command | REST | Description |
 |---|---|---|
-| `kelictl presence list domain=D` | `GET /modules/presence/presentities` | States held: one row per entity-tag, one per reported registration |
-| `kelictl presence show domain=D aor=bob` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
-| `kelictl presence watchers domain=D aor=bob` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
-| `kelictl presence remove domain=D aor=bob` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
+| `kelictl presence list D` | `GET /modules/presence/presentities` | One row per presentity: what its watchers are told, and who says so |
+| `kelictl presence show bob@D` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
+| `kelictl presence watchers bob@D` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
+| `kelictl presence remove bob@D` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
 
-The columns are kamailio's, under kamailio's names — `presentity_uri`, `event`,
-`etag`, `expires`, `status`, `callid`.
+`bob@D` is `domain=D aor=bob`, and both forms are accepted.
+
+`list` is the overview:
+
+```
+aor           status  activity      calls  watchers  sources
+bob           open    -             -      0         registrar
+magali.buu    open    on_the_phone  1      1         publish, dialog_state, registrar
+```
+
+`status` and `activity` are what a watcher of the `presence` package is told —
+a live publication wins over a reported state. `calls` counts the dialogs a
+watcher of the `dialog` package is told of, `watchers` the live subscriptions, and
+`sources` names who states something about the presentity.
+
+`show` and `watchers` give the detail, under kamailio's column names —
+`presentity_uri`, `event`, `etag`, `expires`, `status`, `callid`.
 
 A state has a `source`: `publish` for a PUBLISH, `registrar` for a registration
 reported by the registrar script (see
 [Registrations as presence](#registrations-as-presence)), and the name a module
 reported it under — `mcu` for a conference room. A `registrar` or module state has
-no `etag`, `expires` nor `sender`, and is listed beside a live publication of the
+no `etag`, `expires` nor `sender`, and is shown beside a live publication of the
 same presentity, which it does not override.
+
+`activity` is the RPID activity of a `presence` document (`on_the_phone`, `away`…),
+empty when the document states none.
 
 `remove` drops the published state, not the subscriptions: a watcher stays
 subscribed and is told there is no state left.
@@ -374,8 +392,8 @@ row :: %{domain, aor, presentity_uri, status, activity, note, states, watchers}
 ```
 
 A presentity is listed while it holds a publication, a watcher, a reported
-registration or a state a module reported; `states` then holds a `registrar` or
-an `mcu` state. `status` is
+registration or a state a module reported; `states` then holds a `registrar`,
+`mcu` or `dialog_state` state. `status` is
 `"open"`, `"closed"` or `nil`, as a watcher of the `presence` package is told;
 `states` and `watchers` carry the columns of `list` and `watchers`.
 `unsubscribe_presence(pid, domain)` stops the pushes; a subscriber that dies is

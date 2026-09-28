@@ -539,7 +539,11 @@ defmodule Kelix.Mod.PresenceTest do
     test "list and show carry a reported registration, unwatched and unpublished" do
       :registered = register(device("10.0.0.9"))
 
-      assert {:ok, [row]} = Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
+      assert {:ok, [%{aor: "magali.buu", status: "open", sources: "registrar", watchers: 0}]} =
+               Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
+
+      assert {:ok, %{states: [row], watchers: []}} =
+               Presence.handle_control("show", %{"domain" => "weshwesh.eu", "aor" => "magali.buu"})
 
       assert %{
                presentity_uri: "sip:magali.buu@weshwesh.eu",
@@ -548,9 +552,6 @@ defmodule Kelix.Mod.PresenceTest do
                status: "open",
                etag: nil
              } = row
-
-      assert {:ok, %{states: [^row], watchers: []}} =
-               Presence.handle_control("show", %{"domain" => "weshwesh.eu", "aor" => "magali.buu"})
     end
 
     test "the registration row goes with the last device" do
@@ -580,10 +581,15 @@ defmodule Kelix.Mod.PresenceTest do
       pub = %{publication("magali.buu", doc: doc("magali.buu", :closed)) | domain: "weshwesh.eu"}
       {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
 
-      assert {:ok, rows} = Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
+      # one line for the AOR, stating what its watchers are told: the publication
+      assert {:ok, [%{aor: "magali.buu", status: "closed", sources: "publish, registrar"}]} =
+               Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
+
+      assert {:ok, %{states: states}} =
+               Presence.handle_control("show", %{"domain" => "weshwesh.eu", "aor" => "magali.buu"})
 
       assert [%{source: "publish", status: "closed"}, %{source: "registrar", status: "open"}] =
-               Enum.sort_by(rows, & &1.source)
+               Enum.sort_by(states, & &1.source)
     end
 
     test "a live publication wins over the registration" do
@@ -858,11 +864,18 @@ defmodule Kelix.Mod.PresenceTest do
                          states: [%{source: "mcu"}]
                        }}}
 
-      assert {:ok, [row]} = Presence.handle_control("list", %{"domain" => @domain})
-      assert %{presentity_uri: "sip:8001@example.com", source: "mcu", status: "open"} = row
+      assert {:ok, [%{aor: "8001", status: "open", activity: "busy", sources: "mcu", calls: nil}]} =
+               Presence.handle_control("list", %{"domain" => @domain})
 
-      assert {:ok, %{states: [^row]}} =
+      assert {:ok, %{states: [row]}} =
                Presence.handle_control("show", %{"domain" => @domain, "aor" => "8001"})
+
+      assert %{
+               presentity_uri: "sip:8001@example.com",
+               source: "mcu",
+               status: "open",
+               activity: "busy"
+             } = row
 
       :ok = report_from(reporter, "8001", nil)
       assert_receive {:kelix_presence, @domain, {:remove, "8001"}}
@@ -971,7 +984,8 @@ defmodule Kelix.Mod.PresenceTest do
       assert_receive {:kelix_presence, @domain, {:upsert, %{aor: "bob", states: [row]}}}
       assert %{event: "dialog", source: "dialog_state", status: "1 dialog"} = row
 
-      assert {:ok, [^row]} = Presence.handle_control("list", %{"domain" => @domain})
+      assert {:ok, [%{aor: "bob", calls: 1, sources: "dialog_state"}]} =
+               Presence.handle_control("list", %{"domain" => @domain})
 
       assert {:ok, %{states: [^row]}} =
                Presence.handle_control("show", %{"domain" => @domain, "aor" => "bob"})
@@ -1003,10 +1017,17 @@ defmodule Kelix.Mod.PresenceTest do
       %{etag: etag}
     end
 
+    test "list renders one row per presentity" do
+      assert {:ok, [row]} = Presence.handle_control("list", %{"domain" => @domain})
+      assert %{aor: "bob", status: "open", watchers: 1, sources: "publish"} = row
+    end
+
     # kamailio's column names, deliberately: one vocabulary for an operator who
     # migrated from it.
-    test "list renders the presentity rows", %{etag: etag} do
-      assert {:ok, [row]} = Presence.handle_control("list", %{"domain" => @domain})
+    test "show renders the states under kamailio's column names", %{etag: etag} do
+      assert {:ok, %{states: [row]}} =
+               Presence.handle_control("show", %{"domain" => @domain, "aor" => "bob"})
+
       assert row.presentity_uri == "sip:bob@#{@domain}"
       assert row.event == @package
       assert row.etag == etag
