@@ -14,9 +14,11 @@ default, and PlantUML with `--format-puml`.
 
 Three decisions shape the whole plan:
 
-- **One journal per scenario instance.** Turning it on again after an `off`
-  continues the same journal; it never opens a second one. A journal is
-  addressed by the instance id `kelictl monitor` prints.
+- **One journal per scenario instance.** FSL enforces it since 0.4.0 (commit
+  `cf2c44c`): after `off`, no journal starts again in that run, whether by `on`,
+  the `debug` flag or `--log-sequence`. The node refuses a second `on` with
+  `{:error, :journal_written}` (A5). A journal is addressed by the instance id
+  `kelictl monitor` prints.
 - **The node keeps the journal, not a rendering of it.** `Kelix.Traces` holds the
   list of events and the run's metadata. It renders nothing.
 - **Rendering belongs to the consumers.** `kelictl` draws the text ladder and the
@@ -87,8 +89,11 @@ No renderer is added to FSL: the text ladder belongs to `kelictl` (A7).
   dialog pay for it.
 
 A `[debug] max_trace_bytes` bound (default 1 MiB per journal) protects the
-store from a pathological call. Past it, `Kelix.Traces` stops appending and
-records a `:cut` event, as Trix does.
+store from a pathological call. `Kelix.Traces.store/2` keeps the head of the
+journal up to the bound, then a `:cut` event, as Trix does: the events are
+counted by the size of their `body`. The journal grows in the instance's
+process and in the trace table while the call runs; the bound applies when it
+is kept, which is what lasts an hour.
 
 ### A3. Bodies are shown decoded: `deflate` and `gzip`
 
@@ -145,34 +150,38 @@ An entry, keyed by the instance id (`meta.slot`):
   id: pos_integer,             # the monitor's instance id
   scenario: String.t(), domain: String.t() | nil, script: String.t() | nil,
   pid: pid,                    # monitored: `running` follows it
-  first_written_at: DateTime.t(), last_written_at: DateTime.t(),
-  meta: map,                   # FSL.Journal meta of the FIRST segment (t0 included)
+  written_at: DateTime.t(),
+  meta: map,                   # FSL.Journal meta (t0, slot, joined_in, config)
   events: [event],             # the journal, oldest first (§4.3)
   bytes: non_neg_integer
 }
 ```
 
-- **One entry per instance.** A second flush for the same id (on, off, on, …)
-  **appends** its events. The `journal off (state)` and `journal on (state)`
-  notes the runner records already mark the gap, and `:at` is monotonic on the
-  node, so times stay consistent against the first `t0`.
+- **One entry per instance**, because an instance flushes at most once: FSL
+  starts no journal again after `off`. A second store under an id already held
+  is therefore a fault (a reused slot, say): the new journal replaces the old
+  one and a warning names the id.
+- **A second `on` is refused.** `Kelix.Control.debug_scenario(id, :on)` answers
+  `{:error, :journal_written}` when an entry for `id` is kept, rather than an
+  `:ok` that FSL would then silently ignore. `kelictl` prints "the journal of
+  scenario <id> was already written — `kelictl debug show <id>`".
 - A run with no slot (not started by the pool) is keyed by its pid and has
   `id: nil`. This is rare on a node, but it must not crash.
-- **Retention** counts from `last_written_at`. **Eviction** past `max_traces`
-  drops the entry written least recently. `running` comes from monitoring `pid`,
+- **Retention** counts from `written_at`. **Eviction** past `max_traces` drops
+  the oldest entry. `running` comes from monitoring `pid`,
   and its change is pushed (A6).
 - `Kelix.Traces` renders nothing and interprets nothing. It stores, bounds,
   expires and pushes.
 
-### A6. Pushes when a journal is kept, grows, or goes
+### A6. Pushes when a journal is kept, changes, or goes
 
 On the model of `subscribe_monitor/1`:
 
 - `Kelix.Control.subscribe_traces(pid)` returns the snapshot and registers `pid`
   in the same call;
 - `pid` then receives
-  - `{:kelix_traces, {:upsert, summary}}` when a journal is stored or appended
-    to, or its instance ends (`running` goes false);
+  - `{:kelix_traces, {:upsert, summary}}` when a journal is stored, and again
+    when its instance ends (`running` goes false);
   - `{:kelix_traces, {:remove, id}}` when it expires or is evicted;
 - `unsubscribe_traces(pid)`; a dead subscriber is dropped (monitored), which
   also covers a kelescope node that disconnects;
@@ -234,9 +243,10 @@ Both render in `kelictl` (`Kelix.Control.CLI`, or a module beside it such as
 - kelixip:
   - the `traced` column is set and cleared, and `subscribe_monitor` sees both
     upserts;
-  - on/off/on gives **one** entry whose events hold both segments;
-  - `subscribe_traces` gets `:upsert` on store, on append and on the instance's
-    end, and `:remove` on expiry and on eviction;
+  - `on` after `off` answers `{:error, :journal_written}` and the entry is
+    unchanged;
+  - `subscribe_traces` gets `:upsert` on store and on the instance's end, and
+    `:remove` on expiry and on eviction;
   - a call against the mockup transport stores bodies, decoded and clipped.
 - Docs:
   - `docs/design/debug-improvments.md`;
@@ -290,13 +300,11 @@ kelescope renders the journal itself. Add the hex dependency
   mounts; unsubscribe when it goes away. Resubscribe after a node reconnect: the
   snapshot is the truth, and a restarted node has **none** (they live in memory).
 - One row per instance.
-  - Columns: instance id, scenario, domain, script, last written (local time),
+  - Columns: instance id, scenario, domain, script, written (local time),
     `running` / `ended`, SIP messages, **kept for** (a countdown to
     `expires_at`), and the scroll icon.
   - `:upsert` inserts or replaces the row by `id`; `:remove` drops it.
 - If the popup of an entry is open:
-  - on `:upsert` with a newer `last_written_at`, offer "journal updated —
-    reload";
   - on `:remove`, keep the dialog and show "no longer kept on the node".
 - Empty state: "No journal kept. Turn one on from the monitor." Mention the
   retention and capacity (`limits` in the snapshot, §4.2).
@@ -351,8 +359,9 @@ stack decides the component, but the choices below are what makes it read well.
     then open the popup on the next `{:upsert, %{id: ^id}}`.
   - Show a spinner while waiting, and a message after a few seconds: an
     instance busy outside a wait sees the request only at its next one.
-- The operator may then turn it on again: the same entry grows, and the popup
-  offers to reload (B2).
+- A call whose journal was written cannot be journalled again: hide "Journal
+  on" for a monitor row whose id is in the kept panel, and treat
+  `{:error, :journal_written}` as "already written", opening its popup.
 
 ### B5. Tests
 
@@ -374,8 +383,8 @@ On a node running Part A, with a call going through it:
 1. "Journal on" from the monitor: the badge appears;
 2. "Write now and show": the popup opens with the INVITE… lines, bodies
    unfolding, a compressed NOTIFY readable;
-3. "Journal on" again, then hang up: the same kept row updates to `ended`, and
-   its popup holds both segments;
+3. hang up: the same kept row updates to `ended`; "Journal on" is no longer
+   offered for that call;
 4. after `[debug] trace_retention` the row leaves the panel on its own;
 5. `kelictl debug show <id>` on the node prints the same journal as a ladder,
    and `--format-puml` as PlantUML.
@@ -399,7 +408,7 @@ Turning it on and off:
 
 ```elixir
 debug_scenario(id :: pos_integer, :on | :off, admin :: String.t() | nil)
-  :: :ok | {:error, :not_found}
+  :: :ok | {:error, :not_found} | {:error, :journal_written}   # :on only
 ```
 
 ### 4.2 Kept journals
@@ -421,9 +430,8 @@ summary :: %{
   scenario: String.t(),
   domain: String.t() | nil,
   script: String.t() | nil,
-  first_written_at: DateTime.t(),   # UTC
-  last_written_at: DateTime.t(),    # UTC
-  expires_at: DateTime.t(),         # UTC, last_written_at + trace_retention
+  written_at: DateTime.t(),         # UTC
+  expires_at: DateTime.t(),         # UTC, written_at + trace_retention
   running: boolean(),               # the instance is still alive
   sip_count: non_neg_integer(),
   bytes: non_neg_integer()
@@ -437,7 +445,7 @@ trace(id) :: {:ok, Map.merge(summary, %{meta: meta, events: [event]})}
            | {:error, :not_found}
 
 meta :: %{scenario: String.t(), pid: String.t(), slot: term, joined_in: atom | nil,
-          config: keyword, t0: integer}      # FSL.Journal meta, first segment;
+          config: keyword, t0: integer}      # FSL.Journal meta;
                                              # config has its secrets as the
                                              # scenario declared them: mask with
                                              # FSL.Diagram.mask/2 before showing
