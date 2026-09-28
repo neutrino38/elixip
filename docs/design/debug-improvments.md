@@ -176,7 +176,13 @@ s'il meurt sans `flush`.
   vérifiée dans le fichier produit ; une instance UAS dont la première flèche est
   la requête qui l'a créée.
 
-Aucun essai en trafic réel avec l'escript n'a encore été fait.
+Essai en trafic réel le 2026-09-28 : `elixipp -c ives-wss.json
+uac_invite_webrtc.exs --log-sequence`, appel WebRTC sur WSS vers dev71 avec média
+Mendooze. Le diagramme contient tous les messages du log, dans l'ordre et aux bons
+temps : INVITE, 407 et son ACK fabriqué par la transaction, INVITE authentifié,
+deux 100, 180, 200 avec SDP, ACK, puis BYE et son 200. La voie porte le Call-ID
+et l'adresse `dev71.dev.ives.fr:443/wss`. Pas encore essayé : un REGISTER réel, un
+B2BUA, `kelictl debug` sur un nœud.
 
 ## Débogage à chaud dans kelixip
 
@@ -216,8 +222,8 @@ imprime tous, du plus ancien au plus récent.
 
 Par ordre de priorité :
 
-1. Un essai en trafic réel : `elixipp --log-sequence UAC.Register` contre un
-   registrar, puis un appel.
+1. Compléter l'essai en trafic réel : un REGISTER, un B2BUA, et
+   `kelictl debug <id> on` sur un nœud kelixip.
 2. Lever la limite `--limit 1` : un fichier par instance nommé par Call-ID, ou
    un seul fichier pour la campagne.
 3. Une option `--log-sequence-dir` pour le dossier de sortie.

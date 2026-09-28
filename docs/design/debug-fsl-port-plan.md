@@ -21,7 +21,11 @@ other SIP behaviour does.
 - **B1–B6 done**; B1 is on hex `~> 0.3.0`. Updating `fsl` makes mix unlock its
   own dependencies and upgrade `req` 0.6 → 0.7; the lock keeps `req` 0.6.3 and
   `hpax` 1.0.4, and only the `fsl` line changed.
-- **Remaining:** B7 (real traffic), then the merge into the release branch.
+- **B7 partly done** (2026-09-28): a WebRTC call over WSS with
+  `uac_invite_webrtc.exs --log-sequence` against dev71 draws every message of the
+  log, in order and on time, on one lane named after its Call-ID. A real REGISTER
+  and a B2BUA are still untried.
+- **Remaining:** the rest of B7, then the merge into the release branch.
 
 ## 1. State after the merge
 
