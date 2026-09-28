@@ -1058,25 +1058,66 @@ defmodule Kelix.Control do
   # re-parses the tokens) sees one answer. A bare token spelling a declared name
   # stays the flag it always was, and one left over once every declared argument
   # is bound is passed through for the module to refuse.
+  #
+  # A bare `user@domain` is an AOR, as `registration show` reads one: for a command
+  # declaring both `aor` and `domain` it binds the two (`presence show
+  # bob@weshwesh.eu`). With the domain already bound, the user part alone is the
+  # AOR when both name the same domain; otherwise the token is kept whole, and the
+  # module answers for an AOR it does not hold rather than for another domain's bob.
   defp bind_positional(module, cmd, %{"args" => tokens} = args) when is_list(tokens) do
     declared = declared_args(module, cmd)
     free = Enum.reject(declared, &Map.has_key?(args, &1))
 
     {tokens, {args, _free}} =
-      Enum.map_reduce(tokens, {args, free}, fn
-        token, {acc, [name | rest]} = unchanged when is_binary(token) ->
-          if String.contains?(token, "=") or token in declared,
-            do: {token, unchanged},
-            else: {"#{name}=#{token}", {acc |> Map.delete(token) |> Map.put(name, token), rest}}
+      Enum.flat_map_reduce(tokens, {args, free}, fn
+        token, {acc, free} = unchanged when is_binary(token) and free != [] ->
+          cond do
+            String.contains?(token, "=") or token in declared ->
+              {[token], unchanged}
+
+            "aor" in free and String.contains?(token, "@") ->
+              bind_aor(token, Map.delete(acc, token), free)
+
+            true ->
+              [name | rest] = free
+              {["#{name}=#{token}"], {acc |> Map.delete(token) |> Map.put(name, token), rest}}
+          end
 
         token, unchanged ->
-          {token, unchanged}
+          {[token], unchanged}
       end)
 
     Map.put(args, "args", tokens)
   end
 
   defp bind_positional(_module, _cmd, args), do: args
+
+  defp bind_aor(token, args, free) do
+    [user, domain] = String.split(token, "@", parts: 2)
+    free = List.delete(free, "aor")
+
+    cond do
+      "domain" in free ->
+        args = args |> Map.put("domain", domain) |> Map.put("aor", user)
+        {["domain=#{domain}", "aor=#{user}"], {args, List.delete(free, "domain")}}
+
+      same_domain?(domain, Map.get(args, "domain")) ->
+        {["aor=#{user}"], {Map.put(args, "aor", user), free}}
+
+      true ->
+        {["aor=#{token}"], {Map.put(args, "aor", token), free}}
+    end
+  end
+
+  # Alias-aware when the node serves the two names, literal otherwise.
+  defp same_domain?(a, b) when is_binary(a) and is_binary(b) do
+    case {resolve_domain(a), resolve_domain(b)} do
+      {{:ok, name}, {:ok, name}} -> true
+      _ -> String.downcase(a) == String.downcase(b)
+    end
+  end
+
+  defp same_domain?(_a, _b), do: false
 
   defp declared_args(module, cmd) do
     if function_exported?(module, :describe_control, 0) do

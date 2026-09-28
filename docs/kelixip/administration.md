@@ -498,6 +498,14 @@ kelictl presence list weshwesh.eu              # = domain=weshwesh.eu
 kelictl presence show weshwesh.eu magali.buu   # = domain=… aor=…
 ```
 
+A bare `user@domain` is an address: for a command declaring `aor` and `domain`, it
+binds both. With the domain already given, it binds `aor` to the user part when
+the two domains agree, and is kept whole otherwise.
+
+```
+kelictl presence show magali.buu@weshwesh.eu   # = domain=weshwesh.eu aor=magali.buu
+```
+
 A bare token spelling a declared argument's name stays a flag (`force` =
 `force=true`).
 

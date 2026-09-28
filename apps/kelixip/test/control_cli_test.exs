@@ -720,6 +720,25 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "domain=weshwesh.eu"
     end
 
+    # `presence show bob@weshwesh.eu`: one token, the address an operator copied
+    # out of a log, is the AOR and its domain.
+    test "a bare user@domain binds both the aor and the domain" do
+      {0, out} = run(["namedargs", "show", "magali@weshwesh.eu"])
+      assert out =~ "magali@weshwesh.eu"
+      assert out =~ "domain=weshwesh.eu"
+      assert out =~ "aor=magali"
+    end
+
+    test "with the domain already bound, the user part is the aor when the domains agree" do
+      {0, out} = run(["namedargs", "show", "weshwesh.eu", "magali@WeshWesh.eu"])
+      assert out =~ "magali@weshwesh.eu"
+    end
+
+    test "an aor naming another domain is kept whole" do
+      {0, out} = run(["namedargs", "show", "weshwesh.eu", "magali@other.net"])
+      assert out =~ "magali@other.net@weshwesh.eu"
+    end
+
     test "the raw tokens are still there" do
       {0, out} = run(["namedargs", "raw", "verbose"])
       assert out =~ "verbose"
