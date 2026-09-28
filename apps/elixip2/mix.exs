@@ -39,9 +39,7 @@ defmodule SIPParser.MixProject do
       # The Finite State Language: the engine every scenario and every kelixip
       # script runs on. It lives in its own repository and ships as the hex
       # package `finite_state_language` (OTP app `:fsl`, Apache-2.0).
-      # DEVELOPMENT ONLY — FSL 0.4.1 (journal_events/2), until it is published.
-      # Never merge this line into a release branch.
-      {:fsl, path: "../../../finite-state-language/elixir"},
+      {:fsl, "~> 0.4.1", hex: :finite_state_language},
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.6"},

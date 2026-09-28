@@ -37,9 +37,8 @@ Part B can start once §4 is frozen. Its end-to-end check needs a node running
 Part A.
 
 **Status (2026-09-28).** Part A is implemented on elixip `feat/kelictl-debug`
-and FSL `feat/live-journal` (0.4.1, not yet published), and §4 is what the node
-answers. Left in Part A: publish FSL 0.4.1 and move `apps/elixip2` back to the
-hex dependency, the release note (A8), and a check on a real node.
+against FSL 0.4.1 from hex, and §4 is what the node answers. Left in Part A: the
+release note (A8) and a check on a real node.
 
 ---
 
