@@ -35,6 +35,12 @@ defmodule SIP.Test.SequenceTrace do
 
   setup do
     SipTrace.take()
+
+    # Run from the umbrella root, `:kelixip` has started and Kelix.Config has
+    # routed every diagram to Kelix.Traces. These tests read the file elixipp
+    # writes, so they run as the standalone tool does.
+    SIP.Test.AppEnv.preserve([:sequence_output])
+    Application.delete_env(:elixip2, :sequence_output)
     :ok
   end
 
@@ -167,6 +173,41 @@ defmodule SIP.Test.SequenceTrace do
       fun.() -> true
       tries == 0 -> false
       true -> Process.sleep(10) && wait_until(fun, tries - 1)
+    end
+  end
+
+  # ── The host: what predates the journal, and where the diagram goes ─────────
+
+  describe "SIP.FSL.Host" do
+    test "a B2BUA's outbound legs are adopted with their tag when the journal starts" do
+      :ok = SipTrace.watch()
+      leg = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(leg, :kill) end)
+
+      ctx =
+        SIP.Context.appdata_set(%SIP.Context{}, :__b2bua__, %SIP.B2bua.State{
+          legs: %{outbound: %SIP.B2bua.Leg{tag: :outbound, dialogpid: leg}}
+        })
+
+      assert SIP.Session.B2bua.leg_dialogs(ctx) == [{:outbound, leg}]
+      assert SIP.Session.B2bua.leg_dialogs(%SIP.Context{}) == []
+
+      :ok = SIP.FSL.Host.journal_started(ctx)
+      SipTrace.sent(transaction(leg), @invite)
+      assert [%{party: "outbound"}] = SipTrace.take()
+    end
+
+    test "journal_output/3 hands the diagram to :sequence_output, else to a file" do
+      assert SIP.FSL.Host.journal_output("doc", %{}, FSL.Diagram.PlantUML) == :default
+
+      defmodule Sink do
+        def keep(doc, meta, renderer), do: {:ok, {doc, meta, renderer}}
+      end
+
+      Application.put_env(:elixip2, :sequence_output, {Sink, :keep})
+
+      assert SIP.FSL.Host.journal_output("doc", %{slot: 3}, FSL.Diagram.PlantUML) ==
+               {:ok, {"doc", %{slot: 3}, FSL.Diagram.PlantUML}}
     end
   end
 

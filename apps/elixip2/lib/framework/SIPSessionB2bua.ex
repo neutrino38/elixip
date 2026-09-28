@@ -3208,6 +3208,16 @@ defmodule SIP.Session.B2bua do
   # ── Teardown ────────────────────────────────────────────────────────────────
 
   @doc """
+  The dialogs of this B2BUA's outbound legs, as `{leg_tag, dialog_pid}` — the
+  inbound one is the context's `dialogpid`. `[]` for a scenario that created
+  none. Read by the sequence journal when it starts on a call already set up.
+  """
+  @spec leg_dialogs(SIP.Context.t()) :: [{atom(), pid()}]
+  def leg_dialogs(sip_ctx) do
+    for {tag, %Leg{dialogpid: pid}} <- state(sip_ctx).legs, is_pid(pid), do: {tag, pid}
+  end
+
+  @doc """
   Wind down BOTH legs of this B2BUA, whatever the exit path (success, failure,
   abort, exception). Called by `SIP.Scenario.Runner.finalize/4` before the media
   is released — the media of a leg outlives nothing, but a leg left behind holds

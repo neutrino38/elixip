@@ -639,6 +639,49 @@ defmodule Kelix.Control do
   end
 
   @doc """
+  Turn the sequence journal of a running scenario on, or write it out now
+  (`kelictl debug <id> on|off`).
+
+  `:on` takes effect at once, in the middle of whatever the scenario is waiting
+  for: the diagram starts there, the SIP dialogs already open included, and is
+  kept by `Kelix.Traces` when the scenario ends. `:off` writes it immediately,
+  and the scenario goes on untraced. A scenario busy outside a wait sees the
+  request at its next one.
+  """
+  @spec debug_scenario(pos_integer, :on | :off) :: :ok | {:error, :not_found}
+  def debug_scenario(id, op) when is_integer(id) and op in [:on, :off],
+    do: Kelix.InstancePool.journal(id, op)
+
+  @doc "Same as `debug_scenario/2`, logging who asked (`admin`), like `shutdown_scenario/2`."
+  @spec debug_scenario(pos_integer, :on | :off, String.t() | nil) :: :ok | {:error, :not_found}
+  def debug_scenario(id, op, admin) when is_integer(id) do
+    result = debug_scenario(id, op)
+
+    Logger.info(
+      module: __MODULE__,
+      message: "debug_scenario #{id} #{op} by admin=#{admin || "unknown"}: #{inspect(result)}"
+    )
+
+    result
+  end
+
+  @doc """
+  The sequence diagrams kept in memory (`kelictl debug list`), oldest first,
+  without their documents: instance id, scenario, domain, script, when it was
+  written, whether the instance is still running, and how long it is kept.
+  """
+  @spec traces() :: [map]
+  def traces(), do: safe(fn -> Kelix.Traces.list() end, [])
+
+  @doc """
+  The diagrams kept for instance `id`, oldest first, documents included
+  (`kelictl debug show <id>`).
+  """
+  @spec trace(pos_integer) :: {:ok, [map]} | {:error, :not_found}
+  def trace(id) when is_integer(id),
+    do: safe(fn -> Kelix.Traces.get(id) end, {:error, :not_found})
+
+  @doc """
   Reload one or more scenario scripts by name (`kelictl reload-script <name…>`).
   Returns `%{name => :ok | {:error, reason}}`. `notify?` is accepted for parity
   with the spec (in-progress-instance notification is a roadmap refinement).

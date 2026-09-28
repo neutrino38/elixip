@@ -178,6 +178,28 @@ s'il meurt sans `flush`.
 
 Aucun essai en trafic réel avec l'escript n'a encore été fait.
 
+## Débogage à chaud dans kelixip
+
+`kelictl debug <id> on` allume le journal d'une instance vivante ; `off` écrit
+le diagramme tout de suite. Les diagrammes sont gardés en mémoire par
+`Kelix.Traces` et relus par `kelictl debug list` et `kelictl debug show <id>`,
+ou par `GET /traces` et `GET /traces/<id>`. Guide opérateur :
+[administration.md](../kelixip/administration.md).
+
+| Pièce | Côté | Rôle |
+|---|---|---|
+| Clause `{:scenario_ctl, :journal, :on \| :off}` | FSL 0.4.0 | Injectée dans chaque `on_events`, comme celle du shutdown. Allume le journal ou l'écrit, puis reprend l'attente avec le délai restant, sans rien signaler. |
+| `joined_in` dans les métadonnées | FSL 0.4.0 | L'état dans lequel le journal a rejoint l'exécution : la première transition est dessinée depuis cet état. |
+| `FSL.Host.journal_output/3` | FSL 0.4.0 | Où va un diagramme terminé. Un fichier dans le répertoire courant par défaut. |
+| `SIP.FSL.Host.journal_output/3` | SIP | Appelle le `{module, fonction}` de `:elixip2, :sequence_output`, sinon le fichier. |
+| `journal_started/1` | SIP | Adopte aussi les pattes sortantes d'un B2BUA déjà établies, avec leur tag. |
+| `Kelix.Traces` | kelixip | Magasin en mémoire : `[debug] trace_retention` secondes (3600) après l'écriture, `[debug] max_traces` au plus (100), le plus ancien supprimé d'abord. Perdu au redémarrage. |
+| `InstancePool.journal/2`, `Control.debug_scenario/2`, `traces/0`, `trace/1` | kelixip | Le chemin de la commande jusqu'à l'instance, et la relecture. |
+
+Une instance occupée hors d'une attente voit la demande à sa prochaine attente.
+Une instance peut laisser plusieurs diagrammes (`on`, `off`, `on`) : `show` les
+imprime tous, du plus ancien au plus récent.
+
 ## Limites connues
 
 - Un message qui ne passe par aucune transaction liée à l'instance n'apparaît
@@ -185,10 +207,8 @@ Aucun essai en trafic réel avec l'escript n'a encore été fait.
   dialogue), un OPTIONS reçu hors dialogue.
 - `--log-sequence` est refusé avec `--limit > 1`. Un fichier par instance, une
   instance à la fois.
-- Un `ctx_set(:debug, true)` posé tard adopte le dialogue du contexte, pas les
-  pattes d'un B2BUA déjà ouvertes.
-- Le fichier est écrit dans le répertoire courant. Pas d'option pour choisir le
-  dossier.
+- Dans elixipp, le fichier est écrit dans le répertoire courant. Pas d'option
+  pour choisir le dossier.
 - L'adresse du pair d'une requête entrante initiale est inconnue : la première
   voie d'une instance UAS prend son étiquette sur le message suivant.
 

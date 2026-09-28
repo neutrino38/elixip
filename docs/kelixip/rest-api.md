@@ -60,6 +60,9 @@ cert) with a JSON body `{"error": "…"}`.
 | `GET /modules/<name>` | R | `kelictl <name> help` |
 | `DELETE /domains/<domain>/registrations/<aor>` | W | `kelictl registration remove` — *idem* |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
+| `POST /scenarios/<id>/debug` (body `{"enabled": true\|false}`) | W | `kelictl debug <id> on\|off` |
+| `GET /traces` | R | `kelictl debug list` |
+| `GET /traces/<id>` | R | `kelictl debug show <id>` (each entry carries its `document`) |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
 | `POST /domains/reload` | W | `kelictl domain reload-all` |
 | `POST /reload-all` | W | `kelictl reload-all` (what `systemctl reload` runs) |

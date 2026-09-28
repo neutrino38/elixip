@@ -119,6 +119,24 @@ defmodule Kelix.ControlAPITest do
       assert conn.status == 404
     end
 
+    test "POST /scenarios/:id/debug: unknown id → 404, bad body → 400" do
+      json = &conn(:post, "/scenarios/999999/debug", Jason.encode!(&1))
+      put_json = &put_req_header(json.(&1), "content-type", "application/json")
+
+      assert call(put_json.(%{enabled: true})).status == 404
+      assert call(put_json.(%{enabled: "yes"})).status == 400
+      assert call(put_json.(%{})).status == 400
+    end
+
+    test "GET /traces is a list; GET /traces/:id → 404 unknown, 400 not an id" do
+      conn = call(conn(:get, "/traces"))
+      assert conn.status == 200
+      assert is_list(body(conn))
+
+      assert call(conn(:get, "/traces/999999")).status == 404
+      assert call(conn(:get, "/traces/abc")).status == 400
+    end
+
     test "POST /scenarios/:id/shutdown with a non-integer id → 400" do
       conn = call(conn(:post, "/scenarios/abc/shutdown"))
       assert conn.status == 400

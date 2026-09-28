@@ -99,7 +99,7 @@ start there.
 
 ## 3. `SIP.FSL.Host` — what SIP adds to the state machine
 
-`lib/framework/SIPFSLHost.ex`. Thirteen callbacks of the `FSL.Host` behaviour, and
+`lib/framework/SIPFSLHost.ex`. Fourteen callbacks of the `FSL.Host` behaviour, and
 the reason this module exists is as much readability as decoupling: the same
 answers used to be spread across three files and two macro expansions — three
 `use` lines, three calls injected into every `on_events` clause, one on state
@@ -318,6 +318,23 @@ watches itself, so every hook stops at an `:ets.whereis`. Once it exists, a mess
 of an untraced dialog costs one key lookup. The GenServer that owns the table
 monitors each watched scenario and drops the rows of one that dies without
 flushing.
+
+**Late and live starts.** A journal can start after the call is set up — a `debug`
+flag set in a state, or an operator's `{:scenario_ctl, :journal, :on}` (FSL 0.4.0,
+`kelictl debug <id> on`). `journal_started/1` then adopts every dialog already
+open: the context's own and, for a B2BUA, each outbound leg with its tag
+(`SIP.Session.B2bua.leg_dialogs/1`), so both legs are drawn from that point on.
+
+### 3.10 `journal_output/3` — where a diagram goes
+
+`elixipp` writes a file in the working directory, which is FSL's default. A server
+has no directory an operator reads diagrams from, so the answer is configurable:
+`journal_output/3` calls the `{module, function}` named by the `:elixip2,
+:sequence_output` application env with the document, the journal's metadata and
+the renderer, and answers `:default` — the file — when none is set. kelixip sets
+it to `Kelix.Traces.store/3`, which keeps diagrams in memory for `kelictl debug
+show`. The metadata's `slot` is the instance id the pool gave the run, which is
+what the store files a diagram under.
 
 ---
 

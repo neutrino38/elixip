@@ -38,7 +38,7 @@ defmodule Kelix.Control.CLI do
 
   # The detailed topics of `kelictl help <topic>` (each also reachable as
   # `kelictl <topic> help` for the four that are core nouns).
-  @help_topics ["registration", "domain", "mediaserver", "module", "reload", "drain"]
+  @help_topics ["registration", "domain", "mediaserver", "module", "debug", "reload", "drain"]
 
   @exit_not_found 3
   @exit_conflict 4
@@ -160,8 +160,9 @@ defmodule Kelix.Control.CLI do
   # and it is the form a module namespace already uses (`kelictl mcu help`). Both
   # spellings answer the same text. These clauses must precede the `[noun | _]`
   # usage fallbacks below, which would otherwise swallow them.
-  defp parse([topic, "help"]) when topic in ["registration", "domain", "mediaserver", "module"],
-    do: {:help, help_topic(topic)}
+  defp parse([topic, "help"])
+       when topic in ["registration", "domain", "mediaserver", "module", "debug"],
+       do: {:help, help_topic(topic)}
 
   defp parse(["status"]), do: {:ok, :status, :status, []}
   defp parse(["monitor"]), do: {:ok, :monitor, :monitor, []}
@@ -214,6 +215,26 @@ defmodule Kelix.Control.CLI do
       _ -> {:error, "stop: <id> must be an integer"}
     end
   end
+
+  defp parse(["debug", "list"]), do: {:ok, :traces, :traces, []}
+
+  defp parse(["debug", "show", id]) do
+    case Integer.parse(id) do
+      {n, ""} -> {:ok, :trace, :trace, [n]}
+      _ -> {:error, "debug show: <id> must be an integer"}
+    end
+  end
+
+  defp parse(["debug", id, onoff]) when onoff in ["on", "off"] do
+    case Integer.parse(id) do
+      {n, ""} -> {:ok, {:debug, n, onoff}, :debug_scenario, [n, String.to_atom(onoff)]}
+      _ -> {:error, "debug: <id> must be an integer"}
+    end
+  end
+
+  # `debug` is a core noun: a mistyped sub-command gets its usage, not the module
+  # dispatch below.
+  defp parse(["debug" | _]), do: {:error, usage_debug()}
 
   defp parse(["reload-all"]), do: {:ok, :reload_all, :reload_all, []}
 
@@ -309,6 +330,7 @@ defmodule Kelix.Control.CLI do
     "module",
     "log-level",
     "stop",
+    "debug",
     "reload-all",
     "reload-script",
     "drain",
@@ -324,7 +346,8 @@ defmodule Kelix.Control.CLI do
     "registration" => ["list", "show", "remove", "help"],
     "domain" => ["list", "show", "reload-all", "help"],
     "mediaserver" => ["list", "show", "enable", "disable", "help"],
-    "module" => ["list", "reload", "help"]
+    "module" => ["list", "reload", "help"],
+    "debug" => ["list", "show", "help"]
   }
 
   defp complete([], prefix),
@@ -336,6 +359,18 @@ defmodule Kelix.Control.CLI do
     do: {:complete, nil, prefix, Kelix.Control.log_levels()}
 
   defp complete(["stop"], prefix), do: {:complete, {:monitor, [], :instance_ids}, prefix, []}
+
+  # `debug <id> on|off` takes a running instance, `debug show <id>` a kept trace:
+  # the ids come from two different places.
+  defp complete(["debug"], prefix),
+    do: {:complete, {:monitor, [], :instance_ids}, prefix, ["list", "show", "help"]}
+
+  defp complete(["debug", "show"], prefix),
+    do: {:complete, {:traces, [], :instance_ids}, prefix, []}
+
+  defp complete(["debug", id], prefix) when id not in ["list", "show", "help"],
+    do: {:complete, nil, prefix, ["on", "off"]}
+
   defp complete(["monitor"], prefix), do: {:complete, nil, prefix, ["continuous"]}
 
   # Every word after `reload-script` is another script name, and `--notify` is
@@ -422,7 +457,7 @@ defmodule Kelix.Control.CLI do
   defp completion_names(:strings, names) when is_list(names), do: names
 
   defp completion_names(:instance_ids, rows) when is_list(rows),
-    do: Enum.map(rows, &to_string(&1.id))
+    do: for(%{id: id} <- rows, id != nil, do: to_string(id))
 
   defp completion_names(:aors, {:ok, %{registrations: rows}}), do: Enum.map(rows, & &1.aor)
 
@@ -452,6 +487,12 @@ defmodule Kelix.Control.CLI do
 
   defp render({:module_help, name, _cmd}, {:error, :unknown_module}),
     do: {1, "error: no module named \"#{name}\" is loaded (kelictl module list)"}
+
+  defp render({:debug, id, _onoff}, {:error, :not_found}),
+    do: {@exit_not_found, "no scenario #{id} in progress (kelictl monitor)"}
+
+  defp render(:trace, {:error, :not_found}),
+    do: {@exit_not_found, "no trace kept for this id (kelictl debug list)"}
 
   defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
   defp render(:reg_domain, {:error, :not_found}), do: {1, "no such domain"}
@@ -665,6 +706,41 @@ defmodule Kelix.Control.CLI do
   end
 
   defp render(:ok, :ok), do: {0, "ok"}
+
+  defp render({:debug, id, "on"}, :ok) do
+    {0,
+     "journal on for scenario #{id}: its diagram is kept when it ends, " <>
+       "or now with `kelictl debug #{id} off` — then `kelictl debug show #{id}`"}
+  end
+
+  defp render({:debug, id, "off"}, :ok),
+    do: {0, "journal of scenario #{id} written — `kelictl debug show #{id}`"}
+
+  defp render(:traces, []), do: {0, "no trace kept"}
+
+  defp render(:traces, rows) when is_list(rows) do
+    {0,
+     table(
+       ["id", "scenario", "domain", "script", "written (UTC)", "instance", "size", "kept for"],
+       rows,
+       &[
+         dash(&1.id && to_string(&1.id)),
+         dash(&1.scenario),
+         dash(&1.domain),
+         dash(&1.script),
+         Calendar.strftime(&1.written_at, "%Y-%m-%d %H:%M:%S"),
+         if(&1.running, do: "running", else: "ended"),
+         "#{&1.size} B",
+         format_uptime(&1.expires_in_s * 1000)
+       ]
+     )}
+  end
+
+  # The documents as they are, so `kelictl debug show 12 > call.puml` is a file
+  # PlantUML reads — several diagrams are several @startuml blocks in one file.
+  defp render(:trace, {:ok, entries}),
+    do: {0, entries |> Enum.map(& &1.document) |> Enum.join("\n") |> String.trim_trailing()}
+
   defp render(:ok, :notfound), do: {1, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
 
@@ -1472,6 +1548,10 @@ defmodule Kelix.Control.CLI do
       mediaserver show <name>         one media server in detail
       mediaserver enable|disable <name>  take a media server in/out of the pool
       stop <id>                       shut down one scenario
+      debug <id> on|off               sequence diagram of a live scenario:
+                                      start it now / write it now
+      debug list                      the diagrams kept in memory
+      debug show <id>                 print them (PlantUML)
       reload-all                      reload domains.toml + the scripts + the
                                       module configs that can be applied live
                                       (what systemctl reload runs; config.toml
@@ -1676,9 +1756,38 @@ defmodule Kelix.Control.CLI do
     """
   end
 
+  defp help_topic("debug") do
+    """
+    kelictl debug — sequence diagrams of live scenarios
+
+      debug <id> on        [POST /scenarios/<id>/debug {"enabled": true}]
+          Start the sequence diagram of scenario <id> (the id `monitor` prints)
+          now, in the middle of whatever it is waiting for. The SIP dialogs it
+          already has open are traced from this point on.
+      debug <id> off       [POST /scenarios/<id>/debug {"enabled": false}]
+          Write the diagram now; the scenario goes on untraced. Without `off`,
+          it is written when the scenario ends.
+      debug list           [GET /traces]
+          The diagrams kept in memory: instance, scenario, domain, script, when
+          written, whether the instance still runs, how long it is kept.
+      debug show <id>      [GET /traces/<id>]
+          Print the diagrams of instance <id> as PlantUML, oldest first:
+          `kelictl debug show 12 > call.puml`.
+
+    Diagrams are kept in memory only, [debug] trace_retention seconds after they
+    are written (3600) and [debug] max_traces at most (100), the oldest dropped
+    first; config.toml sets both. A restart loses them.
+
+    Full documentation: docs/kelixip/running.md
+    """
+  end
+
   defp help_topic(_other), do: nil
 
   defp usage_module(), do: "usage: kelictl module list | module reload <name>"
+
+  defp usage_debug(),
+    do: "usage: kelictl debug <id> on|off | debug list | debug show <id>"
 
   defp usage_registration() do
     "usage: kelictl registration list [domain] | registration show <domain> <aor> | " <>

@@ -56,6 +56,9 @@ do about it — the release's own script would only say `cat: Permission denied`
 | `kelictl mediaserver show <name>` | R | One media server in detail, including what it says about itself |
 | `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
+| `kelictl debug <id> on\|off` | W | Start the sequence diagram of a live scenario now, or write it now — [below](#sequence-diagram-of-a-live-scenario) |
+| `kelictl debug list` | R | The diagrams kept in memory |
+| `kelictl debug show <id>` | R | Print the diagrams of one scenario (PlantUML) |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
 | `kelictl module list` | R | Loaded modules: version, implementation, how many commands and facades each contributes |
 | `kelictl module reload <name>` | W | Reload a module's config |
@@ -76,7 +79,7 @@ $ kelictl registration help       # the same text, in the order you were typing
 $ kelictl mcu help conference.update   # a module command, from its own declaration
 ```
 
-Topics: `registration`, `domain`, `mediaserver`, `module`, `reload`, `drain`. Each
+Topics: `registration`, `domain`, `mediaserver`, `module`, `debug`, `reload`, `drain`. Each
 one prints its commands with **the REST route beside each** — the same
 `[GET /path]` convention a module's declared help uses, so the two frontals are
 read together. A bare `kelictl`, `-h` and `--help` all print the command list.
@@ -102,6 +105,8 @@ $ kelictl registration show acme.tld <TAB>  the AORs registered in acme.tld
 $ kelictl mcu <TAB>                         the commands the mcu module declares
 $ kelictl mcu conference.create <TAB>       domain=  name=  layout=  …
 $ kelictl stop <TAB>                        the ids of the scenarios in progress
+$ kelictl debug <TAB>                       the same ids, and list / show / help
+$ kelictl debug show <TAB>                  the ids that have a diagram kept
 ```
 
 The script holds **no** command name: it calls `kelictl complete <words…>`, which
@@ -295,6 +300,44 @@ true field by field: a `-` is "the server did not state it".
 
 The reference for the endpoint itself — every field, and what each one commits
 to — is the mediaserver repository, `docs/reference/status-http.md`.
+
+### Sequence diagram of a live scenario
+
+A call that misbehaves can be traced while it runs, without restarting anything:
+
+```console
+$ kelictl monitor
+id  domain       function  script    account  state    event  command  …
+12  example.com  calls     relay.exs alice    talking  ACK    -        …
+
+$ kelictl debug 12 on
+journal on for scenario 12: its diagram is kept when it ends, or now with `kelictl debug 12 off` — then `kelictl debug show 12`
+
+$ kelictl debug 12 off
+journal of scenario 12 written — `kelictl debug show 12`
+
+$ kelictl debug list
+id  scenario   domain       script     written (UTC)        instance  size    kept for
+12  Relay.V3   example.com  relay.exs  2026-09-28 14:02:11  running   2140 B  0h59m48s
+
+$ kelictl debug show 12 > call-12.puml
+```
+
+`on` takes effect at once, in the middle of whatever the scenario is waiting for:
+the diagram opens with a note naming that state, and every SIP message the
+scenario's dialogs send or receive from then on is drawn, one lane per Call-ID —
+the dialogs already open included, both legs of a B2BUA. The scenario itself sees
+nothing. The diagram is written when the scenario ends, or at once with `off`,
+after which the scenario goes on untraced; `on` again starts a new one.
+
+The diagrams are kept **in memory only**: `[debug] trace_retention` seconds after
+they are written (one hour by default) and `[debug] max_traces` at most (100), the
+oldest dropped first ([installation.md](installation.md)). A restart loses them.
+`debug show <id>` prints every diagram kept for that scenario, oldest first, as
+PlantUML — several `@startuml` blocks in one file are several diagrams.
+
+Only messages that go through a transaction of the scenario's dialogs are drawn: a
+stateless reply of the dialog layer, or an OPTIONS outside any dialog, is not.
 
 ### Reloading a running node
 

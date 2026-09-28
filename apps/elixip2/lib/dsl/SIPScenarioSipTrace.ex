@@ -64,14 +64,14 @@ defmodule SIP.Scenario.SipTrace do
   end
 
   @doc """
-  Bind an already-running dialog to the calling scenario. Keeps a binding the
-  dialog made itself (it knows its leg tag, this side does not).
+  Bind an already-running dialog to the calling scenario, under the leg `tag`
+  when the caller knows it. Keeps a binding the dialog made itself.
   """
-  @spec adopt(pid()) :: :ok
-  def adopt(dialog_pid) when is_pid(dialog_pid) do
+  @spec adopt(pid(), atom() | nil) :: :ok
+  def adopt(dialog_pid, tag \\ nil) when is_pid(dialog_pid) do
     case table() do
       nil -> :ok
-      tab -> :ets.insert_new(tab, {{:watch, dialog_pid}, {self(), nil}})
+      tab -> :ets.insert_new(tab, {{:watch, dialog_pid}, {self(), tag}})
     end
 
     :ok

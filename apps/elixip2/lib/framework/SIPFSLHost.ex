@@ -439,9 +439,10 @@ defmodule SIP.FSL.Host do
   this one, so `SIP.Scenario.SipTrace` records them there for whoever watches.
   Watching is this process declaring itself; its dialogs bind to it as they
   learn their application. Two things predate the journal and are caught up
-  here: the dialog already in the context (a UAS instance's, or a UAC's when
-  `debug` was set mid-run), adopted; and the request a UAS instance was spawned
-  for, which crossed its transaction before anybody traced, recorded directly.
+  here: the dialogs already open — the one in the context (a UAS instance's, or
+  a UAC's when `debug` was set mid-run) and a B2BUA's outbound legs, each with
+  its leg tag — adopted; and the request a UAS instance was spawned for, which
+  crossed its transaction before anybody traced, recorded directly.
   """
   @impl true
   def journal_started(sip_ctx) do
@@ -449,6 +450,9 @@ defmodule SIP.FSL.Host do
 
     if is_pid(Map.get(sip_ctx, :dialogpid)),
       do: SIP.Scenario.SipTrace.adopt(sip_ctx.dialogpid)
+
+    for {tag, pid} <- SIP.Session.B2bua.leg_dialogs(sip_ctx),
+        do: SIP.Scenario.SipTrace.adopt(pid, tag)
 
     with %{} = req <- inbound_request(sip_ctx),
          %{} = event <- SIP.Scenario.SipTrace.event(:in, req) do
@@ -461,6 +465,21 @@ defmodule SIP.FSL.Host do
   @doc "The SIP messages traced for this instance, handed to the journal and forgotten."
   @impl true
   def journal_collect, do: SIP.Scenario.SipTrace.take()
+
+  @doc """
+  Where a finished diagram goes: to the `{module, function}` named by the
+  `:elixip2, :sequence_output` application env, called with the document, the
+  journal's metadata and the renderer — kelixip keeps them in memory for its
+  operator (`Kelix.Traces`). Without one, a file in the working directory, as
+  `elixipp --log-sequence` has always written.
+  """
+  @impl true
+  def journal_output(document, meta, renderer) do
+    case Application.get_env(:elixip2, :sequence_output) do
+      {module, fun} -> apply(module, fun, [document, meta, renderer])
+      nil -> :default
+    end
+  end
 
   # ── The monitor's columns ───────────────────────────────────────────────────
 

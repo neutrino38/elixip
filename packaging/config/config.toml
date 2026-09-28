@@ -93,6 +93,14 @@ port = 9095
 #auth  = "token"
 #token = "CHANGE-ME"
 
+# Sequence diagrams of live scenarios: `kelictl debug <id> on` turns one on,
+# `kelictl debug show <id>` prints it. They are kept in MEMORY only, and a restart
+# loses them. A diagram is kept `trace_retention` seconds after it is written, and
+# at most `max_traces` of them, the oldest dropped first.
+#[debug]
+#trace_retention = 3600
+#max_traces      = 100
+
 # Loadable modules — one block per module to load, from module_dir. Nothing is
 # loaded by default: install the matching kelixip-mod-* package first, or the
 # block is logged and skipped.

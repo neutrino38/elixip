@@ -773,4 +773,29 @@ defmodule Kelix.ConfigTest do
       assert msg =~ "`advertise`"
     end
   end
+
+  describe "parse/1 — [debug]" do
+    test "absent → one hour, a hundred traces" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.debug == %{trace_retention: 3600, max_traces: 100}
+    end
+
+    test "both keys are read" do
+      assert {:ok, cfg} = Config.parse("[debug]\ntrace_retention = 600\nmax_traces = 20\n")
+      assert cfg.debug == %{trace_retention: 600, max_traces: 20}
+    end
+
+    test "a non-positive value or a stray key is refused" do
+      assert {:error, msg} = Config.parse("[debug]\nmax_traces = 0\n")
+      assert msg =~ "max_traces"
+      assert {:error, msg} = Config.parse("[debug]\nretention = 60\n")
+      assert msg =~ "retention"
+    end
+
+    test "the node's diagrams go to Kelix.Traces" do
+      {:ok, cfg} = Config.parse("")
+      :ok = Config.apply_app_env(cfg)
+      assert Application.get_env(:elixip2, :sequence_output) == {Kelix.Traces, :store}
+    end
+  end
 end

@@ -22,6 +22,9 @@ defmodule Kelix.ControlAPI do
   | `mediaserver/1` | `GET /mediaservers/:name` |
   | `unregister/3` | `DELETE /domains/:domain/registrations/:aor[?contact=]` |
   | `shutdown_scenario/1` | `POST /scenarios/:id/shutdown` |
+  | `debug_scenario/2` | `POST /scenarios/:id/debug` (body `{"enabled": bool}`) |
+  | `traces/0` | `GET /traces` |
+  | `trace/1` | `GET /traces/:id` |
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
   | `reload_domains/0` | `POST /domains/reload` |
   | `reload_all/0` | `POST /reload-all` |
@@ -72,6 +75,23 @@ defmodule Kelix.ControlAPI do
 
   get "/status" do
     json(conn, 200, Control.status())
+  end
+
+  get "/traces" do
+    json(conn, 200, Enum.map(Control.traces(), &trace_json/1))
+  end
+
+  get "/traces/:id" do
+    case Integer.parse(id) do
+      {n, ""} ->
+        case Control.trace(n) do
+          {:ok, entries} -> json(conn, 200, Enum.map(entries, &trace_json/1))
+          {:error, :not_found} -> json(conn, 404, %{error: "not found"})
+        end
+
+      _ ->
+        json(conn, 400, %{error: "id must be an integer"})
+    end
   end
 
   get "/scenarios" do
@@ -160,6 +180,19 @@ defmodule Kelix.ControlAPI do
     case Integer.parse(id) do
       {n, ""} -> respond(conn, Control.shutdown_scenario(n))
       _ -> json(conn, 400, %{error: "id must be an integer"})
+    end
+  end
+
+  post "/scenarios/:id/debug" do
+    case {Integer.parse(id), conn.body_params["enabled"]} do
+      {{n, ""}, enabled} when is_boolean(enabled) ->
+        respond(conn, Control.debug_scenario(n, if(enabled, do: :on, else: :off)))
+
+      {{_n, ""}, _other} ->
+        json(conn, 400, %{error: "body must be {\"enabled\": true | false}"})
+
+      _ ->
+        json(conn, 400, %{error: "id must be an integer"})
     end
   end
 
@@ -390,6 +423,13 @@ defmodule Kelix.ControlAPI do
   # a per-name result map (reload_script): the status is the aggregate outcome
   defp respond(conn, %{} = map), do: json(conn, 200, jsonable(map))
   defp respond(conn, other), do: json(conn, 200, jsonable(other))
+
+  # A kept trace as JSON: the instance pid stays on the node, the time is ISO 8601.
+  defp trace_json(entry) do
+    entry
+    |> Map.delete(:pid)
+    |> Map.update!(:written_at, &DateTime.to_iso8601/1)
+  end
 
   defp json(conn, status, data) do
     conn

@@ -1150,7 +1150,7 @@ defmodule Kelix.Control.CLITest do
         assert {0, out} = help(argv)
         assert out =~ "usage: kelictl <command> [args]"
         assert out =~ "registration list [domain]"
-        assert out =~ "topics: registration, domain, mediaserver, module, reload, drain"
+        assert out =~ "topics: registration, domain, mediaserver, module, debug, reload, drain"
       end
     end
 
@@ -1182,7 +1182,7 @@ defmodule Kelix.Control.CLITest do
     test "an unknown topic is a usage error listing the real ones" do
       assert {2, out} = help(["help", "registrations"])
       assert out =~ "no help topic \"registrations\""
-      assert out =~ "registration, domain, mediaserver, module, reload, drain"
+      assert out =~ "registration, domain, mediaserver, module, debug, reload, drain"
     end
 
     # `<module> help` belongs to the module namespace and still goes to the node:
