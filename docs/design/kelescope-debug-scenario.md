@@ -59,9 +59,9 @@ rendered document, not the events it was rendered from.
 
 ## 2. Part A — the node
 
-### A1. FSL 0.5.0: the host takes the journal before any rendering
+### A1. FSL 0.4.1: the host takes the journal before any rendering
 
-`../finite-state-language/elixir`, a minor version.
+`../finite-state-language/elixir`, a patch version: an extension of the same journal hand-off as 0.4.0.
 
 - New optional callback `c:FSL.Host.journal_events/2`: `(events, meta) ::
   {:ok, where} | {:error, reason} | :default`. `events` are the journal's own
@@ -249,7 +249,7 @@ Both render in `kelictl` (`Kelix.Control.CLI`, or a module beside it such as
   contract of §4, as 1.5.3 and 1.6.1 did for their panels. It must also name the
   **`gzip` change** (A3), which is visible to peers.
 
-Order: A1 (FSL, publish 0.5.0) → A3 → A2 → A5 → A4, A6 → A7 → A8.
+Order: A1 (FSL, publish 0.4.1) → A3 → A2 → A5 → A4, A6 → A7 → A8.
 
 ---
 
@@ -262,7 +262,7 @@ handles a node that goes away and comes back, and the confirmation popup that
 asks for an operator name before `shutdown_scenario/2`.
 
 kelescope renders the journal itself. Add the hex dependency
-`{:fsl, "~> 0.5", hex: :finite_state_language}` to use:
+`{:fsl, "~> 0.4.1", hex: :finite_state_language}` to use:
 
 - `FSL.Diagram.message_lanes/1` for the lanes;
 - `FSL.Diagram.PlantUML.render/2` for the `.puml` download;

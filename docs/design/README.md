@@ -44,7 +44,7 @@ The user-facing counterparts live at the repository root —
 | [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
 | [debug-improvments.md](debug-improvments.md) | scenario debugging: the sequence diagram drawn from the real SIP messages — what is built, its limits, what comes next (in French) |
 | [debug-fsl-port-plan.md](debug-fsl-port-plan.md) | carrying the step above across the FSL extraction: what goes into the `finite_state_language` package, what stays in the SIP binding, in which order |
-| [kelescope-debug-scenario.md](kelescope-debug-scenario.md) | a live scenario's journal in kelescope — what the node must add (FSL 0.5.0, `Kelix.Traces`, the pushes, `kelictl debug show` as a text ladder) and the kelescope side, against a frozen contract |
+| [kelescope-debug-scenario.md](kelescope-debug-scenario.md) | a live scenario's journal in kelescope — what the node must add (FSL 0.4.1, `Kelix.Traces`, the pushes, `kelictl debug show` as a text ladder) and the kelescope side, against a frozen contract |
 
 ## Designed elsewhere
 
