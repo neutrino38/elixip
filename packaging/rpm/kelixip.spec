@@ -390,6 +390,10 @@ fi
   belong to kelixip-mod-presence alone, as the mcu scripts belong to
   kelixip-mod-mcu.
 
+* Sat Sep 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-2
+- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
+  before the rest of the release landed. No code change.
+
 * Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
 - Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between
   them. New subpackage kelixip-mod-presence — the collection, the entity-tags and
@@ -412,10 +416,6 @@ fi
 - The live-monitor registry is registered as FSL.Monitor, and pushes
   {:fsl_monitor, ...}.
 - User-Agent is now Kelixip/1.6.0.
-
-* Sat Sep 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-2
-- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
-  before the rest of the release landed. No code change.
 
 * Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
 - sip: an INVITE server transaction no longer carries timer F. A call that rang
