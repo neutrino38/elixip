@@ -14,16 +14,14 @@ other SIP behaviour does.
 
 ## Status (2026-09-28)
 
-- **Phase A done** on the FSL branch `feat/scenario-debug` (`09aff33`), version
-  0.3.0, **not published**. One deviation from A4: the first transition
-  journalled after a late start is drawn as the state entered (`third`), not as
-  `second -> third` — a transition event names where the machine went, not where
-  it came from, as in `dbe4b8b`.
-- **B1–B6 done** on elixip `feat/scenario-debug`, against the `path:`
-  dependency. `mix deps.get` with the `path:` line unlocks `:fsl`'s own
-  dependencies and upgrades `req`; `mix deps.unlock fsl` before it keeps the rest
-  of the lock as it was.
-- **Remaining:** publish 0.3.0, switch B1 to hex, B7 (real traffic).
+- **Phase A done** and published: `finite_state_language` 0.3.0 on hex. One
+  deviation from A4: the first transition journalled after a late start is drawn
+  as the state entered (`third`), not as `second -> third` — a transition event
+  names where the machine went, not where it came from, as in `dbe4b8b`.
+- **B1–B6 done**; B1 is on hex `~> 0.3.0`. Updating `fsl` makes mix unlock its
+  own dependencies and upgrade `req` 0.6 → 0.7; the lock keeps `req` 0.6.3 and
+  `hpax` 1.0.4, and only the `fsl` line changed.
+- **Remaining:** B7 (real traffic), then the merge into the release branch.
 
 ## 1. State after the merge
 
