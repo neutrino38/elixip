@@ -157,6 +157,100 @@ defmodule SIP.Test.BodyEncoding do
     end
   end
 
+  describe "a gzipped body" do
+    test "reads as clear text, under both spellings" do
+      for coding <- ["gzip", "x-gzip", "GZIP"] do
+        raw = subscribe(:zlib.gzip(@resource_list), [{"Content-Encoding", coding}])
+        assert {:ok, msg} = SIPMsg.parse(raw, nocb())
+        assert body_data(msg) == @resource_list, "#{coding} was not decoded"
+      end
+    end
+
+    test "a truncated gzip stream is refused" do
+      gz = :zlib.gzip(String.duplicate(@resource_list, 20))
+      cut = binary_part(gz, 0, div(byte_size(gz), 2))
+      raw = subscribe(cut, [{"Content-Encoding", "gzip"}])
+      assert {:unsupported_content_encoding, _req} = SIPMsg.parse(raw, nocb())
+    end
+
+    test "Accept-Encoding says so" do
+      assert SIP.Msg.BodyCoding.supported() == "deflate, gzip, identity"
+    end
+  end
+
+  describe "a compression bomb" do
+    # A few hundred octets on the wire, far more than the node accepts in clear.
+    @bomb String.duplicate("<entry/>", div(SIPMsg.max_message_size(), 8) + 1_000)
+
+    test "is refused rather than inflated, whatever the coding" do
+      for {coding, packed} <- [
+            {"deflate", :zlib.compress(@bomb)},
+            {"deflate", raw_deflate(@bomb)},
+            {"gzip", :zlib.gzip(@bomb)}
+          ] do
+        assert byte_size(packed) < 2_000
+        raw = subscribe(packed, [{"Content-Encoding", coding}])
+        assert {:unsupported_content_encoding, _} = SIPMsg.parse(raw, nocb())
+      end
+    end
+
+    test "says why" do
+      assert SIP.Msg.BodyCoding.decode(:zlib.gzip(@bomb), "gzip") == {:error, :too_large}
+    end
+  end
+
+  describe "SIPMsg.readable/1 — a message as a person reads it" do
+    test "a received compressed body is shown clear, and says what it was" do
+      raw = subscribe(zlib(@resource_list), [{"Content-Encoding", "deflate"}])
+      {:ok, msg} = SIPMsg.parse(raw, nocb())
+
+      assert {text, "deflate"} = SIPMsg.readable(msg)
+      assert text =~ "SUBSCRIBE sip:rls@sip.linphone.org SIP/2.0"
+      assert text =~ "sip:magali.buu@weshwesh.eu"
+    end
+
+    test "the note is not a header: relaying the message does not carry it" do
+      raw = subscribe(:zlib.gzip(@resource_list), [{"Content-Encoding", "gzip"}])
+      {:ok, msg} = SIPMsg.parse(raw, nocb())
+
+      assert msg.decoded_from == "gzip"
+      refute SIPMsg.serialize(msg) =~ ~r/decoded/i
+    end
+
+    test "an outgoing body still compressed is decoded, its header left as sent" do
+      {:ok, msg} = SIPMsg.parse(subscribe(@resource_list, []), nocb())
+
+      out =
+        msg
+        |> Map.put(:body, :zlib.compress(@resource_list))
+        |> Map.put("Content-Encoding", "deflate")
+
+      assert {text, "deflate"} = SIPMsg.readable(out)
+      assert text =~ "Content-Encoding: deflate"
+      assert text =~ "sip:magali.buu@weshwesh.eu"
+    end
+
+    test "the wire form reads the same" do
+      raw = subscribe(raw_deflate(@resource_list), [{"Content-Encoding", "deflate"}])
+      assert {text, "deflate"} = SIPMsg.readable(raw)
+      assert text =~ "sip:magali.buu@weshwesh.eu"
+    end
+
+    test "a body that will not decode is named, never dumped" do
+      {:ok, msg} = SIPMsg.parse(subscribe(@resource_list, []), nocb())
+      out = msg |> Map.put(:body, "not deflate") |> Map.put("Content-Encoding", "deflate")
+
+      assert {text, "deflate"} = SIPMsg.readable(out)
+      assert text =~ "<11 octets, deflate, not decodable>"
+    end
+
+    test "a clear message has no coding, and what is not SIP is nil" do
+      {:ok, msg} = SIPMsg.parse(subscribe(@resource_list, []), nocb())
+      assert {_text, nil} = SIPMsg.readable(msg)
+      assert SIPMsg.readable("not sip at all\r\n\r\n") == {nil, nil}
+    end
+  end
+
   describe "no coding at all" do
     test "identity is the body as sent" do
       raw = subscribe(@resource_list, [{"Content-Encoding", "identity"}])

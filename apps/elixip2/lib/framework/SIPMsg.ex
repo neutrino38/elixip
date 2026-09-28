@@ -568,6 +568,12 @@ defmodule SIPMsg do
 
 	# The header keeps whatever spelling the peer used (headername_to_atomkey/1 has
 	# no atom for it), so the key is matched folded rather than looked up.
+	# Which coding the parser undid, for whoever shows the message as it came
+	# (readable/1). Not a header: serialize/1 skips it, so a relayed message does
+	# not carry it on.
+	defp note_decoding(msg, coding) when coding in [ nil, "identity" ], do: msg
+	defp note_decoding(msg, coding), do: Map.put(msg, :decoded_from, coding)
+
 	defp drop_content_encoding(msg) do
 		msg
 		|> Enum.reject(fn
@@ -742,6 +748,7 @@ defmodule SIPMsg do
 							|> drop_content_encoding()
 							|> Map.put(:body, parse_multi_part_body(parsed_msg.contenttype, clear))
 							|> Map.put(:contentlength, Kernel.byte_size(clear))
+							|> note_decoding(SIP.Msg.Ops.body_encoding(parsed_msg))
 
 						{ :ok, mod_msg, rest }
 
@@ -993,7 +1000,8 @@ defmodule SIPMsg do
 	defp serialize_headers(sipmsg) do
 		header_order1 = [ :via, :from, :to, :callid, :cseq ]
 		header_order2 = [ :useragent, :contenttype, :contentlength ]
-		toskip = [ :transid, :body, :dialog_id, :boundary, :method, :response, :reason, :ruri, :response_code ]
+		toskip = [ :transid, :body, :dialog_id, :boundary, :method, :response, :reason, :ruri, :response_code,
+			:decoded_from ]
 
 		remaining_headers = Enum.reduce(sipmsg, [], fn {k, _v}, acc ->
 			if k not in header_order1 and k not in toskip and k not in header_order2 do
@@ -1074,6 +1082,55 @@ defmodule SIPMsg do
 	end
 
 
+
+	@doc """
+	A message as a person reads it: its text, with the body **decoded**, and the
+	coding that was undone (`"deflate"`, `"gzip"`) or `nil`.
+
+	Takes a parsed message or its wire form. A received message is already clear
+	(the parser decodes it, and says which coding it undid). An outgoing one may
+	still carry a compressed body with its `Content-Encoding` — the dialog
+	deflates a large NOTIFY — and that body is decoded here, the header left as
+	it was sent. A body that will not decode is shown as
+	`<N octets, coding, not decodable>`, never as raw binary. `{nil, nil}` for
+	something that is not a SIP message.
+	"""
+	@spec readable(map() | binary()) :: { binary() | nil, binary() | nil }
+	def readable(wire) when is_binary(wire) do
+		case parse(wire, fn _code, _errmsg, _lineno, _line -> :ok end) do
+			{ :ok, msg } -> readable(msg)
+			_ -> { nil, nil }
+		end
+	end
+
+	def readable(msg) when is_map(msg) do
+		case SIP.Msg.Ops.body_encoding(msg) do
+			coding when coding in [ nil, "identity" ] ->
+				{ safe_serialize(msg), Map.get(msg, :decoded_from) }
+
+			coding ->
+				octets = body_octets(Map.get(msg, :body))
+
+				clear =
+					case SIP.Msg.BodyCoding.decode(octets, coding) do
+						{ :ok, clear } -> clear
+						{ :error, _ } -> "<#{byte_size(octets)} octets, #{coding}, not decodable>"
+					end
+
+				{ safe_serialize(Map.put(msg, :body, clear)), coding }
+		end
+	end
+
+	defp body_octets(body) when is_binary(body), do: body
+	defp body_octets([ %{ data: data } ]) when is_binary(data), do: data
+	defp body_octets(parts) when is_list(parts), do: multipart_body(parts)
+	defp body_octets(_none), do: ""
+
+	defp safe_serialize(msg) do
+		serialize(msg)
+	rescue
+		_ -> nil
+	end
 
 	@doc """
 	Serialize a SIP request into a string to be sent on the network
