@@ -54,6 +54,15 @@ name = "example.com"
 
 A contact that is no room — a DID nobody created — is refused (`404`).
 
+> **Rooms on a domain of their own.** `presence-subscribe.exs` challenges on the
+> served domain. When the rooms live on a domain no user account belongs to
+> (`conf.example.com`), no watcher can answer that challenge. Serve that domain
+> with a copy of the script that challenges on the watcher's domain instead:
+>
+> ```elixir
+> AuthDb.SBB.authenticate(code: 401, realm: :from_domain)
+> ```
+
 ### Restart kelixip
 
 `systemctl restart kelixip`
