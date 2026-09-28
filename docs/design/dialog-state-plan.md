@@ -1,6 +1,7 @@
 # dialog-state-plan.md — call occupancy of a served AOR
 
-**Status: delivered (DS1 to DS6), not yet validated with real phones.** The presence design is [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md),
+**Status: delivered (DS1 to DS6); validated with real phones on 2026-09-28, a
+direct call through `direct-call-with-auth.exs`.** The presence design is [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md),
 the B2BUA design [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md); this document is the
 order the *call occupancy* of objective 1 gets built in, what each phase delivers,
 and what proves it.
