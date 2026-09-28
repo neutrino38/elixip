@@ -90,6 +90,26 @@ defmodule SIP.Test.SequenceTrace do
     assert SipTrace.take() == []
   end
 
+  test "each message carries its text, decoded and clipped" do
+    :ok = SipTrace.watch()
+    SipTrace.sent(transaction(self()), @ok_wire, retransmit: true)
+    assert [%{body: body, clipped: false, decoded_from: nil}] = SipTrace.take()
+    assert body =~ "SIP/2.0 200 OK"
+    assert body =~ "Call-ID: call-1"
+
+    long =
+      String.replace(@ok_wire, "Content-Length: 0\r\n\r\n", "") <>
+        "Content-Type: text/plain\r\nContent-Length: 20000\r\n\r\n" <>
+        String.duplicate("é", 10_000)
+
+    # take/0 forgot the watch with the events
+    :ok = SipTrace.watch()
+    SipTrace.sent(transaction(self()), long, retransmit: true)
+    assert [%{body: cut, clipped: true}] = SipTrace.take()
+    assert byte_size(cut) <= 8_192
+    assert String.valid?(cut)
+  end
+
   test "a received message with no source address falls back to the transaction's peer" do
     :ok = SipTrace.watch()
     SipTrace.received(transaction(self()), @ok, nil, nil)

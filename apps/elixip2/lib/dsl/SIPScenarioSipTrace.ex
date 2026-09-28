@@ -32,10 +32,15 @@ defmodule SIP.Scenario.SipTrace do
 
   @table :sip_scenario_trace
 
+  # The longest message text an event keeps (`:body`), in octets.
+  @max_body 8_192
+
   @typedoc """
   One SIP message, as an `FSL.Journal` `:message` event. The first block is what
-  the renderers draw; `method`, `code`, `reason`, `cseq` and `sdp` are the SIP
-  reading of it, kept for whoever inspects the events.
+  the renderers draw. `body` is the whole message as text, its body decoded
+  (`SIPMsg.readable/1`, `decoded_from` naming the coding undone), cut at 8 KiB
+  (`clipped`): what a journal reader unfolds. `method`, `code`, `reason`, `cseq`
+  and `sdp` are the SIP reading of it, kept for whoever inspects the events.
   """
   @type event :: %{
           kind: :message,
@@ -47,6 +52,9 @@ defmodule SIP.Scenario.SipTrace do
           label: String.t(),
           reply: boolean(),
           repeat: boolean(),
+          body: String.t() | nil,
+          clipped: boolean(),
+          decoded_from: String.t() | nil,
           method: atom() | nil,
           code: non_neg_integer() | nil,
           reason: String.t() | nil,
@@ -141,10 +149,15 @@ defmodule SIP.Scenario.SipTrace do
       nil ->
         nil
 
-      {callid, fields} ->
+      {callid, fields, parsed} ->
         repeat = Keyword.get(opts, :retransmit, false)
+        {text, decoded_from} = SIPMsg.readable(parsed)
+        {body, clipped} = clip(text)
 
         Map.merge(fields, %{
+          body: body,
+          clipped: clipped,
+          decoded_from: decoded_from,
           kind: :message,
           at: System.monotonic_time(:microsecond),
           dir: dir,
@@ -246,6 +259,17 @@ defmodule SIP.Scenario.SipTrace do
 
   # A message re-sent from its serialized form is read back through the one SIP
   # parser rather than by a first-line regex of our own.
+  # The message as text, cut at @max_body octets: a journal is kept for an hour
+  # and read by a person, and a message past this is a body nobody reads whole.
+  # The cut falls on a UTF-8 boundary, so the text stays printable.
+  defp clip(nil), do: {nil, false}
+  defp clip(text) when byte_size(text) <= @max_body, do: {text, false}
+
+  defp clip(text) do
+    head = binary_part(text, 0, @max_body)
+    {String.replace_invalid(head, ""), true}
+  end
+
   defp describe(msgstr) when is_binary(msgstr) do
     case SIPMsg.parse(msgstr, fn _code, _errmsg, _lineno, _line -> :ok end) do
       {:ok, msg} -> describe(msg)
@@ -261,7 +285,7 @@ defmodule SIP.Scenario.SipTrace do
        reason: Map.get(msg, :reason),
        cseq: cseq_label(Map.get(msg, :cseq)),
        sdp: sdp?(Map.get(msg, :contenttype))
-     }}
+     }, msg}
   end
 
   defp party(nil), do: nil
