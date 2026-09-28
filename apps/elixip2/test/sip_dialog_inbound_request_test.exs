@@ -158,7 +158,14 @@ defmodule SIP.Test.DialogInboundRequest do
       }
     end
 
-    defp re_invite, do: Map.merge(inbound_invite(), %{cseq: [2, :INVITE]})
+    # In-dialog, so it carries the To tag our 2xx gave the caller: without it, it
+    # reads as the creating INVITE replayed after a challenge (establish_inbound/3).
+    defp re_invite do
+      Map.merge(inbound_invite(), %{
+        cseq: [2, :INVITE],
+        to: %SIP.Uri{userpart: "bob", domain: "example.com", params: %{"tag" => "bob-tag"}}
+      })
+    end
 
     defp final(code) do
       %{

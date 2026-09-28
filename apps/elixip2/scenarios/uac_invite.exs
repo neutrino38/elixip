@@ -95,7 +95,7 @@ defmodule UAC.InviteExample do
 
   # -------------------------------------------------------------------------------
   state call_established do
-    media_play("/home/ebuu/mediaserver/titi.mp4")
+    media_play("/home/ebuu/record.mp4")
 
     on_events do
       {:ms_event, _player, :player_started} ->

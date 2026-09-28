@@ -1,0 +1,21 @@
+Package: kelixip-mod-dialog-state
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@), kelixip-mod-presence (= @VERSION@)
+Description: Call occupancy of the served users, for kelixip
+ The call state of each served user, reported to the presence collection: a
+ BLF key subscribed with Event: dialog (RFC 4235) lights while its user rings
+ or talks, a presence watcher sees on-the-phone while a call is up, and an ACD
+ is pushed every transition. Only a call whose party is proven a user of the
+ domain counts: authenticated by digest, or reached through its
+ registrations. Enable it with a [module.dialog_state] block in config.toml,
+ next to [module.presence].
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

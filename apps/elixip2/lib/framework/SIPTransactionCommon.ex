@@ -636,8 +636,11 @@ defmodule SIP.Transac.Common do
     resp = reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
 
     resp =
-      if sipmsg.method == :INVITE and resp_code in 200..299 do
-        # Correct contact field for INVITE transaction
+      if sipmsg.method in [:INVITE, :SUBSCRIBE] and resp_code in 200..299 do
+        # The Contact of a 2xx to a DIALOG-FORMING request: it is what the peer
+        # sends its in-dialog requests to. SUBSCRIBE is one (RFC 6665 §4.2.1.2
+        # makes the header mandatory there), and it was getting none — so a
+        # notifier behind a proxy was unreachable for the un-SUBSCRIBE.
         SIP.Transport.add_contact_header(state.tmod, state.tpid, resp)
       else
         resp
@@ -664,6 +667,13 @@ defmodule SIP.Transac.Common do
       # close the transaction with this response code
       {:error, {code, reason, {_ftag, _cid, totag}}} ->
         {_errcode, state} = reply_to_UAC(state, state.msg, code, reason, [], totag)
+        {:upperlayerfailure, state}
+
+      # The same, for a refusal that carries headers of its own: the Allow-Events
+      # of a 489 (RFC 6665 §4.4.7), the Min-Expires of a 423. A refusal a peer
+      # cannot act on is a refusal it retries identically.
+      {:error, {code, reason, fields, {_ftag, _cid, totag}}} when is_list(fields) ->
+        {_errcode, state} = reply_to_UAC(state, state.msg, code, reason, fields, totag)
         {:upperlayerfailure, state}
 
       # The dialog layer answered the request itself and there is nothing to bind to

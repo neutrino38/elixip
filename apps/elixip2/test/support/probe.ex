@@ -7,6 +7,7 @@ defmodule SIP.Test.Probe do
 
       {:sip_mockup, {:request_sent, method, msg}}    # the stack sent a request
       {:sip_mockup, {:response_sent, code, msg}}     # the stack sent a response
+      {:sip_mockup, {:wire_sent, octets}}            # the same, as it went out
 
   Peers can push extra events with the `{:notify, event}` action; those arrive
   as `{:sip_mockup, event}` too. Tests assert with plain `assert_receive`:

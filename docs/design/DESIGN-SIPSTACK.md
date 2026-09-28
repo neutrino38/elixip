@@ -423,6 +423,14 @@ failure is the application's business.
 `ist_awaiting_ack` exists because the ACK of a 2xx matches no transaction: the
 dialog receives it and must tell that IST to stop retransmitting (§13.3.1.4).
 
+The application pid comes with a **monitor** on it. A dialog is created for an
+application: it delivers everything it receives to that process and takes its
+orders from it, so one whose application has died has nobody to answer for the
+call (§5.7, R7). It still outlives it for as long as an answer of its own is
+outstanding — a 2xx that crossed a CANCEL is ACKed and hung up rather than
+leaving the callee off-hook — which is the one thing the monitor must not cut
+short.
+
 ### 5.3 API
 
 `start_dialog/5`, `process_incoming_request/3`, `new_request/2`, `reply/5`,
@@ -461,17 +469,24 @@ fires `{:timeout, tref, :optionskeepalive}`. It keeps an outbound dialog
 
 ### 5.7 Resilience
 
-The stack survives a crash or a disconnection under a leg. Six behaviours, all
+The stack survives a crash or a disconnection under a leg. Seven behaviours, all
 implemented and covered by a failure-injection test set:
 
 | | Behaviour |
 |---|---|
 | R1 | the dialog traps exits; a transaction crash becomes a **synthetic 408** to the application (§17.1.1.2 / §8.1.3.1 give it the same meaning as a timeout) |
-| R2 | the scenario engine catches exits, so teardown always runs |
+| R2 | the scenario engine catches exits and exceptions, so teardown always runs — **on the context the failing state had built**, which lives outside the stack (`FSL.Context.snapshot/1`) because a `rescue` clause sees the bindings of the moment the `try` was entered |
 | R3 | connectionless transport re-selection, and exit-safe transport calls (§3.8) |
 | R4 | transport-down is broadcast once, from `terminate/2` |
 | R5 | a transport dying during a hunt is a **branch** failure, not a dialog death |
 | R6 | a leg death purges the leg and answers its pending requests |
+| R7 | the dialog monitors its application; one that dies takes its dialog with it — hung up first (ACK then BYE) when there is a session to end |
+
+R7 is the symmetric of the dialog outliving its application (§5.2), not its
+contradiction: the dialog stays for an answer that is still coming and ends as
+soon as there is nothing left to wait for. Without it, a dialog whose scenario
+had died collected in-dialog transactions until the fourth and answered 503 to
+every one after that, the caller's own BYE included (dev71, 2026-09-21).
 
 ---
 
@@ -541,3 +556,5 @@ The short list. Breaking one of these has cost a production incident before.
 6. One peer's bad packet never kills a transport process (§3.2).
 7. A dialog sends exactly one `{:dialog_terminated, …}` (§5.5).
 8. The ACK of a 2xx belongs to the dialog, not to a transaction (§3.2, §5.2).
+9. A state that fails tears down what it had allocated: the teardown reads the
+   context the state built, not the one it was entered with (§5.7, R2).

@@ -102,8 +102,12 @@ running configuration is unchanged:
 case-insensitively) or `404`. Both read the live snapshot — what the router uses
 now, not what is on disk. `dial_plan` is ordered and first-match-wins, the
 catch-all being the entry with `"default": true` (and no `pattern`); a function
-absent from `functions` is not served on that domain (`registrar` / `presence`
-are then `null`).
+absent from `functions` is not served on that domain (`registrar` is then `null`
+and `presence` an empty list).
+
+`presence` is a **list**, one entry per event package the domain serves, each
+naming the script serving `SUBSCRIBE` and the one serving `PUBLISH` — `null` when
+the package declares none, which is a `405`.
 
 Every place a `script` appears — the `dial_plan` entries and the function blocks —
 carries the **`module`** the BEAM actually runs for it and its load **`version`**, as
@@ -119,12 +123,20 @@ keeps serving) or `"unknown"` (it could not be stat'ed at load).
   "name": "example.com",
   "aliases": ["example.fr"],
   "max_calls": 500,
-  "functions": ["registrar", "calls"],
+  "functions": ["registrar", "calls", "presence"],
   "registrar": {
     "script": "registrar.exs", "default_expires": 3600,
     "module": "Registrar.Example.V1", "version": 1
   },
-  "presence": null,
+  "presence": [
+    {
+      "event_package": "presence",
+      "subscribe": {"script": "presence-subscribe.exs",
+                    "module": "Kelix.PresenceSubscribe.V1", "version": 1},
+      "publish": {"script": "presence-publish.exs",
+                  "module": "Kelix.PresencePublish.V1", "version": 1}
+    }
+  ],
   "dial_plan": [
     {"pattern": "0[1-9]XXXXXXXX", "default": false, "script": "user2pstn.exs",
      "module": "User2Pstn.V1", "version": 1},

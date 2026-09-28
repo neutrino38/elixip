@@ -423,7 +423,10 @@ defmodule SIP.Test.B2bua.Session do
       assert [{_tid, %Pending{orig_leg: :inbound}}] = B2bua.pending(ctx)
 
       ctx =
-        B2bua.note_leg_event(ctx, {:outbound, {:dialog_terminated, leg.dialogpid, :transport_down}})
+        B2bua.note_leg_event(
+          ctx,
+          {:outbound, {:dialog_terminated, leg.dialogpid, :transport_down}}
+        )
 
       # 487, because the attempt it answers is one we terminated — not 408, which
       # would say the callee was merely slow.

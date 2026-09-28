@@ -59,7 +59,7 @@ defmodule Kelix.Control do
     * `Kelix.InstancePool.list/0` — **which** instances exist (`id`, `domain`,
       `function`, `script`, `pid`). The `id` is what `shutdown_scenario/1`
       (`kelictl stop <id>`) takes, and no other command exposes it.
-    * `SIP.Scenario.Monitor` — **where each FSM is**: current `state`, the `event`
+    * `FSL.Monitor` — **where each FSM is**: current `state`, the `event`
       that got it there, the last `command` it issued, and the `account` it serves.
       Reading the FSM state is the whole point of an FSL-driven server; without it
       the formalism is invisible from the outside. It also carries what SHAPE the
@@ -72,7 +72,7 @@ defmodule Kelix.Control do
   """
   @spec monitor() :: [map]
   def monitor() do
-    fsm = safe(fn -> Map.new(SIP.Scenario.Monitor.calls(), &{&1.slot, &1}) end, %{})
+    fsm = safe(fn -> Map.new(FSL.Monitor.calls(), &{&1.slot, &1}) end, %{})
 
     for row <- safe(fn -> Kelix.InstancePool.list() end, []) do
       Kelix.InstancePool.join_row(row, Map.get(fsm, row.id))
@@ -80,10 +80,12 @@ defmodule Kelix.Control do
   end
 
   @doc """
-  Subscribe `pid` to scenario changes as they happen (kelescope's live monitor —
-  `docs/design/kelixip_liveview.md`), on the model of
+  Subscribe `pid` to scenario changes as they happen (kelescope's live monitor),
+  on the model of
   `Kelix.Mod.Registrar.subscribe_register_event/2`. Returns the current snapshot
-  (`monitor/0`'s shape); `pid` then receives `{:kelix_monitor, {:upsert, row}}`
+  (`monitor/0`'s shape), taken in the same call that registers the subscriber so
+  there is no window for a change to fall into; `pid` then receives
+  `{:kelix_monitor, {:upsert, row}}`
   (rows in that same shape) as a scenario appears or its FSM state/event/command/
   account/media changes, and `{:kelix_monitor, {:remove, id}}` when it ends — no
   polling needed.
@@ -93,10 +95,7 @@ defmodule Kelix.Control do
   what drops the subscription (`Kelix.InstancePool` monitors `pid`).
   """
   @spec subscribe_monitor(pid()) :: [map]
-  def subscribe_monitor(pid) do
-    Kelix.InstancePool.subscribe_monitor(pid)
-    monitor()
-  end
+  def subscribe_monitor(pid), do: safe(fn -> Kelix.InstancePool.subscribe_monitor(pid) end, [])
 
   @doc "Stop a subscription started by `subscribe_monitor/1`."
   @spec unsubscribe_monitor(pid()) :: :ok
@@ -104,7 +103,7 @@ defmodule Kelix.Control do
 
   @doc """
   Subscribe `pid` to domain counter changes as they happen (kelescope's live
-  domain list, `docs/design/kelixip_liveview.md`) — the active-calls half from
+  domain list) — the active-calls half from
   `Kelix.InstancePool`, the registrations half from the registrar module (a
   no-op when it is not loaded: no domain ever registers, so nothing is missed).
   Returns the current snapshot (`domains/0`'s shape); `pid` then receives
@@ -131,7 +130,7 @@ defmodule Kelix.Control do
 
   @doc """
   Subscribe `pid` to one domain's registration detail as it changes (kelescope's
-  live registrations panel, `docs/design/kelixip_liveview.md`) — a no-op when the
+  live registrations panel) — a no-op when the
   registrar module is not loaded: no domain ever registers, so nothing is missed.
   `domain` is matched the way inbound traffic is — name and aliases,
   case-insensitively. Returns the same `%{domain, registrations}` entry
@@ -158,8 +157,94 @@ defmodule Kelix.Control do
   end
 
   @doc """
+  Subscribe `pid` to one domain's presentities as they change (kelescope's live
+  presence panel) — the model of `subscribe_registrations/2`, answered by the
+  presence module, and an empty list when it is not loaded: nothing can be
+  published nor watched without it, so nothing is missed.
+
+  `domain` is matched the way inbound traffic is — name and aliases,
+  case-insensitively. Returns `%{domain, presentities}`, one row per AOR the
+  domain holds a publication or a watcher for:
+
+      %{domain, aor, presentity_uri, status, activity, note, states, watchers}
+
+  `status` is `"open"`, `"closed"` or `nil`, as a watcher of the `presence`
+  package would be told; `states` and `watchers` are the rows `kelictl presence
+  list` and `kelictl presence watchers` show. `pid` then receives
+  `{:kelix_presence, domain, {:upsert, row}}` (`domain` the canonical name) each
+  time a presentity changes, and `{:kelix_presence, domain, {:remove, aor}}` when
+  nothing is published about it and nobody watches it any more — no polling
+  needed.
+  """
+  @spec subscribe_presence(pid(), String.t()) :: {:ok, map} | {:error, :not_found}
+  def subscribe_presence(pid, domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain) do
+      rows =
+        case presence_facade(:subscribe_presentities, [name, pid], {:ok, []}) do
+          {:ok, rows} when is_list(rows) -> rows
+          _down -> []
+        end
+
+      {:ok, %{domain: name, presentities: rows}}
+    end
+  end
+
+  @doc "Stop a subscription started by `subscribe_presence/2`."
+  @spec unsubscribe_presence(pid(), String.t()) :: :ok
+  def unsubscribe_presence(pid, domain) when is_binary(domain) do
+    case resolve_domain(domain) do
+      {:ok, name} -> presence_facade(:unsubscribe_presentities, [name, pid], :ok)
+      {:error, _} -> :ok
+    end
+
+    :ok
+  end
+
+  defp presence_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("presence", fun, args, default) end, default)
+
+  @doc """
+  Subscribe `pid` to the live calls of a served domain's users, as the
+  `dialog_state` module follows them (docs/design/dialog-state-plan.md §2 — the
+  ACD's feed). Returns the rows as they stand; `pid` then receives
+  `{:kelix_dialogs, domain, {:upsert, row}}` on every transition of a dialog and
+  `{:kelix_dialogs, domain, {:remove, id}}` once it ended, no polling needed.
+
+  `owner` is the process holding the subscription — monitor it and re-subscribe
+  on `:DOWN`, or a module restart stops the push silently. `owner: nil` with an
+  empty list is the answer when the module is not loaded.
+  """
+  @spec subscribe_dialogs(pid(), String.t()) ::
+          {:ok, %{domain: String.t(), owner: pid() | nil, dialogs: [map]}} | {:error, :not_found}
+  def subscribe_dialogs(pid, domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain) do
+      case dialog_state_facade(:subscribe_dialogs, [name, pid], {:ok, %{owner: nil, dialogs: []}}) do
+        {:ok, %{owner: owner, dialogs: rows}} ->
+          {:ok, %{domain: name, owner: owner, dialogs: rows}}
+
+        _down ->
+          {:ok, %{domain: name, owner: nil, dialogs: []}}
+      end
+    end
+  end
+
+  @doc "Stop a subscription started by `subscribe_dialogs/2`."
+  @spec unsubscribe_dialogs(pid(), String.t()) :: :ok
+  def unsubscribe_dialogs(pid, domain) when is_binary(domain) do
+    case resolve_domain(domain) do
+      {:ok, name} -> dialog_state_facade(:unsubscribe_dialogs, [name, pid], :ok)
+      {:error, _} -> :ok
+    end
+
+    :ok
+  end
+
+  defp dialog_state_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("dialog_state", fun, args, default) end, default)
+
+  @doc """
   Subscribe `pid` to the conference list as it changes (kelescope's conferencing
-  page — contract `docs/design/mcu-live-push.md`). Returns the current list;
+  page). Returns the current list;
   `pid` then receives `{:kelix_conferences, {:upsert, conf_row}}` and
   `{:kelix_conferences, {:remove, uid}}`, no polling needed.
 
@@ -342,7 +427,7 @@ defmodule Kelix.Control do
       functions:
         for(f <- [:registrar, :calls, :presence], Kelix.Router.function_enabled?(d, f), do: f),
       registrar: with_module(d.registrar, loaded),
-      presence: with_module(d.presence, loaded),
+      presence: Enum.map(d.presence, &render_presence_block(&1, loaded)),
       dial_plan: Enum.map(d.dial_plan, &render_rule(&1, loaded)),
       active_calls: Map.get(active, d.name, 0),
       registrations: map_size(registrations_for(d.name))
@@ -375,6 +460,18 @@ defmodule Kelix.Control do
   end
 
   defp with_module(cfg, _loaded), do: cfg
+
+  # One row per event package the domain serves. The two scripts are shown apart
+  # because they answer two different methods: an operator reading "SUBSCRIBE goes
+  # here, PUBLISH goes there" off this view is reading the router's own decision.
+  # `publish` absent = the package is subscribed to and published by nothing (405).
+  defp render_presence_block(%Kelix.PresenceBlock{} = block, loaded) do
+    %{
+      event_package: block.event_package,
+      subscribe: with_module(%{script: block.subscribe}, loaded),
+      publish: block.publish && with_module(%{script: block.publish}, loaded)
+    }
+  end
 
   defp render_rule(%Kelix.DialRule{default?: true, script: script}, loaded),
     do: with_module(%{pattern: nil, default: true, script: script}, loaded)
@@ -476,13 +573,24 @@ defmodule Kelix.Control do
 
   Dropping a binding is destructive and per-domain by nature: there is deliberately
   no form that removes `"alice"` from *every* domain at once.
+
+  When the presence module is loaded it is told, as the registrar script tells it
+  of every other change: this removal goes through no script, and a subscriber
+  shown open because of the dropped binding would otherwise stay open.
   """
   @spec unregister(String.t(), String.t(), String.t() | :all) :: :ok | :notfound
   def unregister(domain, aor, contact \\ :all) do
     with {:ok, name} <- resolve_domain(domain),
          {:ok, user} <- aor_user(aor, name) do
       # via the registry: the registrar is a loadable module, absent from the core
-      Kelix.ModuleRegistry.facade("registrar", :remove, [name, user, contact], :notfound)
+      case Kelix.ModuleRegistry.facade("registrar", :remove, [name, user, contact], :notfound) do
+        :ok ->
+          Kelix.ModuleRegistry.facade("presence", :registration_changed, [name, user], :ok)
+          :ok
+
+        other ->
+          other
+      end
     else
       _ -> :notfound
     end
@@ -490,8 +598,8 @@ defmodule Kelix.Control do
 
   @doc """
   Same as `unregister/3`, but `admin` identifies who asked for it — kelescope
-  confirms this action and requires a name before sending it
-  (`docs/design/kelixip_liveview.md`), traced here in this node's own logs
+  confirms this action and requires a name before sending it, traced here in
+  this node's own logs
   rather than merely returned to the caller.
   """
   @spec unregister(String.t(), String.t(), String.t() | :all, String.t() | nil) ::
@@ -515,9 +623,8 @@ defmodule Kelix.Control do
 
   @doc """
   Same as `shutdown_scenario/1`, but `admin` identifies who asked for it —
-  kelescope confirms this action and requires a name before sending it
-  (`docs/design/kelixip_liveview.md`), traced here in this node's own logs
-  rather than merely returned to the caller.
+  kelescope confirms this action and requires a name before sending it, traced
+  here in this node's own logs rather than merely returned to the caller.
   """
   @spec shutdown_scenario(pos_integer, String.t() | nil) :: :ok | {:error, :not_found}
   def shutdown_scenario(id, admin) when is_integer(id) do
@@ -862,11 +969,53 @@ defmodule Kelix.Control do
     case Kelix.ModuleRegistry.lookup(module_name) do
       %{module: module} ->
         if function_exported?(module, :handle_control, 2),
-          do: module.handle_control(cmd, args),
+          do: module.handle_control(cmd, bind_positional(module, cmd, args)),
           else: {:error, :no_command_surface}
 
       nil ->
         {:error, :unknown_module}
+    end
+  end
+
+  # `kelictl presence list weshwesh.eu` — the positional form every core command
+  # takes (`registration list weshwesh.eu`) — binds its bare tokens, in order, to
+  # the arguments the command declares and the line did not name. Done here because
+  # the declaration lives on the node: the CLI only knows it was handed a token.
+  #
+  # Only the CLI shape is touched (a raw token list under "args"); REST already
+  # names every key. Both views are rewritten — the named key AND the raw token
+  # becomes `name=value` — so a module reading either (`Kelix.Mod.Mcu.Args`
+  # re-parses the tokens) sees one answer. A bare token spelling a declared name
+  # stays the flag it always was, and one left over once every declared argument
+  # is bound is passed through for the module to refuse.
+  defp bind_positional(module, cmd, %{"args" => tokens} = args) when is_list(tokens) do
+    declared = declared_args(module, cmd)
+    free = Enum.reject(declared, &Map.has_key?(args, &1))
+
+    {tokens, {args, _free}} =
+      Enum.map_reduce(tokens, {args, free}, fn
+        token, {acc, [name | rest]} = unchanged when is_binary(token) ->
+          if String.contains?(token, "=") or token in declared,
+            do: {token, unchanged},
+            else: {"#{name}=#{token}", {acc |> Map.delete(token) |> Map.put(name, token), rest}}
+
+        token, unchanged ->
+          {token, unchanged}
+      end)
+
+    Map.put(args, "args", tokens)
+  end
+
+  defp bind_positional(_module, _cmd, args), do: args
+
+  defp declared_args(module, cmd) do
+    if function_exported?(module, :describe_control, 0) do
+      safe(fn -> module.describe_control() end, [])
+      |> Enum.find(%{}, &(&1.name == cmd))
+      |> Map.get(:args, [])
+      |> Enum.map(& &1.name)
+    else
+      []
     end
   end
 

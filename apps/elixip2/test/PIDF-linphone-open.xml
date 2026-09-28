@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid" entity="sip:alice@ives.fr">
+<tuple id="tid-83c6d1">
+<status><basic>open</basic></status>
+<contact>sip:alice@192.168.0.12;transport=tls</contact>
+<timestamp>2026-09-18T09:12:43Z</timestamp>
+</tuple>
+<dm:person id="pid-83c6d1">
+<rpid:activities/>
+</dm:person>
+</presence>

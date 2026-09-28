@@ -140,7 +140,7 @@ each covering what is implemented and running:
 |---|---|
 | [DESIGN-SIPSTACK.md](docs/design/DESIGN-SIPSTACK.md) | transport, message, transaction and dialog layers |
 | [DESIGN-FRAMEWORK.md](docs/design/DESIGN-FRAMEWORK.md) | session layer, mixins, B2BUA, media and the media-server adapters |
-| [DESIGN-FSL.md](docs/design/DESIGN-FSL.md) | the language, its macros and the FSM engine |
+| [DESIGN-FSL.md](docs/design/DESIGN-FSL.md) | the SIP binding of FSL (the language itself lives in [finite-state-language](https://github.com/neutrino38/finite-state-language)) |
 | [DESIGN-ELIXIPP.md](docs/design/DESIGN-ELIXIPP.md) | the test tool |
 | [DESIGN-KELIXIP.md](docs/design/DESIGN-KELIXIP.md) | the application server and its module system |
 | [DESIGN-MCU.md](docs/design/DESIGN-MCU.md) | the conferencing module |

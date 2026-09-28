@@ -122,8 +122,15 @@ alias SIP.NetUtils
             Logger.error([ module: __MODULE__, message: "Failed to start transport #{uri.destproto}: No network connection" ])
             { :error, :failedtostart }
 
+          # `destip` above, not `uri.destip`: a destination may still be a host
+          # NAME here — a WSS or TLS leg keeps it, since that is what the Host
+          # header and the certificate are checked against — and ip2string/1
+          # takes a tuple. Naming the server we could not reach used to raise a
+          # FunctionClauseError inside the rescue-wrapped selection, so the one
+          # message saying WHICH server refused the connection was replaced by a
+          # stack trace, and the caller saw only :invalidtransport.
           { :error, :cnxerror } ->
-            dest = "sip:#{SIP.NetUtils.ip2string(uri.destip)}:#{uri.destport};transport=#{String.downcase(uri.destproto)}"
+            dest = "sip:#{destip}:#{uri.destport};transport=#{String.downcase(uri.destproto)}"
             Logger.error([ module: __MODULE__, message: "Unable to connect to SIP server #{dest}" ])
             { :error, :failedtostart }
 

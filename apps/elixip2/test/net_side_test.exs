@@ -145,6 +145,7 @@ defmodule SIP.Test.NetSide do
       assert SIP.Uri.serialize(marked) == SIP.Uri.serialize(uri)
     end
   end
+
   describe "advertise — which face a peer sees" do
     @bound {10, 0, 0, 5}
     @alias {203, 0, 113, 9}

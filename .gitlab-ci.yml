@@ -1,11 +1,17 @@
 # CI for the elixip umbrella.
 #
-#   push on a branch -> compile + test suite
-#   push of a tag    -> compile + test suite + SBoM + RPMs, kept as artifacts
+#   push of a tag -> compile + test suite + SBoM + RPMs, kept as artifacts,
+#                    then signed and published
+#
+# A branch push starts no pipeline: the suite is run locally before tagging.
 #
 # The runner must be an Alma Linux 9 host carrying the packaging toolchain
 # (EPEL Erlang/OTP 26, Elixir from /opt/elixir, rpmbuild) — BUILD.md explains why
 # no other host will do: the kelixip release embeds a natively-linked ERTS.
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
 
 stages:
   - build
@@ -33,7 +39,8 @@ compile:
 # `--exclude live` needs no explanation on a CI host: those tests dial a real SIP
 # proxy. `--exclude flaky` is the bar BUILD.md sets — the tagged tests bind real
 # ports or share named singletons, and pass in isolation. What is left fails only
-# on a regression, which is the only thing a branch pipeline can usefully say.
+# on a regression, which is the only thing the suite can usefully say before the
+# packages are built.
 #
 # `--max-failures 1` stops the suite on the first failing test, `--raise` stops
 # the umbrella recursion instead of carrying on into the next app. Without them
@@ -48,8 +55,6 @@ test:
 
 package:
   stage: package
-  rules:
-    - if: $CI_COMMIT_TAG
   script:
     # A tag names a version; the manifests decide what the packages are called.
     # Nothing else compares the two, and rpm identifies a package by its NEVRA —
@@ -84,8 +89,6 @@ package:
 publish:
   stage: publish
   needs: [package]
-  rules:
-    - if: $CI_COMMIT_TAG
   before_script: []          # pas de toolchain Elixir nécessaire ici
   cache: {}                  # ne pas tirer deps/ et _build/ pour un rsync
   script:

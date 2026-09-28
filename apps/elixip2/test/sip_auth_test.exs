@@ -34,7 +34,13 @@ defmodule SIP.Test.Auth do
 
   describe "expected_response_from_ha1/4 dispatch" do
     test "uses the qop form when the client sent qop/nc/cnonce" do
-      params = %{"nonce" => @nonce, "uri" => @uri, "qop" => "auth", "nc" => "00000001", "cnonce" => "abcd"}
+      params = %{
+        "nonce" => @nonce,
+        "uri" => @uri,
+        "qop" => "auth",
+        "nc" => "00000001",
+        "cnonce" => "abcd"
+      }
 
       assert SIP.Auth.expected_response_from_ha1("MD5", @ha1, @method, params) ==
                SIP.Auth.compute_auth_response_from_ha1("MD5", @nonce, @ha1, @method, @uri, %{

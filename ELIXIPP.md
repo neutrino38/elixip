@@ -124,6 +124,8 @@ same logic under a different module name (`UAC.InviteExample`,
 | `uac_invite_webrtc.exs` | the same over WebRTC SDP |
 | `uas_register.exs` | **registrar**: challenges, verifies, accepts/refreshes/un-registers |
 | `uas_invite.exs` | **call server**: answers inbound INVITEs |
+| `uac_subscribe.exs` | **watcher**: SUBSCRIBE for `presence`, displays each state, un-SUBSCRIBEs |
+| `uas_presence.exs` | **notifier**: accepts a subscription, NOTIFYs the state, answers a PUBLISH |
 | `uac_register_and_uas_invite.exs` | registers, then waits for an inbound call (uses `spawn_fsm`) |
 | `smoke.exs` | no SIP traffic; checks the tool itself end to end |
 | `http_get_example.exs` | an HTTP call from a scenario |
@@ -131,10 +133,11 @@ same logic under a different module name (`UAC.InviteExample`,
 Start from one of these to write your own, and combine either form with `--config`
 to inject real accounts.
 
-## Server (UAS) mode — registrar and call server
+## Server (UAS) mode — registrar, call server and notifier
 
-A scenario declaring `uas :register` or `uas :invite` is a server: `elixipp` binds
-the `--listen` sockets and lets inbound requests drive it, one instance per dialog.
+A scenario declaring `uas :register`, `uas :invite` or `uas :presence` is a server:
+`elixipp` binds the `--listen` sockets and lets inbound requests drive it, one
+instance per dialog.
 
 ```bash
 # Registrar on UDP/5060, with the password it must verify taken from the JSON
@@ -145,6 +148,9 @@ elixipp -l 200 --listen udp:5060 --listen tcp:5060 uas_register.exs
 
 # Call server: answer inbound INVITEs
 elixipp --listen udp:5060 uas_invite.exs
+
+# Notifier: answer SUBSCRIBE (and PUBLISH) for the `presence` package
+elixipp --listen udp:5060 uas_presence.exs
 ```
 
 What to expect:
@@ -155,6 +161,12 @@ What to expect:
   last one ends. `0` means no limit.
 - **A call server checks the INVITE R-URI** against the scenario's `config domains:`
   (a list, or `:any`); a domain it does not serve gets `604 Does Not Exist Anywhere`.
+- **A presence server checks the `Event` header** against the scenario's
+  `config event_package:`; any other package gets `489 Bad Event` before the
+  scenario runs, so a script never has to check that the package concerns it. The
+  refusals that depend on the package itself — `406` on an `Accept` it cannot
+  satisfy, `423` below its minimum lifetime — are answered by the verbs
+  (`accept_subscription/1`, `check_publish/1`), also without the script asking.
 - **`--config` behaves differently here**: a server has no run counter to cycle
   accounts on, so the header and the **first** account are shared by every instance.
   That is how the reference registrar gets the password it verifies — without

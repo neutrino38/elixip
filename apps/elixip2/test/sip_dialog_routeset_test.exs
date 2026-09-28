@@ -20,7 +20,11 @@ defmodule SIP.Test.DialogRouteSet do
     end
 
     test "a single Record-Route (binary) is copied verbatim" do
-      req = DialogImpl.add_route_set(%{method: :BYE}, %DialogImpl{routeset: "<sip:91.134.191.39;lr=on>"})
+      req =
+        DialogImpl.add_route_set(%{method: :BYE}, %DialogImpl{
+          routeset: "<sip:91.134.191.39;lr=on>"
+        })
+
       assert req.route == "<sip:91.134.191.39;lr=on>"
     end
 
@@ -52,7 +56,12 @@ defmodule SIP.Test.DialogRouteSet do
     serialized = req |> DialogImpl.add_route_set(%DialogImpl{routeset: rs}) |> SIPMsg.serialize()
 
     # one Route: line per hop, in the stored order
-    routes = for line <- String.split(serialized, "\r\n"), String.starts_with?(line, "Route:"), do: line
-    assert routes == ["Route: <sip:91.134.191.39;lr=on>", "Route: <sip:91.134.191.39:443;transport=ws;lr=on>"]
+    routes =
+      for line <- String.split(serialized, "\r\n"), String.starts_with?(line, "Route:"), do: line
+
+    assert routes == [
+             "Route: <sip:91.134.191.39;lr=on>",
+             "Route: <sip:91.134.191.39:443;transport=ws;lr=on>"
+           ]
   end
 end

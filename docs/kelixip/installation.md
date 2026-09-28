@@ -21,6 +21,8 @@ deployment installs only what it uses — the core itself implements no SIP func
 | `kelixip-mod-registrar` | the [registrar](modules/registrar.md) / user-location module |
 | `kelixip-mod-auth_db` (RPM)<br>`kelixip-mod-auth-db` (deb) | the [database authentication](modules/auth_db.md) module |
 | `kelixip-mod-mcu` | the [conference mixer](modules/mcu.md) — the one module that also needs a **reachable media server** |
+| `kelixip-mod-presence` | the [presence](modules/presence.md) collection |
+| `kelixip-mod-mcu_presence` (RPM)<br>`kelixip-mod-mcu-presence` (deb) | [conference rooms as presentities](modules/mcu_presence.md) — requires `kelixip-mod-mcu` and `kelixip-mod-presence` |
 
 ```bash
 # Alma Linux 9
@@ -183,7 +185,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `node_name` | string | `kelixip@127.0.0.1` | Erlang node name (`kelictl` reaches the node with it) |
 | `script_dir` | string | `/usr/share/kelixip` | Where scenario scripts are resolved from |
 | `module_dir` | string | `/usr/lib/kelixip/modules` | Where module `.beam` files are loaded from |
-| `user_agent` | string | `Kelixip/1.5.0` | `User-Agent` / `Server` header value |
+| `user_agent` | string | `Kelixip/1.6.0` | `User-Agent` / `Server` header value |
 | `max_calls` | int > 0 | *unlimited* | Node-wide concurrent-instance cap; beyond it, new requests get `503` |
 | `max_message_size` | int > 0 | `64000` | Biggest inbound SIP message, in bytes. A memory bound, not a protocol one: keep it well above a WebRTC offer, which weighs about 13 kB. Beyond it a request is answered `513 Message too large`; a response or an ACK, which are never answered, is dropped with a log line. On **TCP and TLS** the bound also applies to what the framing layer accumulates — an announced `Content-Length` past it, or a header block that never ends — and there the connection is **closed** after the answer: refusing means not reading the octets `Content-Length` announced, so no later point in the stream is a message boundary any more. An unusable `Content-Length` is answered `400 Bad request`, then closed the same way |
 
@@ -508,8 +510,16 @@ wrong path.
 
 A request is routed by its R-URI host (falling back to the `To` host); no match
 ⇒ `404`. Then the method selects the **function** — `REGISTER` → `registrar`,
-`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH`/`MESSAGE` → `presence` — and a function
-with no block on that domain is **not enabled** ⇒ `405`.
+`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH` → `presence` — and a function with no
+block on that domain is **not enabled** ⇒ `405`.
+
+For presence there is one more step: the request's `Event` header selects which
+`[[domain.presence]]` block serves it, and a package the domain declares none for
+is answered `489 Bad Event` — before any script runs, and carrying `Allow-Events`
+with the packages it does serve.
+
+An out-of-dialog `MESSAGE` is answered `405`: page-mode chat is a function of its
+own and its dispatch is not implemented yet.
 
 ##### Wildcard aliases
 
@@ -543,7 +553,7 @@ alias folds to the nominal name, so `alice@a.umbrella.com` and `alice@b.umbrella
 both. That is the intent for a gateway; but it is not what a multi-tenant
 deployment wants.
 
-#### `[domain.registrar]` / `[domain.presence]`
+#### `[domain.registrar]`
 
 Presence of the block = the function is enabled.
 
@@ -553,6 +563,33 @@ Presence of the block = the function is enabled.
 | `default_expires` | int > 0 | no | Overrides `[module.registrar].default_expires` **for this domain** |
 | `min_expires` | int > 0 | no | Overrides `[module.registrar].min_expires` **for this domain** |
 | `keepalive_period` | int > 0 | no | *Accepted and validated, but **not applied yet** — server-initiated OPTIONS keepalive towards registered UAs is not implemented (the framework's keepalive is outbound-only).* |
+
+#### `[[domain.presence]]` — one block per event package
+
+An **array** of tables: one block per event package the domain serves, and the
+package is the key.
+
+```toml
+  [[domain.presence]]
+  event-package = "presence"
+  subscribe     = "presence-subscribe.exs"
+  publish       = "presence-publish.exs"
+```
+
+| Key | Type | Required | Meaning |
+|---|---|---|---|
+| `event-package` | string | **yes** | Matched against the request's `Event`, case-insensitively. Two blocks claiming one package reject the file |
+| `subscribe` | string | **yes** | Scenario script serving `SUBSCRIBE` for this package |
+| `publish` | string | no | Scenario script serving `PUBLISH`; absent ⇒ a `PUBLISH` for this package is answered `405` |
+
+Both scripts go through the load-time contract check, so a missing `publish`
+script is caught by `kelictl domain reload-all` rather than by the first PUBLISH.
+
+The expiry bounds of a subscription belong to the event package, so there is no
+key for them here.
+
+Upgrading from a single `[domain.presence]` table: it is refused with a message
+naming the new form. Replace it with the block above.
 
 #### `[[domain.call]]` — the dial-plan (`calls`)
 
@@ -587,6 +624,19 @@ ignored.
 
 Both expiry bounds are per-domain-overridable in `[domain.registrar]` above.
 
+#### `[module.presence]`
+
+The presence collection (`kelixip-mod-presence`): what is published about each
+presentity, who watches it, and the fan-out between them. This block lives in
+`config.toml`.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `call_timeout_ms` | int > 0 | `5000` | Facade call bound |
+
+Who may watch whom is **not** decided here — the subscribe script decides it. See
+[modules/presence.md](modules/presence.md).
+
 #### A complete example
 
 ```toml
@@ -597,6 +647,11 @@ aliases = ["sip.example.com", "203.0.113.10"]
 
   [domain.registrar]
   script = "registrar.exs"
+
+  [[domain.presence]]
+  event-package = "presence"        # the Event header selects this block
+  subscribe     = "presence-subscribe.exs"
+  publish       = "presence-publish.exs"
 
   [[domain.call]]
   pattern = "0[1-9]XXXXXXXX"        # French landline/mobile

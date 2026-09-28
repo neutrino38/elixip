@@ -523,6 +523,9 @@ defmodule SIP.Transport do
         { :msg_too_large, parsed_msg } ->
           refuse_too_large(state, parsed_msg, tp_name, destip, destport)
 
+        { :unsupported_content_encoding, parsed_msg } ->
+          refuse_body_encoding(state, parsed_msg, tp_name, destip, destport)
+
         { :no_matching_transaction, parsed_msg } ->
           # A request has a method atom (e.g. :REGISTER); a response carries
           # `method: false` (and `false` is itself an atom, so guard against it
@@ -601,6 +604,21 @@ defmodule SIP.Transport do
       { :noreply, state }
     end
 
+    # RFC 3261 §21.4.13: the 415 MUST say what we can read, or the peer has no way
+    # to compose a request we would accept. The connection stays up — unlike the
+    # oversized case, the message was framed correctly and only its body is
+    # unreadable, so the stream is still in sync.
+    defp refuse_body_encoding(state, parsed_msg, tp_name, destip, destport) do
+      fields = [ { "Accept-Encoding", SIP.Msg.BodyCoding.supported() } ]
+
+      case refusal_response(parsed_msg, 415, tp_name, destip, destport, fields) do
+        nil -> :ok
+        msgstr -> send_outside_this_callback(msgstr, destip, destport, false)
+      end
+
+      { :noreply, state }
+    end
+
     @doc """
     Answer what the depacketizer would not frame, then take the connection down.
 
@@ -661,29 +679,32 @@ defmodule SIP.Transport do
     # Which refusal a message gets, and the log line that says why. A response and
     # an ACK are never answered — there is nothing to answer a response with, and
     # §17.1.1.3 forbids answering an ACK — so both come back `nil`.
-    defp refusal_response(parsed_msg, code, tp_name, destip, destport) do
+    defp refusal_response(parsed_msg, code, tp_name, destip, destport, fields \\ []) do
       cond do
         # A response carries `method: false`, and `false` is itself an atom.
         parsed_msg.method == false or not is_atom(parsed_msg.method) ->
-          Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping an oversized " <>
-            "SIP response from #{peer_str(destip, destport)} — a response is never answered"])
+          Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping a SIP response " <>
+            "#{refusal_reason(code)} from #{peer_str(destip, destport)} " <>
+            "— a response is never answered"])
           nil
 
         parsed_msg.method == :ACK ->
-          Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping an oversized " <>
-            "ACK from #{peer_str(destip, destport)} — an ACK is never answered"])
+          Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping an ACK " <>
+            "#{refusal_reason(code)} from #{peer_str(destip, destport)} " <>
+            "— an ACK is never answered"])
           nil
 
         true ->
           Logger.warning([module: __MODULE__, message: "#{tp_name}: #{parsed_msg.method} from " <>
             "#{peer_str(destip, destport)} #{refusal_reason(code)}, answering #{code}"])
 
-          SIPMsg.serialize(SIP.Msg.Ops.reply_to_request(parsed_msg, code, nil))
+          SIPMsg.serialize(SIP.Msg.Ops.reply_to_request(parsed_msg, code, nil, fields))
       end
     end
 
     defp refusal_reason(513), do: "past the #{SIPMsg.max_message_size()} byte bound"
     defp refusal_reason(400), do: "unframeable"
+    defp refusal_reason(415), do: "in a body encoding we cannot read"
     defp refusal_reason(_code), do: "refused"
 
     # `send_msg/4` is a GenServer.call on this transport, and we are running inside

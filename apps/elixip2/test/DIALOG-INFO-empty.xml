@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<dialog-info xmlns="urn:ietf:params:xml:ns:dialog-info"
+             version="0" state="full"
+             entity="sip:bob@example.com"/>

@@ -20,7 +20,7 @@ defmodule Kelix.Domains do
   use GenServer
   require Logger
 
-  alias Kelix.{Domain, DialRule, DialPlan}
+  alias Kelix.{Domain, DialRule, DialPlan, PresenceBlock}
 
   @type t :: %__MODULE__{
           version: non_neg_integer,
@@ -39,7 +39,7 @@ defmodule Kelix.Domains do
     "min_expires" => :pos_integer,
     "keepalive_period" => :pos_integer
   }
-  @presence_keys %{"script" => :string}
+  @presence_keys ~w(event-package subscribe publish)
 
   # ── GenServer API ────────────────────────────────────────────────────────────
 
@@ -78,6 +78,23 @@ defmodule Kelix.Domains do
         )
 
         err
+    end
+  end
+
+  @doc """
+  The event packages a domain serves, in declaration order — what a notifier
+  script puts in `Allow-Events`.
+
+  Takes the domain by name (what a scenario carries in its context) or the struct
+  itself. An unknown domain, or one serving none, answers `[]`.
+  """
+  @spec event_packages(String.t() | Domain.t()) :: [String.t()]
+  def event_packages(%Domain{presence: blocks}), do: Enum.map(blocks, & &1.event_package)
+
+  def event_packages(name) when is_binary(name) do
+    case Process.whereis(__MODULE__) && lookup(current(), name) do
+      %Domain{} = domain -> event_packages(domain)
+      _ -> []
     end
   end
 
@@ -174,16 +191,27 @@ defmodule Kelix.Domains do
   end
 
   defp domain_script_refs(%Domain{} = d) do
-    function_refs =
-      for {key, block} <- [registrar: d.registrar, presence: d.presence],
-          is_map(block),
-          do: {block.script, "domain #{d.name} [domain.#{key}]"}
+    registrar_refs =
+      for block <- List.wrap(d.registrar),
+          do: {block.script, "domain #{d.name} [domain.registrar]"}
+
+    # Both scripts of every block: a node whose `publish` script is missing serves
+    # SUBSCRIBE and dies on the first PUBLISH, which is exactly what the load-time
+    # contract exists to catch.
+    presence_refs =
+      for block <- d.presence,
+          {key, script} <- [subscribe: block.subscribe, publish: block.publish],
+          is_binary(script),
+          do:
+            {script,
+             "domain #{d.name} [[domain.presence]] #{key} " <>
+               "(event-package #{block.event_package})"}
 
     call_refs =
       for rule <- d.dial_plan,
           do: {rule.script, "domain #{d.name} call rule #{rule_label(rule)}"}
 
-    function_refs ++ call_refs
+    registrar_refs ++ presence_refs ++ call_refs
   end
 
   defp rule_label(%DialRule{default?: true}), do: "default = true"
@@ -280,7 +308,7 @@ defmodule Kelix.Domains do
          :ok <- check_aliases(aliases, name),
          {:ok, max_calls} <- opt_pos_integer(dm, "max_calls", name),
          {:ok, registrar} <- opt_fn_block(dm, "registrar", @registrar_keys, name),
-         {:ok, presence} <- opt_fn_block(dm, "presence", @presence_keys, name),
+         {:ok, presence} <- parse_presence(Map.get(dm, "presence", []), name),
          {:ok, dial_plan} <- parse_dial_plan(Map.get(dm, "call", []), name),
          :ok <- check_domain_keys(dm, name) do
       {:ok,
@@ -359,6 +387,74 @@ defmodule Kelix.Domains do
       {_before, [_default | _after]} ->
         {:error,
          "domain #{inspect(domain)}: the catch-all (default = true) must be the last call rule"}
+    end
+  end
+
+  # ── presence (one block per event package; the package is the key) ───────────
+
+  defp parse_presence(blocks, domain) when is_list(blocks) do
+    with {:ok, parsed} <- reduce_while_ok(blocks, &parse_presence_block(&1, domain)),
+         :ok <- reject_duplicate_packages(parsed, domain) do
+      {:ok, parsed}
+    end
+  end
+
+  # A single `[domain.presence]` table is the shape this key had before it carried
+  # the event package. Saying so beats "must be an array of tables": the operator
+  # upgrading a node has the old form under their eyes, and the new one names a
+  # package theirs did not have to.
+  defp parse_presence(%{}, domain) do
+    {:error,
+     "domain #{inspect(domain)}: presence is an array of tables, one per event " <>
+       "package — write [[domain.presence]] with event-package = \"presence\""}
+  end
+
+  defp parse_presence(_, domain),
+    do: {:error, "domain #{inspect(domain)}: `presence` must be an array of tables"}
+
+  defp parse_presence_block(%{} = block, domain) do
+    ctx = "domain #{domain} [[domain.presence]]"
+
+    with :ok <- reject_keys(block, @presence_keys, ctx),
+         {:ok, package} <- req_string(block, "event-package", ctx),
+         {:ok, subscribe} <- req_string(block, "subscribe", ctx),
+         {:ok, publish} <- opt_script(block, "publish", ctx) do
+      {:ok,
+       %PresenceBlock{
+         # The package name is matched against `Event`, which is case-insensitive
+         # (RFC 6665 §8.2.1) — folded once here so nothing downcases at lookup.
+         event_package: String.downcase(package),
+         subscribe: subscribe,
+         publish: publish
+       }}
+    end
+  end
+
+  defp parse_presence_block(_, domain),
+    do: {:error, "domain #{inspect(domain)}: each [[domain.presence]] must be a table"}
+
+  # Two blocks claiming one package: the second would be unreachable, and which of
+  # the two serves a SUBSCRIBE would be decided by declaration order rather than by
+  # the operator. Refused at parse time, like a domain name used twice.
+  defp reject_duplicate_packages(blocks, domain) do
+    case blocks
+         |> Enum.frequencies_by(& &1.event_package)
+         |> Enum.find(fn {_p, n} -> n > 1 end) do
+      nil ->
+        :ok
+
+      {package, _n} ->
+        {:error,
+         "domain #{inspect(domain)}: event package #{inspect(package)} is served by " <>
+           "more than one [[domain.presence]] block"}
+    end
+  end
+
+  defp opt_script(block, key, ctx) do
+    case Map.get(block, key) do
+      nil -> {:ok, nil}
+      v when is_binary(v) and v != "" -> {:ok, v}
+      _ -> {:error, "#{ctx}: `#{key}` must be a non-empty string"}
     end
   end
 
@@ -451,7 +547,7 @@ defmodule Kelix.Domains do
     end
   end
 
-  # a function block ([domain.registrar] / [domain.presence]): present = enabled
+  # a function block ([domain.registrar]): present = enabled
   defp opt_fn_block(map, key, allowed, domain) do
     case Map.get(map, key) do
       nil ->

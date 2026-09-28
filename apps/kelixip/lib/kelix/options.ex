@@ -19,15 +19,20 @@ defmodule Kelix.Options do
   `Allow` is a fixed list on purpose. Deriving it from the loaded scripts would make
   the answer track the configuration, which is tempting — but it also makes a
   liveness answer depend on a code path that can be reloaded under our feet. It is
-  updated by hand when a function lands (`calls` next).
+  updated by hand when a function lands.
+
+  `Allow-Events` is NOT answered here, and that is the same rule seen from the other
+  side: which event packages are served is a property of the **domain**, and this
+  answer deliberately knows nothing of the configuration. It goes on the responses
+  that already know their domain — the 2xx to a SUBSCRIBE, and the Router's 489.
   """
   @behaviour SIP.Session.Options
   require Logger
 
-  # What kelixip implements today: the registrar, plus OPTIONS itself. INVITE joins
-  # the list when the call function lands — advertising it earlier would be a lie a
-  # tester catches in one probe.
-  @allow "OPTIONS, REGISTER"
+  # What kelixip implements today. SUBSCRIBE, PUBLISH and NOTIFY join the list with
+  # the subscription layer: NOTIFY because a notifier answers the 200 to the one it
+  # sent, and a UA reading this list decides from it whether to subscribe at all.
+  @allow "OPTIONS, REGISTER, INVITE, ACK, CANCEL, BYE, SUBSCRIBE, PUBLISH, NOTIFY"
 
   @impl SIP.Session.Options
   def on_options(_req, _transaction_id) do

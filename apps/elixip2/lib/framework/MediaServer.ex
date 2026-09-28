@@ -275,10 +275,14 @@ defmodule MediaServer do
           #    default off WebRTC, and what a SIP Total Conversation endpoint
           #    speaks. Asking for a data channel there is logged and falls back
           #    here: a data channel needs DTLS.
+          #  * `:ws` — `m=text … TCP/WSS t140` with `a=setup:active`: the media
+          #    server plays the browser and OPENS a WebSocket towards the URL the
+          #    answer publishes. Explicit, never a default, and allowed on any
+          #    leg — a WebSocket is beside the call, not inside its DTLS.
           #
-          # A WebSocket is never offered — it is a door we open when a peer asks
-          # for one. Nothing to set for that case, and this option does not name it.
-          text_transport: :data_channel | :rtp,
+          # A WebSocket of OUR own is never offered — that one is a door we open
+          # when a peer knocks, and it needs nothing set here.
+          text_transport: :data_channel | :rtp | :ws,
           # let the media server follow a symmetric NAT's mapping instead of the
           # send address the peer signalled. `:auto` (the default) leaves it to the
           # adapter, which asks for it on every leg that is not ICE — a NATed peer

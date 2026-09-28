@@ -20,6 +20,9 @@ MCU functions and regular JSR 309 media functions.
 > limitations. The reference call script is
 > [`apps/kelixip/scripts/mcu.exs`](../../../apps/kelixip/scripts/mcu.exs).
 
+A room can be watched as a presentity — open, busy when full, closed while its
+media server is lost — with the [`mcu_presence`](mcu_presence.md) module.
+
 ## Installing and activating the module
 
 ### Installing the `kelixip-mod-mcu` package:
@@ -746,8 +749,7 @@ scripts. See [§3.1 of the guide](mcu_module_guide.md#31-what-a-successful-join-
 ## Live push to an admin UI
 
 An admin console clustered with the node (kelescope) follows conferences without
-polling and without a refresh button. Contract:
-[mcu-live-push.md](../../design/mcu-live-push.md).
+polling and without a refresh button.
 
 Three topics, subscribed through `Kelix.Control` — every `subscribe` returns the
 current snapshot **and** the pid holding the subscription, which the subscriber

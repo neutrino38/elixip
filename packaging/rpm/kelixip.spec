@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.5.5
+Version:        1.6.1
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        2%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -59,17 +59,18 @@ kelixip is a SIP application server: declarative per-domain dispatch (config.tom
 + domains.toml) onto scenario scripts, a REST/CLI control surface (kelictl), and
 Prometheus metrics.
 
-The core ships NO SIP function. The registrar, the authentication back-end and the
-conference mixer are loadable modules delivered as separate packages
-(kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu) which drop their
-bytecode into the root-owned module directory; a deployment installs only what it
-uses.
+The core ships NO SIP function. The registrar, the authentication back-end, the
+conference mixer and the presence collection are loadable modules delivered as
+separate packages (kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu,
+kelixip-mod-presence, kelixip-mod-mcu_presence, kelixip-mod-dialog_state) which
+drop their bytecode into the
+root-owned module directory; a deployment installs only what it uses.
 
 This package embeds its own Erlang runtime — no system Erlang or Elixir is needed.
 
 %package mod-registrar
 Summary:        Registrar / user-location module for kelixip
-Requires:       %{name} = %{version}-%{release}
+Requires:       %{name} = %{version}
 
 %description mod-registrar
 The usrloc store: per-domain contact bindings with NAT/flow handling (received,
@@ -78,7 +79,7 @@ scripts drive. Enable it with a [module.registrar] block in domains.toml.
 
 %package mod-auth_db
 Summary:        Database authentication module for kelixip
-Requires:       %{name} = %{version}-%{release}
+Requires:       %{name} = %{version}
 
 %description mod-auth_db
 Digest authentication against a MariaDB/MySQL subscriber table (kamailio-compatible
@@ -87,7 +88,7 @@ compose the SIP response. Enable it with a [module.auth_db] block in config.toml
 
 %package mod-mcu
 Summary:        Conference mixer (MCU) module for kelixip
-Requires:       %{name} = %{version}-%{release}
+Requires:       %{name} = %{version}
 
 %description mod-mcu
 Audio/video/text conferencing: conferences addressed by DID, a mixed audio leg and
@@ -99,6 +100,48 @@ Unlike the other modules, this one needs a service to talk to: at least one
 [mediaserver.pool.<name>] entry pointing at a reachable `mediaserver` process. The
 address announced in the SDP is that server's own setting (`--public-ip`), never
 kelixip's. Installing the package is not enough to make a conference work.
+
+%package mod-presence
+Summary:        Presence collection module for kelixip
+Requires:       %{name} = %{version}
+
+%description mod-presence
+The presence collection (RFC 3856 / RFC 3903): the published state of each
+presentity with its entity-tag, the live subscriptions to it, and the fan-out that
+turns one PUBLISH into one NOTIFY per watcher. Its records are kamailio's
+presentity and active_watchers rows, held in memory. Enable it with a
+[module.presence] block in config.toml, and declare the packages a domain serves
+with [[domain.presence]] blocks in domains.toml.
+
+Who may watch whom is NOT decided here: the reference scripts are, and that is
+where a deployment writes its rule.
+
+%package mod-mcu_presence
+Summary:        Conference rooms as presentities, for kelixip
+Requires:       %{name} = %{version}
+Requires:       %{name}-mod-mcu = %{version}
+Requires:       %{name}-mod-presence = %{version}
+
+%description mod-mcu_presence
+The link between the conference mixer and the presence collection: each
+conference room is a presentity, sip:<did>@<domain>, open while it runs, open and
+busy when it is full, closed while its media server is lost. A watcher subscribes
+to a room alone or in its buddy list, as it would to a user. Enable it with a
+[module.mcu_presence] block in config.toml, next to [module.mcu] and
+[module.presence].
+
+%package mod-dialog_state
+Summary:        Call occupancy of the served users, for kelixip
+Requires:       %{name} = %{version}
+Requires:       %{name}-mod-presence = %{version}
+
+%description mod-dialog_state
+The call state of each served user, reported to the presence collection: a BLF
+key subscribed with Event: dialog (RFC 4235) lights while its user rings or
+talks, a presence watcher sees on-the-phone while a call is up, and an ACD is
+pushed every transition. Only a call whose party is proven a user of the domain
+counts: authenticated by digest, or reached through its registrations. Enable
+it with a [module.dialog_state] block in config.toml, next to [module.presence].
 
 %prep
 %setup -q
@@ -222,6 +265,8 @@ fi
 %dir %{_datadir}/%{name}
 %{_datadir}/%{name}/*.exs
 %exclude %{_datadir}/%{name}/mcu*.exs
+%exclude %{_datadir}/%{name}/presence-*.exs
+%exclude %{_datadir}/%{name}/registrar-presence.exs
 %dir %attr(0755,root,root) %{kelixdir}
 %{kelixdir}/bin
 %{kelixdir}/erts-*
@@ -248,15 +293,129 @@ fi
 
 %files mod-mcu
 %doc doc/modules/mcu.md doc/modules/mcu_module_guide.md
-%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu*.beam
+# Mcu and Mcu.* — not Mcu*, which would take McuPresence from its own package.
+%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu.beam
+%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu.*.beam
 # The reference conference scripts. They call the module's verbs and nothing else
 # provides them, so a host that has them can run them.
 %{_datadir}/%{name}/mcu*.exs
 
+%files mod-presence
+%doc doc/modules/presence.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.Presence*.beam
+# The reference scripts: one per method, plus the list server of RFC 4662 and
+# the registrar that reports registrations as presence. They call this module's
+# verbs and nothing else provides them.
+%{_datadir}/%{name}/presence-*.exs
+%{_datadir}/%{name}/registrar-presence.exs
+
+%files mod-mcu_presence
+%doc doc/modules/mcu_presence.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.McuPresence*.beam
+
+%files mod-dialog_state
+%doc doc/modules/dialog_state.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.DialogState*.beam
+
 %changelog
+* Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.1-1
+- kelescope shows presence live: Kelix.Control.subscribe_presence/2 returns a
+  domain's presentities, then pushes each change.
+- kelictl presence list shows a presentity reported registered by
+  registrar-presence.exs, as a state of source "registrar"; list and show gain
+  the source and status columns.
+- The registrar no longer renders an AOR's detail on every REGISTER when no
+  registrations panel is open on its domain.
+- New subpackage kelixip-mod-mcu_presence: a conference room is a presentity
+  (open, busy when full, closed while its media server is lost).
+- presence-subscribe.exs answers noresource to a presentity with no state,
+  instead of closed.
+- BLF keys: the dialog event package (RFC 4235) is served, with Event: dialog
+  in a [[domain.presence]] block. New subpackage kelixip-mod-dialog_state
+  reports each served user's calls to it, and on-the-phone to presence.
+- presence-publish.exs answers 403 to a PUBLISH about another user's state, and
+  both presence scripts log whose state changed to what.
+- A notifier whose script ends keeps retransmitting its final NOTIFY, and one
+  whose script dies sends it (deactivated) instead of leaving the watcher
+  subscribed.
+- User-Agent is now Kelixip/1.6.1.
+
+* Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-9
+- A scenario state that raises tears down what it had set up: teardown now runs
+  on the context the failing state had built, so both legs and the media session
+  are released and the caller can hang up.
+- A dialog monitors its application and ends with it, hung up first when there is
+  a session to end, instead of answering 503 to every later in-dialog request.
+
+* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-8
+- Presence now follows real registrations. The registrar-presence.exs script read
+  the REGISTER's To as a parsed URI, which only a test request carries: presence
+  was never told of a registration (no NOTIFY to watchers), and the script ended
+  1 ms after its 200 OK. Every later REGISTER of that client went unanswered and
+  timed out 408.
+- A REGISTER dialog ends with its registrar session, so the client's next
+  REGISTER reaches a live one instead of timing out 408.
+- kelictl: module commands take positional arguments, bound in order to the
+  arguments the command declares — kelictl presence list weshwesh.eu.
+
+* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-7
+- List NOTIFYs are deflated as soon as the body passes 500 octets, when the
+  watcher accepts it. The bound was 1200 for the body alone, which ignored the ~700
+  octets of headers a list NOTIFY carries over IPv6: a three-entry list went out
+  clear in a 1806-octet datagram, which the path fragmented and the watcher never
+  received.
+
+* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-6
+- Presence follows registrations: a new reference script, registrar-presence.exs
+  (shipped with kelixip-mod-presence), is registrar.exs plus a report to the
+  presence collection on every change. A subscriber that does not PUBLISH is open
+  while one of its devices is registered and closed when the last one goes —
+  un-REGISTER, connection lost, or a registration that lapsed — and its watchers
+  are NOTIFYed on each change. A refused refresh no longer ends the session.
+- A list subscription reports an unpublished subscriber of a registrar domain as
+  open or closed, not noresource; noresource is kept for unknown users and for
+  domains with no registrar or not served.
+- kelictl registration remove and DELETE /domains/<domain>/registrations/<aor>
+  update presence when kelixip-mod-presence is loaded.
+- Registrar fix: an Expires: 0 now removes only the contacts it names (RFC 3261
+  §10.3). It used to remove every binding of the AOR, un-registering a
+  subscriber's other devices whenever one of them signed off.
+
+* Tue Sep 22 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-2
+- Buddy lists (RFC 4662 / RFC 5367): kelixip-mod-presence ships a third
+  reference script, presence-rls.exs, which serves a list subscription. Declare
+  the list URI the client sends (sip.linphone.org for Linphone) as a domain of
+  its own, served by that script.
+- The presence scripts are no longer also claimed by the core package: they
+  belong to kelixip-mod-presence alone, as the mcu scripts belong to
+  kelixip-mod-mcu.
+
 * Sat Sep 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-2
 - Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
   before the rest of the release landed. No code change.
+
+* Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
+- Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between
+  them. New subpackage kelixip-mod-presence — the collection, the entity-tags and
+  the fan-out — with the reference scripts presence-subscribe.exs and
+  presence-publish.exs.
+- domains.toml: [[domain.presence]] is now an array of tables, ONE PER EVENT
+  PACKAGE, each naming its subscribe and publish script. A single
+  [domain.presence] table is refused: replace it with a block carrying
+  event-package = "presence". A package a domain declares none for is answered
+  489, with Allow-Events naming the ones it serves.
+- An out-of-dialog MESSAGE is no longer routed to the presence function: it
+  carries no Event and page-mode chat is a function of its own. It is answered
+  405 until [[domain.chat]] lands.
+- OPTIONS now advertises what this server implements: INVITE, ACK, CANCEL, BYE,
+  SUBSCRIBE, PUBLISH and NOTIFY join REGISTER and OPTIONS in Allow.
+- The Finite State Language leaves the tree: it is now the separate package
+  finite_state_language (OTP app :fsl, Apache-2.0), and SIP plugs into it through
+  SIP.FSL.Host. Scripts keep the names they use: SIP.Scenario and the other SIP
+  names stay, as facades over FSL.*.
+- The live-monitor registry is registered as FSL.Monitor, and pushes
+  {:fsl_monitor, ...}.
+- User-Agent is now Kelixip/1.6.0.
 
 * Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
 - sip: an INVITE server transaction no longer carries timer F. A call that rang

@@ -1552,16 +1552,21 @@ defmodule Mendooze.SdpTest do
       refute desc.supported?
     end
 
-    test "both attribute names and both URL forms are read" do
-      for {attr, value} <- [
-            {"ws", "//1.2.3.4:9090/jsr309/7/tok"},
-            {"ws", "http://1.2.3.4:9090/jsr309/7/tok"},
-            {"wss", "https://1.2.3.4:9090/jsr309/7/tok"},
-            {"wss", "wss://1.2.3.4:9090/jsr309/7/tok"}
+    test "both attribute names and both URL forms are read, as an absolute URL" do
+      # a protocol-relative value carries its scheme in the attribute NAME: the
+      # two forms must not come out of the parser indistinguishable, since a
+      # client-mode text leg is armed with the URL alone
+      for {attr, value, expected} <- [
+            {"ws", "//1.2.3.4:9090/jsr309/7/tok", "ws://1.2.3.4:9090/jsr309/7/tok"},
+            {"wss", "//1.2.3.4:9090/jsr309/7/tok", "wss://1.2.3.4:9090/jsr309/7/tok"},
+            {"ws", "http://1.2.3.4:9090/jsr309/7/tok", "ws://1.2.3.4:9090/jsr309/7/tok"},
+            {"wss", "https://1.2.3.4:9090/jsr309/7/tok", "wss://1.2.3.4:9090/jsr309/7/tok"},
+            {"wss", "wss://1.2.3.4:9090/jsr309/7/tok", "wss://1.2.3.4:9090/jsr309/7/tok"},
+            {"ws", "ws://1.2.3.4:9090/jsr309/7/tok", "ws://1.2.3.4:9090/jsr309/7/tok"}
           ] do
         offer = ws_text_offer("TCP/WS", "a=setup:active\na=#{attr}:#{value}")
         assert {:ok, [desc]} = Sdp.parse(offer)
-        assert desc.ws_url == value
+        assert desc.ws_url == expected
       end
     end
 
@@ -1614,7 +1619,7 @@ defmodule Mendooze.SdpTest do
       assert {:ok, [desc]} = Sdp.parse(sdp_str)
       assert desc.transport == :ws
       assert desc.setup == :passive
-      assert desc.ws_url == "//192.168.5.5:9090/jsr309/7/tok"
+      assert desc.ws_url == "wss://192.168.5.5:9090/jsr309/7/tok"
       assert desc.mid == "2"
     end
   end

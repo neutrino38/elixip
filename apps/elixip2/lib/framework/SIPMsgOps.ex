@@ -72,12 +72,13 @@ defmodule SIP.Msg.Ops do
   @doc """
   The `Expires` header as an integer, or `nil` when absent (or unparseable).
 
-  The parser already yields an integer; a binary is accepted too, because a message
-  built by hand (templates, tests, a scenario) carries the header as text.
+  The parser already yields an integer under the `:expires` key; a message built by
+  hand (templates, tests, a scenario) carries the header name as a string key and
+  its value as text, and both are read here.
   """
   @spec expires_header(map()) :: non_neg_integer() | nil
   def expires_header(msg) do
-    case Map.get(msg, :expires) do
+    case first_header_value(msg, :expires, "expires") do
       exp when is_integer(exp) and exp >= 0 -> exp
       exp when is_binary(exp) -> parse_expires(exp, nil)
       _ -> nil
@@ -164,6 +165,471 @@ defmodule SIP.Msg.Ops do
   end
 
   defp parse_expires(_value, fallback), do: fallback
+
+  # ── Event notification headers (RFC 6665 §8.2, RFC 3903 §11) ────────────────
+  #
+  # THE one place that answers what a SUBSCRIBE, a NOTIFY or a PUBLISH says about
+  # its event package, the bodies it accepts, the lifetime it asks for and the
+  # state of its subscription — the same rule as the sections above (CLAUDE.md,
+  # *Message Layer*). The subscription layer, the event packages, the presence
+  # module and the Router all layer their policy on these readings; none of them
+  # re-reads a header.
+  #
+  # Every reading here takes both message shapes. A parsed message carries the
+  # atom key `SIPMsg` assigns (`:event`, `:accept`, `:subscriptionstate`…); a
+  # message built by hand — a template, a test, a scenario — carries the header
+  # name as a string key, in whatever case its author typed, and header names are
+  # case-insensitive (RFC 3261 §7.3.1). A malformed value read off the network
+  # reads as "absent", it never raises: the rule `parse_expires/2` already
+  # encodes.
+
+  @doc """
+  The event package a request names, as `{package, id}`, or `nil` when it carries
+  no usable `Event` header.
+
+  The package name is case-insensitive (RFC 6665 §8.2.1) and comes back folded to
+  lower case, which is the form `SIP.EventPackage` is keyed on. The `id`
+  parameter is **not** case-insensitive and comes back verbatim, `nil` when the
+  header carries none.
+
+      iex> SIP.Msg.Ops.event_package(%{"Event" => "PRESENCE;id=Ab12"})
+      {"presence", "Ab12"}
+  """
+  @spec event_package(map()) :: {binary(), binary() | nil} | nil
+  def event_package(msg) when is_map(msg) do
+    with value when is_binary(value) <- first_header_value(msg, :event, "event"),
+         {name, params} when name != "" <- split_params(value) do
+      {String.downcase(name), presence(Map.get(params, "id"))}
+    else
+      _no_event_header -> nil
+    end
+  end
+
+  @doc """
+  The content types a SUBSCRIBE says it accepts, in the order it listed them,
+  folded to lower case.
+
+  `[]` means the request carried **no** `Accept` header, which RFC 6665 §4.4.5
+  reads as "the default type of the event package" — not as "nothing is
+  acceptable". Turning that empty list into the package's own default is the
+  notifier's business, not the message's.
+
+  `Accept` is a comma-separated list that may also be spread over several header
+  lines, and each entry may carry parameters (`;q=0.8`): the media range alone is
+  returned, in the order sent. The client's `q` is dropped on purpose — the
+  notifier picks from `content_types/0`, which is already in the *package's*
+  preference order.
+  """
+  @spec accepted_content_types(map()) :: [binary()]
+  def accepted_content_types(msg) when is_map(msg) do
+    msg
+    |> header_list(:accept, "accept")
+    |> Enum.flat_map(&String.split(&1, ","))
+    |> Enum.map(fn entry ->
+      entry |> split_params() |> elem(0) |> String.downcase()
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  @doc """
+  The resource list a SUBSCRIBE carries in its own body (RFC 5367), or `:none`
+  when it carries none.
+
+  What makes a SUBSCRIBE a **list subscription** is read here and nowhere else:
+  `Content-Disposition: recipient-list` over a body of
+  `application/resource-lists+xml`. Both are required — a body with no
+  disposition is a body the request did not say what to do with — and the URIs
+  come back as the watcher wrote them.
+
+  `{:error, reason}` is a disposition that says "recipient-list" over something
+  that is not one: the request asked for a list subscription and did not supply a
+  readable list, which is a **400**, not a subscription to nothing.
+  """
+  @spec recipient_list(map()) :: {:ok, [binary()]} | :none | {:error, term()}
+  def recipient_list(msg) when is_map(msg) do
+    if content_disposition(msg) == "recipient-list" do
+      case {body_content_type(msg), body_string(msg)} do
+        {"application/resource-lists+xml", body} when is_binary(body) ->
+          SIP.Presence.ResourceLists.parse(body)
+
+        {type, _body} ->
+          {:error, {:not_a_resource_list, type}}
+      end
+    else
+      :none
+    end
+  end
+
+  @doc """
+  What a body is for (RFC 3261 §20.11), folded to lower case and stripped of its
+  parameters (`;handling=optional`), or `nil`.
+  """
+  @spec content_disposition(map()) :: binary() | nil
+  def content_disposition(msg) when is_map(msg) do
+    case first_header_value(msg, :contentdisposition, "content-disposition") do
+      value when is_binary(value) ->
+        value |> split_params() |> elem(0) |> String.trim() |> String.downcase() |> presence()
+
+      _absent ->
+        nil
+    end
+  end
+
+  @doc """
+  The coding applied to the body (RFC 3261 §20.12), folded to lower case, or
+  `nil` when the message carries no `Content-Encoding`.
+
+  Only the first coding is read. A stack of them (`deflate, gzip`) is legal on
+  paper, never sent, and the composite it would name is not one we can undo.
+
+      iex> SIP.Msg.Ops.body_encoding(%{"Content-Encoding" => "deflate"})
+      "deflate"
+  """
+  @spec body_encoding(map()) :: binary() | nil
+  def body_encoding(msg) when is_map(msg) do
+    case option_tags(msg, :contentencoding, "content-encoding") do
+      [coding | _] -> coding
+      [] -> nil
+    end
+  end
+
+  @doc """
+  The codings a peer says it can read (RFC 3261 §20.2), folded to lower case.
+
+  `[]` is an absent header, which RFC 2616 §14.3 reads as "identity only": a body
+  we compress anyway is a body this peer cannot read.
+  """
+  @spec accepted_encodings(map()) :: [binary()]
+  def accepted_encodings(msg) when is_map(msg) do
+    msg
+    |> option_tags(:acceptencoding, "accept-encoding")
+    |> Enum.map(&(&1 |> split_params() |> elem(0)))
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  @doc """
+  The option tags a request **requires** the server to support (RFC 3261 §20.32),
+  folded to lower case.
+
+  An extension named here is not a hint: a server that does not implement one of
+  them answers **420 Bad Extension** listing it in `Unsupported`, and answering
+  anything else is answering a request one did not read.
+
+      iex> SIP.Msg.Ops.required_extensions(%{"Require" => "recipient-list-subscribe"})
+      ["recipient-list-subscribe"]
+  """
+  @spec required_extensions(map()) :: [binary()]
+  def required_extensions(msg) when is_map(msg), do: option_tags(msg, :require, "require")
+
+  @doc """
+  The option tags a request says it **supports** (RFC 3261 §20.37), folded to
+  lower case.
+
+  `Supported: eventlist` is what tells a notifier a watcher can read the
+  `multipart/related` of RFC 4662; unlike `Require`, its absence refuses nothing.
+  """
+  @spec supported_extensions(map()) :: [binary()]
+  def supported_extensions(msg) when is_map(msg), do: option_tags(msg, :supported, "supported")
+
+  # One reading for both: a comma-separated list that may also be spread over
+  # several header lines, exactly like `Accept` above. Option tags are `token`s
+  # and the IANA registry holds them in lower case, so they are compared folded —
+  # a peer writing `Require: Replaces` means the registered extension.
+  defp option_tags(msg, atom_key, lowercase_name) do
+    msg
+    |> header_list(atom_key, lowercase_name)
+    |> Enum.flat_map(&String.split(to_string(&1), ","))
+    |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  @doc """
+  The lifetime a SUBSCRIBE asks for: its `Expires` header, else `package_default`.
+
+  A **second** expiry reading, and deliberately not `requested_expires/2`: a
+  SUBSCRIBE carries no Contact `expires` parameter, the default it falls back on
+  belongs to the event package (RFC 6665 §4.4.1) and not to RFC 3261 §20.19, and
+  the notifier may grant less than what is asked. Same rule, different rules.
+
+  `Expires: 0` is a lifetime, not an absence: it is how a watcher un-subscribes
+  (RFC 6665 §4.4.4), so it comes back as `0` and never as the default.
+  """
+  @spec subscription_expires(map(), non_neg_integer()) :: non_neg_integer()
+  def subscription_expires(msg, package_default) when is_map(msg) do
+    expires_header(msg) || package_default
+  end
+
+  @doc """
+  The `Subscription-State` of a NOTIFY (RFC 6665 §8.2.3), as `{state, params}`,
+  or `nil` when the message carries no such header.
+
+  The state is `:active`, `:pending` or `:terminated`; an extension value nobody
+  here knows comes back as the lower-cased binary rather than as a new atom — a
+  value off the network never grows the atom table.
+
+  Parameter names are folded to lower case and their values kept verbatim, so
+  `reason` stays a string whether or not it is one of the seven of §8.2.3.
+  `expires` and `retry-after` are the two the layer acts on, so they are returned
+  as integers, and a malformed one is dropped rather than handed on as junk.
+
+      iex> SIP.Msg.Ops.subscription_state(%{"Subscription-State" => "active;expires=3600"})
+      {:active, %{"expires" => 3600}}
+  """
+  @spec subscription_state(map()) ::
+          {:active | :pending | :terminated | binary(), map()} | nil
+  def subscription_state(msg) when is_map(msg) do
+    with value when is_binary(value) <-
+           first_header_value(msg, :subscriptionstate, "subscription-state"),
+         {state, params} when state != "" <- split_params(value) do
+      {substate_value(state), numeric_params(params, ["expires", "retry-after"])}
+    else
+      _no_subscription_state -> nil
+    end
+  end
+
+  @doc """
+  The entity-tag a PUBLISH refreshes or removes — its `SIP-If-Match` header (RFC
+  3903 §11.3.2) — or `nil` when it carries none, which makes it an initial
+  publication.
+
+  The tag is opaque and case-sensitive: it comes back exactly as the publisher
+  wrote it, whitespace aside.
+  """
+  @spec publish_etag(map()) :: binary() | nil
+  def publish_etag(msg) when is_map(msg) do
+    case first_header_value(msg, :sipifmatch, "sip-if-match") do
+      value when is_binary(value) -> presence(String.trim(value))
+      _no_tag -> nil
+    end
+  end
+
+  @doc """
+  The entity-tag an event state compositor **granted** — the `SIP-ETag` of a 2xx
+  to a PUBLISH (RFC 3903 §11.3.1) — or `nil` when the response carries none.
+
+  The other half of `publish_etag/1`, which reads the tag a publisher
+  *presents* (`SIP-If-Match`). Two headers, two directions, one lifecycle: what
+  comes back here is what the next refresh sends back there. Opaque and
+  case-sensitive, like its counterpart.
+
+  A 2xx answering a removal carries none — there is no state left to name — so
+  `nil` is an answer and not an omission.
+  """
+  @spec entity_tag(map()) :: binary() | nil
+  def entity_tag(msg) when is_map(msg) do
+    case first_header_value(msg, :sipetag, "sip-etag") do
+      value when is_binary(value) -> presence(String.trim(value))
+      _no_tag -> nil
+    end
+  end
+
+  @doc """
+  What a PUBLISH is actually asking for (RFC 3903 §4.1 and §6), read from its
+  `SIP-If-Match`, its `Expires` and whether it carries a body:
+
+  | Answer | The request |
+  |---|---|
+  | `{:initial, nil, expires}` | a body and no tag: publish this state |
+  | `{:modify, etag, expires}` | a body and a tag: replace the state that tag names |
+  | `{:refresh, etag, expires}` | a tag and no body: the same state, for longer |
+  | `{:remove, etag, 0}` | `Expires: 0`: drop it |
+  | `:invalid` | neither a tag nor a body — nothing to publish and nothing to name (**400**) |
+
+  `package_default` is the lifetime to assume when the request states none: the
+  event package's, never a number of this layer's own — the same rule
+  `subscription_expires/2` follows, and the reason both exist beside
+  `requested_expires/2` rather than inside it.
+
+  `Expires: 0` reads as a removal whatever else the request carries, tag or body:
+  a publication with no lifetime is a publication that is not kept, which is what
+  the publisher asked for. An initial PUBLISH carrying `Expires: 0` is therefore
+  `{:remove, nil, 0}` — it names no state, and the 200 that answers it carries no
+  entity-tag.
+  """
+  @spec publish_operation(map(), non_neg_integer()) ::
+          {:initial | :modify | :refresh | :remove, binary() | nil, non_neg_integer()}
+          | :invalid
+  def publish_operation(req, package_default) when is_map(req) do
+    etag = publish_etag(req)
+    body = body_string(req)
+    expires = expires_header(req) || package_default
+
+    cond do
+      is_nil(etag) and is_nil(body) -> :invalid
+      expires == 0 -> {:remove, etag, 0}
+      is_nil(etag) -> {:initial, nil, expires}
+      is_nil(body) -> {:refresh, etag, expires}
+      true -> {:modify, etag, expires}
+    end
+  end
+
+  @doc """
+  The body of a message as a binary, whatever shape it arrived in — a bare
+  string, the parser's `[%{contenttype, data}]` part list, or a multipart list
+  (the first part) — and `nil` when it carries none.
+
+  `sdp_body/1` is the same question asked about a *session description*, and it
+  picks the SDP part out of a multipart body; this one makes no such choice,
+  because a PUBLISH body or an event state document is whatever its content type
+  says it is.
+  """
+  @spec body_string(map()) :: binary() | nil
+  def body_string(msg) when is_map(msg) do
+    case Map.get(msg, :body) do
+      body when is_binary(body) -> presence(body)
+      [%{data: data} | _] when is_binary(data) -> presence(data)
+      [data | _] when is_binary(data) -> presence(data)
+      _no_body -> nil
+    end
+  end
+
+  @doc """
+  The media type of a message's body, folded to lower case and stripped of its
+  parameters (`application/pidf+xml;charset=utf-8` reads
+  `"application/pidf+xml"`), or `nil` when it carries none.
+
+  The part's own Content-Type wins over the message's: a body carried as a part
+  states its type beside its bytes, and that is the one the body was written
+  with.
+  """
+  @spec body_content_type(map()) :: binary() | nil
+  def body_content_type(msg) when is_map(msg) do
+    value =
+      case Map.get(msg, :body) do
+        [%{contenttype: ct} | _] when is_binary(ct) -> ct
+        _ -> first_header_value(msg, :contenttype, "content-type")
+      end
+
+    case value do
+      value when is_binary(value) ->
+        value |> split_params() |> elem(0) |> String.downcase() |> presence()
+
+      _no_content_type ->
+        nil
+    end
+  end
+
+  @doc """
+  The value of a `Subscription-State` header (RFC 6665 §8.2.3), built.
+
+  The writer beside the reader above, so the one place that knows how this header
+  is spelt is the one place that knows how to read it. `params` are appended in
+  the order given, values written verbatim:
+
+      iex> SIP.Msg.Ops.subscription_state_value(:active, expires: 600)
+      "active;expires=600"
+      iex> SIP.Msg.Ops.subscription_state_value(:terminated, reason: :timeout)
+      "terminated;reason=timeout"
+  """
+  @spec subscription_state_value(atom() | binary(), keyword()) :: binary()
+  def subscription_state_value(state, params \\ []) when is_list(params) do
+    Enum.reduce(params, to_string(state), fn
+      {_name, nil}, acc -> acc
+      {name, value}, acc -> acc <> ";" <> to_string(name) <> "=" <> to_string(value)
+    end)
+  end
+
+  @doc """
+  The value of an `Event` header (RFC 6665 §8.2.1) built from a package name and
+  an optional `id`.
+  """
+  @spec event_value(binary(), binary() | nil) :: binary()
+  def event_value(package, nil), do: package
+  def event_value(package, id), do: package <> ";id=" <> to_string(id)
+
+  @doc """
+  The value of an `Allow-Events` header (RFC 6665 §8.2.2) built from a list of
+  package names.
+
+  It is composed from what the **domain** enables, never from what the node has
+  compiled in (docs/design/presence-basic-plan.md, decision 3), so the caller
+  passes the names and this only writes them out.
+  """
+  @spec allow_events([binary()]) :: binary()
+  def allow_events(names) when is_list(names) do
+    names
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.join(", ")
+  end
+
+  defp substate_value(value) do
+    case String.downcase(value) do
+      "active" -> :active
+      "pending" -> :pending
+      "terminated" -> :terminated
+      extension -> extension
+    end
+  end
+
+  # `name;p1=v1;p2` -> {"name", %{"p1" => "v1", "p2" => ""}}. A valueless
+  # parameter is kept as an empty value, which every reading above treats as
+  # "said nothing" — the shape `;expires` with no value arrives as.
+  defp split_params(value) when is_binary(value) do
+    [head | rest] = String.split(value, ";")
+
+    params =
+      Enum.reduce(rest, %{}, fn part, acc ->
+        case String.split(part, "=", parts: 2) do
+          [name, param_value] ->
+            put_param(acc, name, strip_quotes(param_value))
+
+          [name] ->
+            put_param(acc, name, "")
+        end
+      end)
+
+    {String.trim(head), params}
+  end
+
+  defp put_param(params, name, value) do
+    case String.downcase(String.trim(name)) do
+      "" -> params
+      name -> Map.put(params, name, value)
+    end
+  end
+
+  defp strip_quotes(value) do
+    case String.trim(value) do
+      "\"" <> _ = quoted -> String.trim(quoted, "\"")
+      plain -> plain
+    end
+  end
+
+  # The listed parameters as integers; one that does not parse is dropped, so a
+  # caller reading params["expires"] gets a number or nothing, never junk.
+  defp numeric_params(params, names) do
+    Enum.reduce(names, params, fn name, acc ->
+      case Map.fetch(acc, name) do
+        :error -> acc
+        {:ok, value} -> put_numeric_param(acc, name, parse_expires(value, nil))
+      end
+    end)
+  end
+
+  defp put_numeric_param(params, name, nil), do: Map.delete(params, name)
+  defp put_numeric_param(params, name, number), do: Map.put(params, name, number)
+
+  # A header by both of its keys: the atom SIPMsg gives a parsed message, and the
+  # name a hand-built one carries as a string key, case-insensitively. A header
+  # repeated on several lines arrives as a list — the first value wins for the
+  # single-valued ones, and `header_list/3` keeps them all for the others.
+  defp first_header_value(msg, atom_key, lowercase_name) do
+    case header_list(msg, atom_key, lowercase_name) do
+      [value | _] -> value
+      [] -> nil
+    end
+  end
+
+  defp header_list(msg, atom_key, lowercase_name) do
+    case Map.get(msg, atom_key) do
+      nil -> header_values(msg, lowercase_name)
+      value -> List.wrap(value)
+    end
+  end
 
   # ── Who a request says it is from (RFC 3261 §8.1.1.3, RFC 3325 §9) ───────────
   #
@@ -382,6 +848,41 @@ defmodule SIP.Msg.Ops do
   """
   @spec target_aor(map()) :: String.t() | nil
   def target_aor(msg) when is_map(msg), do: uri_userpart(Map.get(msg, :ruri))
+
+  @doc """
+  The user and the host of an address header, as `{user, domain}` — `{nil, nil}`
+  when the header is absent or unparsable.
+
+  `target_aor/1` answers "which resource", `asserted_username/1` "who claims to
+  send this"; this one answers "who do these two headers NAME", which is a
+  different question and the one a subscription row asks twice: `active_watchers`
+  keeps `from_user`/`from_domain` and `to_user`/`to_domain` side by side, plus
+  `watcher_username`/`watcher_domain` — the watcher being the `From` of the
+  SUBSCRIBE.
+
+  Tolerant like every other reading here: `SIPMsg` leaves `:from` and `:to` as
+  the raw header value (only `:ruri` and `:contact` are parsed), a hand-built
+  message carries a `%SIP.Uri{}`, and neither must make the caller parse.
+  """
+  @spec header_aor(map(), :from | :to) :: {String.t() | nil, String.t() | nil}
+  def header_aor(msg, header) when is_map(msg) and header in [:from, :to] do
+    case to_uri(Map.get(msg, header)) do
+      %SIP.Uri{userpart: user, domain: domain} -> {presence(user), host_string(domain)}
+      _ -> {nil, nil}
+    end
+  end
+
+  # A host may have been parsed as an IP tuple; a row column holds text.
+  defp host_string(domain) when is_binary(domain), do: presence(domain)
+
+  defp host_string(domain) when is_tuple(domain) do
+    case :inet.ntoa(domain) do
+      {:error, _} -> nil
+      addr -> to_string(addr)
+    end
+  end
+
+  defp host_string(_other), do: nil
 
   # ── The SDP body, and what a re-offer asks for (RFC 3264 §8, RFC 3261 §14) ───
   #
@@ -766,6 +1267,43 @@ defmodule SIP.Msg.Ops do
     "elixip-boundary-" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
   end
 
+  @doc """
+  Stamp one boundary on `parts` and compose the `Content-Type` that goes with
+  them: `{parts, content_type}`.
+
+  `opts[:subtype]` is `"mixed"` by default. A list NOTIFY (RFC 4662 §4.2) needs
+  `"related"` with the two parameters that make its root part findable:
+
+      {parts, ctype} =
+        SIP.Msg.Ops.compose_multipart(parts,
+          subtype: "related",
+          type: "application/rlmi+xml",
+          start: "<rlmi@example.com>")
+
+  `type` names the media type of the root part and `start` its `Content-ID`
+  (RFC 2387 §3.1-3.2). Without `start` the root is the *first* part, which is why
+  it is a parameter rather than an ordering rule: a watcher reading the parts in
+  any other order finds the manifest by its identifier.
+
+  The caller hands the answer to `update_sip_msg/2` as `{:body, parts}` after
+  setting `:contenttype` — the parts carry the boundary, so neither is redrawn.
+  """
+  @spec compose_multipart([map()], keyword()) :: {[map()], binary()}
+  def compose_multipart(parts, opts \\ []) when is_list(parts) do
+    boundary = generate_boundary()
+    subtype = Keyword.get(opts, :subtype, "mixed")
+
+    parameters =
+      [{"type", Keyword.get(opts, :type)}, {"start", Keyword.get(opts, :start)}]
+      |> Enum.reject(fn {_name, value} -> is_nil(value) end)
+      |> Enum.map_join("", fn {name, value} -> "; #{name}=\"#{value}\"" end)
+
+    {Enum.map(parts, &Map.put(&1, :boundary, boundary)),
+     "multipart/" <> subtype <> parameters <> "; boundary=" <> boundary}
+  end
+
+  defp mixed(boundary), do: "multipart/mixed; boundary=" <> boundary
+
   @doc "Met a jour ou ajout des champs dans un message SIP"
   def update_sip_msg(sipmsg, fields) when is_list(fields) do
     Enum.reduce(fields, sipmsg, fn {header, value}, acc ->
@@ -800,7 +1338,13 @@ defmodule SIP.Msg.Ops do
     sipmsg |> Map.put(:body, []) |> Map.put(:contentlength, 0)
   end
 
-  def update_sip_msg(sipmsg, {:body, [%{contenttype: ctype, data: body_data}]}) do
+  # One part and no boundary: a single-part body in the parser's own shape, whose
+  # own type is the message's. A part that DOES carry a boundary falls through to
+  # the multipart clause below even when it is alone — dropping the boundary there
+  # left a message announcing a multipart Content-Type over a bare payload, which
+  # is what a list NOTIFY naming one buddy with no published state looks like.
+  def update_sip_msg(sipmsg, {:body, [%{contenttype: ctype, data: body_data} = part]})
+      when not is_map_key(part, :boundary) do
     sipmsg
     |> Map.put(:body, [%{contenttype: ctype, data: body_data}])
     |> Map.put(:contenttype, ctype)
@@ -818,19 +1362,26 @@ defmodule SIP.Msg.Ops do
   # boundary, stamp it on every part, set the top-level Content-Type and compute
   # the Content-Length from the serialized body octets. Each part must be a
   # `%{contenttype: ct, data: bin}` map (extra keys are preserved).
+  #
+  # Parts that ALREADY carry a boundary keep it, and keep the Content-Type the
+  # caller set: that is a body `compose_multipart/2` built, whose type names both
+  # the subtype and the boundary, and re-drawing either here would leave the
+  # message announcing a boundary its body does not use.
   def update_sip_msg(sipmsg, {:body, parts}) when is_list(parts) do
     if not Enum.all?(parts, &match?(%{contenttype: _, data: _}, &1)) do
       raise "Multipart body parts must be %{contenttype: ..., data: ...} maps, got #{inspect(parts)}"
     end
 
-    boundary = generate_boundary()
-    parts = Enum.map(parts, &Map.put(&1, :boundary, boundary))
-    body_octets = SIPMsg.multipart_body(parts)
+    {parts, content_type} =
+      case parts do
+        [%{boundary: boundary} | _] -> {parts, Map.get(sipmsg, :contenttype, mixed(boundary))}
+        _ -> compose_multipart(parts, [])
+      end
 
     sipmsg
     |> Map.put(:body, parts)
-    |> Map.put(:contenttype, "multipart/mixed; boundary=" <> boundary)
-    |> Map.put(:contentlength, Kernel.byte_size(body_octets))
+    |> Map.put(:contenttype, content_type)
+    |> Map.put(:contentlength, Kernel.byte_size(SIPMsg.multipart_body(parts)))
   end
 
   def update_sip_msg(sipmsg, {header, value}) do
@@ -1326,6 +1877,35 @@ defmodule SIP.Msg.Ops do
     end
 
     rsp
+  end
+
+  @doc """
+  The response the stack makes up for a request that will never be answered.
+
+  RFC 3261 §8.1.3.1 names the two cases and the code each takes: a transaction
+  that times out is reported to the application as a **408**, a fatal transport
+  error as a **503**. Both are local notifications and neither goes on the wire,
+  so this response carries only what a reader of one needs — the status, and the
+  dialog / CSeq coordinates that say WHICH request it answers
+  (`SIP.Session.dispatch_reply/3` routes on the CSeq method, and the B2BUA
+  correlates on the transaction pid delivered alongside).
+
+  Deliberately not `reply_to_request/5`: that one composes a response a UAS sends
+  out, minting a To tag and demanding a Contact that this response has no use for.
+  """
+  @spec local_response(map(), 100..699, binary()) :: map()
+  def local_response(req, code, reason) when is_map(req) and code in 100..699 do
+    %{
+      method: false,
+      response: code,
+      reason: reason,
+      callid: Map.get(req, :callid),
+      cseq: Map.get(req, :cseq),
+      from: Map.get(req, :from),
+      to: Map.get(req, :to),
+      contentlength: 0,
+      body: []
+    }
   end
 
   @doc """

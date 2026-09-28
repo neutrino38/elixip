@@ -145,7 +145,11 @@ max calls:     500
 active calls:  0
 registrations: 0
 registrar:     default_expires=3600 module=Registrar.Example.V1 script=registrar.exs version=1
-presence:      (disabled)
+presence:
+  presence SUBSCRIBE -> presence-subscribe.exs  [Kelix.PresenceSubscribe.V1]
+  presence PUBLISH   -> presence-publish.exs    [Kelix.PresencePublish.V1]
+  dialog   SUBSCRIBE -> presence-subscribe.exs  [Kelix.PresenceSubscribe.V1]
+  dialog   PUBLISH   -> (not served)
 dial-plan:
   1. 0[1-9]XXXXXXXX -> user2pstn.exs  [User2Pstn.V1]
   2. (default)      -> catchall.exs   [Catchall.V3 — file changed since load]
@@ -411,6 +415,17 @@ The positional `args…` are handed to the module's `handle_control/2` as
 boolean, digits an integer, a leading `{`/`[` is JSON). These share the same
 cookie boundary as the core commands.
 
+A bare token binds to the next declared argument the line did not name, in the
+order `<module> help` lists them, as for the core commands:
+
+```
+kelictl presence list weshwesh.eu              # = domain=weshwesh.eu
+kelictl presence show weshwesh.eu magali.buu   # = domain=… aor=…
+```
+
+A bare token spelling a declared argument's name stays a flag (`force` =
+`force=true`).
+
 **Quote a value that contains spaces** — `name='Sales weekly'`,
 `layout='2x2 hd720p'` — and the quotes reach the module intact, JSON included
 (`muted='{"audio":true}'`). Before 2026-08 the wrapper joined the argument line
@@ -468,9 +483,11 @@ entry, of which the `mcu` module is only one consumer. `domain`, `mediaserver`
 and `module` are core nouns and never reach a module, so a mistyped sub-command
 prints their usage rather than "unknown module".
 
-Of the shipped modules, only [mcu](modules/mcu.md) contributes commands today —
-[registrar](modules/registrar.md) and [auth_db](modules/auth_db.md) contribute
-none. The mechanism is documented in
+Of the shipped modules, [mcu](modules/mcu.md), [auth_db](modules/auth_db.md),
+[presence](modules/presence.md), [mcu_presence](modules/mcu_presence.md) and
+[dialog_state](modules/dialog_state.md) contribute commands today;
+[registrar](modules/registrar.md) contributes none — its registrations are a core
+noun, addressed as a sub-resource of their domain. The mechanism is documented in
 [modules/README.md](modules/README.md#module-administration-kelictl--rest-api).
 
 ## Parity with REST

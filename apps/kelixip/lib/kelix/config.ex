@@ -72,7 +72,7 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.5.5",
+            user_agent: "Kelixip/1.6.1",
             max_calls: nil,
             # The largest inbound SIP message this node accepts, in bytes. Past it a
             # request is answered 513 instead of being parsed. Read by the framework
@@ -614,10 +614,17 @@ defmodule Kelix.Config do
   # configuration that states it stays valid.
   defp opt_listener_tag(l) do
     case Map.get(l, "tag") do
-      nil -> {:ok, :public}
-      "public" -> {:ok, :public}
-      "internal" -> {:ok, :internal}
-      other -> {:error, "[[listen]]: `tag` must be \"public\" or \"internal\", got #{inspect(other)}"}
+      nil ->
+        {:ok, :public}
+
+      "public" ->
+        {:ok, :public}
+
+      "internal" ->
+        {:ok, :internal}
+
+      other ->
+        {:error, "[[listen]]: `tag` must be \"public\" or \"internal\", got #{inspect(other)}"}
     end
   end
 
@@ -675,8 +682,11 @@ defmodule Kelix.Config do
 
       addr when is_binary(addr) ->
         case :inet.parse_address(String.to_charlist(addr)) do
-          {:ok, _ip} -> {:ok, addr}
-          {:error, _} -> {:error, "[[listen]]: `addr` must be an IP address, got #{inspect(addr)}"}
+          {:ok, _ip} ->
+            {:ok, addr}
+
+          {:error, _} ->
+            {:error, "[[listen]]: `addr` must be an IP address, got #{inspect(addr)}"}
         end
 
       other ->

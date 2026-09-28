@@ -52,6 +52,28 @@ Cette autorisation ne vous permet **pas** de construire, proposer, vendre ou dis
 qu'ils soient proposés en ligne (hébergé / SaaS) ou sur site (« on-premises »), open source ou non.
 De tels usages nécessitent une licence commerciale distincte (voir ci-dessous).
 
+## Le Finite State Language ne fait pas partie de l'Œuvre sous Licence
+
+**FSL — le Finite State Language, son moteur et son instrumentation — a été
+extrait d'Elixip le 2026-09-12 et reconcédé par le Concédant sous licence
+Apache-2.0.** Il vit désormais dans son propre dépôt,
+[finite-state-language](https://github.com/neutrino38/finite-state-language), et
+Elixip le consomme comme une dépendance permissive ordinaire (paquet hex
+`finite_state_language`, application OTP `:fsl`, modules `FSL.*`).
+
+Ce code est donc **hors** de l'Œuvre sous Licence définie ci-dessus, et aucun
+terme de la présente Licence ne s'y applique — ni l'Autorisation d'Usage
+Supplémentaire, ni la restriction relative aux produits concurrents. Ce qui reste
+sous la présente Licence est tout ce qui est construit *sur* le langage : la pile
+SIP, les couches session et B2BUA, la couche média, la liaison SIP de FSL
+(`SIP.FSL.Host`, `SIP.Scenario`), et les outils — **elixipp**, **borderline**,
+**kelixip**.
+
+La reconcession ne voyage que dans un sens, et ne peut voyager que dans celui-là :
+une œuvre à code source disponible peut dépendre d'une œuvre permissive. Extraire
+davantage de code d'Elixip vers ce paquet est une décision du Concédant, version
+par version.
+
 ## Exemption relative aux scénarios
 
 Les scripts et scénarios exécutés *par* le framework — les fichiers de scénario `.exs` exécutés

@@ -7,7 +7,7 @@ defmodule Kelixip.MixProject do
   def project do
     [
       app: :kelixip,
-      version: "1.5.5",
+      version: "1.6.1",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -34,19 +34,15 @@ defmodule Kelixip.MixProject do
     [
       # The shared SIP stack + FSL + media.
       {:elixip2, in_umbrella: true},
-      # Declarative config parser (config.toml / domains.toml). Pure Elixir,
-      # no NIF, release-safe (design §13).
+      # Declarative config parser (config.toml / domains.toml). 
       {:toml, "~> 0.7"},
-      # SQL drivers for the auth_db module (subscriber table HA1 lookup); which one
-      # opens the pool is the block's `driver` key (default MariaDB/MySQL).
+      # SQL drivers for the auth_db module 
       {:myxql, "~> 0.7"},
       {:postgrex, "~> 0.19"},
-      # REST control API (design §10.3): a Plug.Router served by Bandit. Pure
-      # Elixir, release-safe. Kept out of the elixipp escript (server-only).
+      # REST control API (design §10.3): a Plug.Router served by Bandit. 
       {:plug, "~> 1.16"},
       {:bandit, "~> 1.5"},
       # Observability (design §11): :telemetry events → Prometheus. The `_core`
-      # exporter aggregates in ETS and exposes `scrape/1`; we serve /metrics +
       # /health ourselves over the existing Bandit, no second HTTP stack.
       {:telemetry, "~> 1.2"},
       {:telemetry_metrics, "~> 1.0"},
@@ -58,7 +54,7 @@ defmodule Kelixip.MixProject do
   defp releases do
     [
       kelixip: [
-        version: "1.5.5",
+        version: "1.6.1",
         applications: [kelixip: :permanent],
         include_executables_for: [:unix]
       ]

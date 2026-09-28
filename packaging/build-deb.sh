@@ -149,11 +149,11 @@ ln -s ../lib/kelixip/bin/kelictl "$root/usr/sbin/kelictl"
 ln -s ../lib/kelixip/bin/kelixip "$root/usr/sbin/kelixip"
 
 # script_dir — the reference scenario scripts. The ones that drive a module-less
-# core stay here; the mcu scripts are unusable without kelixip-mod-mcu (every
-# conference verb they call is the module's), so build_module ships them instead.
+# core stay here; the mcu and presence scripts are unusable without their module
+# (every verb they call is its own), so build_module ships them instead.
 install -d -m 0755 "$root/usr/share/kelixip"
 for exs in "$stage"/scripts/*.exs; do
-  case ${exs##*/} in mcu*.exs) continue ;; esac
+  case ${exs##*/} in mcu*.exs | presence-*.exs | registrar-presence.exs) continue ;; esac
   install -m 0644 "$exs" "$root/usr/share/kelixip/"
 done
 
@@ -168,6 +168,8 @@ for toml in config domains; do
   sed -e 's,/etc/sysconfig/kelixip,/etc/default/kelixip,g' \
       -e 's,dnf install,apt install,g' \
       -e 's,kelixip-mod-auth_db,kelixip-mod-auth-db,g' \
+      -e 's,kelixip-mod-mcu_presence,kelixip-mod-mcu-presence,g' \
+      -e 's,kelixip-mod-dialog_state,kelixip-mod-dialog-state,g' \
       "$stage/config/$toml.toml" > "$root/etc/kelixip/$toml.toml"
   chmod 0640 "$root/etc/kelixip/$toml.toml"
 done
@@ -215,16 +217,24 @@ finish_package "$root" "$DEBDIR/control.in" kelixip DEPENDS="$depends, adduser, 
 # --- one package per loadable module ----------------------------------------
 # The core implements no SIP function: a deployment installs only the modules it
 # uses (a conferencing-only product installs kelixip-mod-mcu and nothing else).
+# The beam and doc arguments are space-separated lists of globs, each expanded
+# under its own staging directory.
 build_module() {
-  local name="$1" beam_glob="$2" tpl="$3" doc_glob="$4" script_glob="${5:-}"
-  local mroot="$WORK/$name"
+  local name="$1" tpl="$3" script_glob="${5:-}"
+  local mroot="$WORK/$name" g beam_globs doc_globs
+  read -r -a beam_globs <<< "$2"
+  read -r -a doc_globs <<< "$4"
   echo "==> assembling $name"
   install -d -m 0755 "$mroot/usr/lib/kelixip/modules"
-  install -m 0644 "$stage"/modules/$beam_glob "$mroot/usr/lib/kelixip/modules/"
+  for g in "${beam_globs[@]}"; do
+    install -m 0644 "$stage"/modules/$g "$mroot/usr/lib/kelixip/modules/"
+  done
   install_doc "$mroot" "$name"
   # Its own document, alongside the copyright: what the docs on a host describe is
   # then what that host can actually do (the .spec's %doc for the same subpackage).
-  install -m 0644 "$stage"/doc/modules/$doc_glob "$mroot/usr/share/doc/$name/"
+  for g in "${doc_globs[@]}"; do
+    install -m 0644 "$stage"/doc/modules/$g "$mroot/usr/share/doc/$name/"
+  done
   # Reference scripts that only this module can run. script_dir itself belongs to
   # the core, which the module depends on at the same version, so dropping files
   # into it needs no directory of our own (the .spec's %files mod-mcu).
@@ -238,9 +248,17 @@ build_module() {
 # The .beam globs keep their trailing wildcard on purpose: a module is one named
 # module plus its implementation (Mcu.Client, Mcu.Adapter.Conn, Registrar.Contact,
 # …), and shipping only the named one installs a module whose every call fails.
+# mcu is the exception that proves it: `Mcu*` would also take McuPresence, so it
+# names `Mcu` and `Mcu.*`.
 build_module kelixip-mod-registrar 'Elixir.Kelix.Mod.Registrar*.beam' "$DEBDIR/control-mod-registrar.in" 'registrar.md'
 build_module kelixip-mod-auth-db   'Elixir.Kelix.Mod.AuthDb*.beam'    "$DEBDIR/control-mod-auth-db.in"   'auth_db.md'
-build_module kelixip-mod-mcu       'Elixir.Kelix.Mod.Mcu*.beam'       "$DEBDIR/control-mod-mcu.in"       'mcu*.md' 'mcu*.exs'
+build_module kelixip-mod-mcu       'Elixir.Kelix.Mod.Mcu.beam Elixir.Kelix.Mod.Mcu.*.beam' \
+  "$DEBDIR/control-mod-mcu.in" 'mcu.md mcu-api.md mcu_module_guide.md' 'mcu*.exs'
+build_module kelixip-mod-presence  'Elixir.Kelix.Mod.Presence*.beam'  "$DEBDIR/control-mod-presence.in"  'presence.md' '*presence*.exs'
+build_module kelixip-mod-mcu-presence 'Elixir.Kelix.Mod.McuPresence*.beam' \
+  "$DEBDIR/control-mod-mcu-presence.in" 'mcu_presence.md'
+build_module kelixip-mod-dialog-state 'Elixir.Kelix.Mod.DialogState*.beam' \
+  "$DEBDIR/control-mod-dialog-state.in" 'dialog_state.md'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

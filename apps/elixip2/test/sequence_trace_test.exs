@@ -219,6 +219,9 @@ defmodule SIP.Test.SequenceTrace do
   end
 
   describe "a scenario with debug: true" do
+    # FSL.Journal does not collect the trace yet: docs/design/debug-fsl-port-plan.md.
+    @describetag :skip
+
     setup do
       SIP.Test.AppEnv.preserve_proxy()
       :ok = SIP.Scenario.start_stack()

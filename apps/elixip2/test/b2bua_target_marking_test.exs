@@ -136,6 +136,7 @@ defmodule SIP.Test.B2buaTargetMarking do
       assert stamped.net_side == nil
     end
   end
+
   describe "b2bua_resolve/1 and what an unresolved peer means" do
     alias SIP.B2bua.Peer
 
@@ -185,6 +186,7 @@ defmodule SIP.Test.B2buaTargetMarking do
           ] do
         out = B2bua.do_resolve_peer(ctx(), shape)
         assert out.lasterr == :ok, "refused #{inspect(shape)}"
+
         assert %Peer{resolved: [[%SIP.Uri{net_side: :internal}]]} =
                  SIP.Context.appdata_get(out, :resolved_peer)
       end

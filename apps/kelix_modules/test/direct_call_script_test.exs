@@ -40,6 +40,12 @@ defmodule Kelix.DirectCallScriptTest do
       {:reply, {:ok, self()}, test}
     end
 
+    # The stamp of dialog-state-plan.md DS3 — which this script never earns.
+    def handle_call({:set_remote_aor, aor}, _from, test) do
+      send(test, {:stamped, aor})
+      {:reply, :ok, test}
+    end
+
     def handle_call(_msg, _from, test), do: {:reply, :ok, test}
     def handle_info(_msg, test), do: {:noreply, test}
   end
@@ -203,6 +209,8 @@ defmodule Kelix.DirectCallScriptTest do
        %{scenario: module} do
     :ok = register_callee("dc-ok")
     tp = mockup_pid("dc-ok")
+    :ok = SIP.Dialog.Events.subscribe()
+    on_exit(fn -> SIP.Dialog.Events.unsubscribe() end)
     {:ok, dialog} = MockDialog.start_link(self())
 
     req = invite("call-ok-1")
@@ -211,6 +219,19 @@ defmodule Kelix.DirectCallScriptTest do
 
     assert_receive {:replied, 100, "Trying", _f, _r}, 5_000
     assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+
+    # Only what is PROVEN is stamped (dialog-state-plan.md §1). Nobody
+    # authenticated Alice, so her leg carries no AOR; Bob's leg does, because the
+    # registrar built the peer from his bindings.
+    refute_received {:stamped, _}
+
+    assert_receive {:sip_dialog, _outbound,
+                    %{
+                      state: :trying,
+                      direction: :outbound,
+                      remote_aor: %SIP.Uri{userpart: @callee, domain: @domain}
+                    }},
+                   1_000
 
     Manual.simulate(tp, 180, 50)
     assert_receive {:replied, 180, _reason, _f, _r}, 5_000

@@ -1,3 +1,109 @@
+kelixip (1.6.1-1) stable; urgency=low
+
+  * kelescope shows presence live: Kelix.Control.subscribe_presence/2 returns a
+    domain's presentities, then pushes each change.
+  * kelictl presence list shows a presentity reported registered by
+    registrar-presence.exs, as a state of source "registrar"; list and show
+    gain the source and status columns.
+  * The registrar no longer renders an AOR's detail on every REGISTER when no
+    registrations panel is open on its domain.
+  * New package kelixip-mod-mcu-presence: a conference room is a presentity
+    (open, busy when full, closed while its media server is lost).
+  * presence-subscribe.exs answers noresource to a presentity with no state,
+    instead of closed.
+  * BLF keys: the dialog event package (RFC 4235) is served, with Event: dialog
+    in a [[domain.presence]] block. New package kelixip-mod-dialog-state
+    reports each served user's calls to it, and on-the-phone to presence.
+  * presence-publish.exs answers 403 to a PUBLISH about another user's state,
+    and both presence scripts log whose state changed to what.
+  * A notifier whose script ends keeps retransmitting its final NOTIFY, and one
+    whose script dies sends it (deactivated) instead of leaving the watcher
+    subscribed.
+  * User-Agent is now Kelixip/1.6.1.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 27 Sep 2026 18:00:00 +0200
+
+kelixip (1.6.0-9) stable; urgency=low
+
+  * A scenario state that raises tears down what it had set up: teardown now
+    runs on the context the failing state had built, so both legs and the media
+    session are released and the caller can hang up.
+  * A dialog monitors its application and ends with it, hung up first when there
+    is a session to end, instead of answering 503 to every later in-dialog
+    request.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 27 Sep 2026 12:00:00 +0200
+
+kelixip (1.6.0-8) stable; urgency=low
+
+  * Presence now follows real registrations. The registrar-presence.exs script
+    read the REGISTER's To as a parsed URI, which only a test request carries:
+    presence was never told of a registration (no NOTIFY to watchers), and the
+    script ended 1 ms after its 200 OK. Every later REGISTER of that client went
+    unanswered and timed out 408.
+  * A REGISTER dialog ends with its registrar session, so the client's next
+    REGISTER reaches a live one instead of timing out 408.
+  * kelictl: module commands take positional arguments, bound in order to the
+    arguments the command declares — kelictl presence list weshwesh.eu.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 26 Sep 2026 23:00:00 +0200
+
+kelixip (1.6.0-7) stable; urgency=low
+
+  * List NOTIFYs are deflated as soon as the body passes 500 octets, when the
+    watcher accepts it. The bound was 1200 for the body alone, which ignored the ~700
+    octets of headers a list NOTIFY carries over IPv6: a three-entry list went out
+    clear in a 1806-octet datagram, which the path fragmented and the watcher never
+    received.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 26 Sep 2026 20:30:00 +0200
+
+kelixip (1.6.0-6) stable; urgency=low
+
+  * Presence follows registrations: a new reference script, registrar-presence.exs
+    (shipped with kelixip-mod-presence), is registrar.exs plus a report to the
+    presence collection on every change. A subscriber that does not PUBLISH is open
+    while one of its devices is registered and closed when the last one goes —
+    un-REGISTER, connection lost, or a registration that lapsed — and its watchers
+    are NOTIFYed on each change. A refused refresh no longer ends the session.
+  * A list subscription reports an unpublished subscriber of a registrar domain as
+    open or closed, not noresource; noresource is kept for unknown users and for
+    domains with no registrar or not served.
+  * kelictl registration remove and DELETE /domains/<domain>/registrations/<aor>
+    update presence when kelixip-mod-presence is loaded.
+  * Registrar fix: an Expires: 0 now removes only the contacts it names (RFC 3261
+    §10.3). It used to remove every binding of the AOR, un-registering a
+    subscriber's other devices whenever one of them signed off.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 26 Sep 2026 12:00:00 +0200
+
+kelixip (1.6.0-1) stable; urgency=low
+
+  * Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between
+    them. New package kelixip-mod-presence — the collection, the entity-tags and
+    the fan-out — with the reference scripts presence-subscribe.exs and
+    presence-publish.exs.
+  * domains.toml: [[domain.presence]] is now an array of tables, ONE PER EVENT
+    PACKAGE, each naming its subscribe and publish script. A single
+    [domain.presence] table is refused: replace it with a block carrying
+    event-package = "presence". A package a domain declares none for is answered
+    489, with Allow-Events naming the ones it serves.
+  * An out-of-dialog MESSAGE is no longer routed to the presence function: it
+    carries no Event and page-mode chat is a function of its own. It is answered
+    405 until [[domain.chat]] lands.
+  * OPTIONS now advertises what this server implements: INVITE, ACK, CANCEL, BYE,
+    SUBSCRIBE, PUBLISH and NOTIFY join REGISTER and OPTIONS in Allow.
+  * The Finite State Language leaves the tree: it is now the separate package
+    finite_state_language (OTP app :fsl, Apache-2.0), and SIP plugs into it
+    through SIP.FSL.Host. Scripts keep the names they use: SIP.Scenario and the
+    other SIP names stay, as facades over FSL.*.
+  * The live-monitor registry is registered as FSL.Monitor, and pushes
+    {:fsl_monitor, ...}.
+  * Includes 1.5.5.
+  * User-Agent is now Kelixip/1.6.0.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Fri, 18 Sep 2026 12:00:00 +0200
+
 kelixip (1.5.5-2) stable; urgency=low
 
   * Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
