@@ -56,9 +56,9 @@ do about it — the release's own script would only say `cat: Permission denied`
 | `kelictl mediaserver show <name>` | R | One media server in detail, including what it says about itself |
 | `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
-| `kelictl debug <id> on\|off` | W | Start the sequence diagram of a live scenario now, or write it now — [below](#sequence-diagram-of-a-live-scenario) |
-| `kelictl debug list` | R | The diagrams kept in memory |
-| `kelictl debug show <id>` | R | Print the diagrams of one scenario (PlantUML) |
+| `kelictl debug <id> on\|off` | W | Start the journal of a live scenario now, or write it now — [below](#the-journal-of-a-live-scenario) |
+| `kelictl debug list` | R | The journals kept in memory |
+| `kelictl debug show <id> [--full] [--format-puml]` | R | One journal, as a sngrep-like ladder (default) or PlantUML |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
 | `kelictl module list` | R | Loaded modules: version, implementation, how many commands and facades each contributes |
 | `kelictl module reload <name>` | W | Reload a module's config |
@@ -301,43 +301,75 @@ true field by field: a `-` is "the server did not state it".
 The reference for the endpoint itself — every field, and what each one commits
 to — is the mediaserver repository, `docs/reference/status-http.md`.
 
-### Sequence diagram of a live scenario
+### The journal of a live scenario
 
 A call that misbehaves can be traced while it runs, without restarting anything:
 
 ```console
 $ kelictl monitor
-id  domain       function  script    account  state    event  command  …
-12  example.com  calls     relay.exs alice    talking  ACK    -        …
+id    domain       function  script     account  state    event  command  …
+12    example.com  calls     relay.exs  alice    talking  ACK    -        …
 
 $ kelictl debug 12 on
-journal on for scenario 12: its diagram is kept when it ends, or now with `kelictl debug 12 off` — then `kelictl debug show 12`
+journal on for scenario 12: it is kept when the scenario ends, or now with `kelictl debug 12 off` — then `kelictl debug show 12`
+
+$ kelictl monitor
+id    domain       function  script     account  state    event  command  …
+12 ●  example.com  calls     relay.exs  alice    talking  ACK    -        …
 
 $ kelictl debug 12 off
 journal of scenario 12 written — `kelictl debug show 12`
 
 $ kelictl debug list
-id  scenario   domain       script     written (UTC)        instance  size    kept for
-12  Relay.V3   example.com  relay.exs  2026-09-28 14:02:11  running   2140 B  0h59m48s
+id  scenario  domain       script     written (UTC)        instance  SIP  size     kept for
+12  Relay.V3  example.com  relay.exs  2026-09-28 14:02:11  running   9    14230 B  0h59m48s
 
-$ kelictl debug show 12 > call-12.puml
+$ kelictl debug show 12
+Scenario : Relay.V3   (#PID<0.412.0>)
+peer1: dev71.dev.ives.fr:443/wss — Call-ID 35739021077
+
+            alice                     dev71.dev.ives.fr:443/wss
+              |                                   |
+  +0.000s     | journal on (talking)              |
+  +4.210s     |<----------- BYE #3 ---------------|
+  +4.211s     |----------- 200 OK / 3 BYE ------->|
+  +4.212s     | talking -> hangup                 |
+              |                                   |
 ```
 
-`on` takes effect at once, in the middle of whatever the scenario is waiting for:
-the diagram opens with a note naming that state, and every SIP message the
-scenario's dialogs send or receive from then on is drawn, one lane per Call-ID —
-the dialogs already open included, both legs of a B2BUA. The scenario itself sees
-nothing. The diagram is written when the scenario ends, or at once with `off`,
-after which the scenario goes on untraced; `on` again starts a new one.
+- **`on`** takes effect at once, in the middle of whatever the scenario is
+  waiting for. The journal opens with a note naming that state, and every SIP
+  message the scenario's dialogs send or receive from then on is recorded, one
+  column per Call-ID. The dialogs already open are included, both legs of a
+  B2BUA too. The scenario itself sees nothing; the monitor marks its row `●`.
+- **`off`**, or the end of the scenario, writes the journal. A scenario has
+  **one** journal: once written, `on` is refused ("already written", exit
+  code 4), and the scenario goes on untraced.
+- **`debug show <id>`** draws the journal:
+  - by default as a ladder, one column per peer and the media server, the way
+    sngrep draws a call;
+  - `--full` prints each SIP message after its arrow, with its body decoded
+    when it was compressed (`deflate`, `gzip`);
+  - `--format-puml` prints PlantUML instead, with the passwords of the
+    scenario's configuration masked:
+    `kelictl debug show 12 --format-puml > call-12.puml`.
 
-The diagrams are kept **in memory only**: `[debug] trace_retention` seconds after
-they are written (one hour by default) and `[debug] max_traces` at most (100), the
-oldest dropped first ([installation.md](installation.md)). A restart loses them.
-`debug show <id>` prints every diagram kept for that scenario, oldest first, as
-PlantUML — several `@startuml` blocks in one file are several diagrams.
+The node keeps the journal itself, not a drawing of it. `kelictl` draws it as
+above, and kelescope draws it in a popup. REST (`GET /traces/<id>`) answers
+the journal as JSON ([rest-api.md](rest-api.md)).
 
-Only messages that go through a transaction of the scenario's dialogs are drawn: a
-stateless reply of the dialog layer, or an OPTIONS outside any dialog, is not.
+Journals are kept **in memory only**, and a restart loses them. Three limits
+apply, all set in [installation.md](installation.md):
+
+- `[debug] trace_retention`: how long a journal is kept after it is written
+  (one hour by default);
+- `[debug] max_traces`: how many are kept (100), the oldest dropped first;
+- `[debug] max_trace_bytes`: how much message text one journal keeps (1 MiB).
+  Past it, the journal ends with "journal truncated".
+
+Only messages that go through a transaction of the scenario's dialogs are
+recorded. A stateless reply of the dialog layer, or an OPTIONS outside any
+dialog, is not.
 
 ### Reloading a running node
 

@@ -60,9 +60,9 @@ cert) with a JSON body `{"error": "…"}`.
 | `GET /modules/<name>` | R | `kelictl <name> help` |
 | `DELETE /domains/<domain>/registrations/<aor>` | W | `kelictl registration remove` — *idem* |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
-| `POST /scenarios/<id>/debug` (body `{"enabled": true\|false}`) | W | `kelictl debug <id> on\|off` |
+| `POST /scenarios/<id>/debug` (body `{"enabled": true\|false}`) | W | `kelictl debug <id> on\|off` — `409` when the journal was already written |
 | `GET /traces` | R | `kelictl debug list` |
-| `GET /traces/<id>` | R | `kelictl debug show <id>` (each entry carries its `document`) |
+| `GET /traces/<id>` | R | the journal of `kelictl debug show <id>`, **unrendered**: its summary, `meta` (the scenario's config with its secrets masked) and `events` (the `FSL.Journal` events, SIP messages with their text). Drawing it is the client's job |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
 | `POST /domains/reload` | W | `kelictl domain reload-all` |
 | `POST /reload-all` | W | `kelictl reload-all` (what `systemctl reload` runs) |

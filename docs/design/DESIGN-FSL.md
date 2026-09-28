@@ -325,16 +325,28 @@ flag set in a state, or an operator's `{:scenario_ctl, :journal, :on}` (FSL 0.4.
 open: the context's own and, for a B2BUA, each outbound leg with its tag
 (`SIP.Session.B2bua.leg_dialogs/1`), so both legs are drawn from that point on.
 
-### 3.10 `journal_output/3` — where a diagram goes
+### 3.10 `journal_events/2` — where a journal goes
 
 `elixipp` writes a file in the working directory, which is FSL's default. A server
-has no directory an operator reads diagrams from, so the answer is configurable:
-`journal_output/3` calls the `{module, function}` named by the `:elixip2,
-:sequence_output` application env with the document, the journal's metadata and
-the renderer, and answers `:default` — the file — when none is set. kelixip sets
-it to `Kelix.Traces.store/3`, which keeps diagrams in memory for `kelictl debug
-show`. The metadata's `slot` is the instance id the pool gave the run, which is
-what the store files a diagram under.
+has no directory an operator reads diagrams from, and more to the point, no single
+reader: `kelictl` draws a text ladder, kelescope a popup, a curl user wants JSON.
+So the node keeps the journal and not a drawing of it.
+
+`journal_events/2` (FSL 0.4.1) is offered the finished journal before anything is
+rendered: the events, merged with the SIP messages `journal_collect/0` handed
+over, and the metadata. It calls the `{module, function}` named by the
+`:elixip2, :sequence_output` application env with `(events, meta)`. It answers
+`:default` when none is set, and FSL then renders elixipp's file. kelixip sets it
+to `Kelix.Traces.store/2`, which files the journal under `meta.slot`, the
+instance id the pool gave the run. The host no longer implements
+`journal_output/3`: a document is only ever a file.
+
+**The monitor row says whether a call is journalled.** `monitor_columns/0`
+declares `traced: false`; `journal_started/1` notes it `true` and
+`journal_events/2` notes it back to `false`, both in the instance's own process.
+This covers every way a journal starts — operator, `debug` flag,
+`--log-sequence` — and reaches `kelictl monitor` (`●`) and kelescope through the
+existing monitor push.
 
 ---
 

@@ -383,16 +383,17 @@ scrape it.
 | `addr` | IP | `127.0.0.1` |
 | `port` | 1..65535 | `9095` |
 
-#### `[debug]` — sequence diagrams of live scenarios
+#### `[debug]` — journals of live scenarios
 
-How long, and how many, of the diagrams `kelictl debug <id> on` produces are kept.
-They are held in memory only; a restart loses them. See
-[administration.md](administration.md).
+How long, how many, and how much of the journals `kelictl debug <id> on`
+produces are kept. They are held in memory only; a restart loses them. See
+[administration.md](administration.md#the-journal-of-a-live-scenario).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `trace_retention` | seconds, > 0 | `3600` | How long a diagram is kept after it is written |
+| `trace_retention` | seconds, > 0 | `3600` | How long a journal is kept after it is written |
 | `max_traces` | integer, > 0 | `100` | How many are kept; the oldest is dropped to make room |
+| `max_trace_bytes` | bytes, > 0 | `1048576` | How much SIP message text one journal keeps; past it, the journal is cut |
 
 ##### `tag` and `networks` — the side of the network
 

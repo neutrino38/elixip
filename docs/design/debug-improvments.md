@@ -186,25 +186,29 @@ B2BUA, `kelictl debug` sur un nœud.
 
 ## Débogage à chaud dans kelixip
 
-`kelictl debug <id> on` allume le journal d'une instance vivante ; `off` écrit
-le diagramme tout de suite. Les diagrammes sont gardés en mémoire par
-`Kelix.Traces` et relus par `kelictl debug list` et `kelictl debug show <id>`,
-ou par `GET /traces` et `GET /traces/<id>`. Guide opérateur :
-[administration.md](../kelixip/administration.md).
+`kelictl debug <id> on` allume le journal d'une instance vivante ; `off` l'écrit
+tout de suite. Le nœud garde le **journal**, pas un dessin : `Kelix.Traces`
+conserve les événements et les métadonnées, et chaque lecteur dessine.
+`kelictl debug show <id>` trace une échelle à la sngrep, `--full` y ajoute le
+texte des messages, `--format-puml` donne le PlantUML ; kelescope dessine une
+popup ([kelescope-debug-scenario.md](kelescope-debug-scenario.md)) ; REST
+renvoie le journal en JSON. Guide opérateur :
+[administration.md](../kelixip/administration.md#the-journal-of-a-live-scenario).
 
 | Pièce | Côté | Rôle |
 |---|---|---|
-| Clause `{:scenario_ctl, :journal, :on \| :off}` | FSL 0.4.0 | Injectée dans chaque `on_events`, comme celle du shutdown. Allume le journal ou l'écrit, puis reprend l'attente avec le délai restant, sans rien signaler. |
+| Clause `{:scenario_ctl, :journal, :on \| :off}` | FSL 0.4.0 | Injectée dans chaque `on_events`, comme celle du shutdown. Allume le journal ou l'écrit, puis reprend l'attente avec le délai restant, sans rien signaler. Un seul journal par exécution : après `off`, aucun ne redémarre. |
 | `joined_in` dans les métadonnées | FSL 0.4.0 | L'état dans lequel le journal a rejoint l'exécution : la première transition est dessinée depuis cet état. |
-| `FSL.Host.journal_output/3` | FSL 0.4.0 | Où va un diagramme terminé. Un fichier dans le répertoire courant par défaut. |
-| `SIP.FSL.Host.journal_output/3` | SIP | Appelle le `{module, fonction}` de `:elixip2, :sequence_output`, sinon le fichier. |
-| `journal_started/1` | SIP | Adopte aussi les pattes sortantes d'un B2BUA déjà établies, avec leur tag. |
-| `Kelix.Traces` | kelixip | Magasin en mémoire : `[debug] trace_retention` secondes (3600) après l'écriture, `[debug] max_traces` au plus (100), le plus ancien supprimé d'abord. Perdu au redémarrage. |
-| `InstancePool.journal/2`, `Control.debug_scenario/2`, `traces/0`, `trace/1` | kelixip | Le chemin de la commande jusqu'à l'instance, et la relecture. |
+| `FSL.Host.journal_events/2` | FSL 0.4.1 | Le journal terminé, avant tout rendu. Un hôte qui le garde répond `{:ok, _}` et rien n'est dessiné ; sinon `:default` et FSL écrit le fichier. |
+| `SIP.FSL.Host.journal_events/2` | SIP | Appelle le `{module, fonction}` de `:elixip2, :sequence_output` avec `(events, meta)`, sinon `:default`. Remet la colonne `traced` du moniteur à `false`. |
+| `journal_started/1` | SIP | Surveille l'instance, adopte les dialogues déjà ouverts (pattes sortantes d'un B2BUA comprises, avec leur tag), met `traced` à `true`. |
+| `SipTrace`, `SIPMsg.readable/1` | SIP | Chaque message porte son texte, corps décodé (`deflate`, `gzip`), coupé à 8 Kio. |
+| `Kelix.Traces` | kelixip | Un journal par instance, en mémoire : `trace_retention` (3600 s), `max_traces` (100), `max_trace_bytes` (1 Mio, puis `:cut`). Pousse `{:kelix_traces, {:upsert \| :remove, _}}` aux abonnés. Perdu au redémarrage. |
+| `Control.debug_scenario/2,3`, `traces/0`, `trace/1`, `subscribe_traces/1` | kelixip | La commande jusqu'à l'instance (un second `on` est refusé : `{:error, :journal_written}`), la relecture, les notifications. |
+| `Kelix.Control.Ladder` | kelictl | L'échelle texte, dessinée à partir des événements gardés. |
 
-Une instance occupée hors d'une attente voit la demande à sa prochaine attente.
-Une instance peut laisser plusieurs diagrammes (`on`, `off`, `on`) : `show` les
-imprime tous, du plus ancien au plus récent.
+Une instance occupée hors d'une attente voit la demande à sa prochaine attente ;
+la colonne `traced` dit quand elle l'a prise.
 
 ## Limites connues
 
