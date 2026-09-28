@@ -639,21 +639,32 @@ defmodule Kelix.Control do
   end
 
   @doc """
-  Turn the sequence journal of a running scenario on, or write it out now
+  Turn the journal of a running scenario on, or write it out now
   (`kelictl debug <id> on|off`).
 
   `:on` takes effect at once, in the middle of whatever the scenario is waiting
-  for: the diagram starts there, the SIP dialogs already open included, and is
+  for: the journal starts there, the SIP dialogs already open included, and is
   kept by `Kelix.Traces` when the scenario ends. `:off` writes it immediately,
   and the scenario goes on untraced. A scenario busy outside a wait sees the
-  request at its next one.
+  request at its next one; the monitor row's `traced` says when it took it.
+
+  A scenario has **one** journal: FSL starts none again after `:off`, so `:on`
+  for an instance whose journal is already kept answers
+  `{:error, :journal_written}` rather than an `:ok` that would do nothing.
   """
-  @spec debug_scenario(pos_integer, :on | :off) :: :ok | {:error, :not_found}
-  def debug_scenario(id, op) when is_integer(id) and op in [:on, :off],
-    do: Kelix.InstancePool.journal(id, op)
+  @spec debug_scenario(pos_integer, :on | :off) ::
+          :ok | {:error, :not_found} | {:error, :journal_written}
+  def debug_scenario(id, :on) when is_integer(id) do
+    if safe(fn -> Kelix.Traces.has?(id) end, false),
+      do: {:error, :journal_written},
+      else: Kelix.InstancePool.journal(id, :on)
+  end
+
+  def debug_scenario(id, :off) when is_integer(id), do: Kelix.InstancePool.journal(id, :off)
 
   @doc "Same as `debug_scenario/2`, logging who asked (`admin`), like `shutdown_scenario/2`."
-  @spec debug_scenario(pos_integer, :on | :off, String.t() | nil) :: :ok | {:error, :not_found}
+  @spec debug_scenario(pos_integer, :on | :off, String.t() | nil) ::
+          :ok | {:error, :not_found} | {:error, :journal_written}
   def debug_scenario(id, op, admin) when is_integer(id) do
     result = debug_scenario(id, op)
 
@@ -666,20 +677,36 @@ defmodule Kelix.Control do
   end
 
   @doc """
-  The sequence diagrams kept in memory (`kelictl debug list`), oldest first,
-  without their documents: instance id, scenario, domain, script, when it was
-  written, whether the instance is still running, and how long it is kept.
+  The journals kept in memory (`kelictl debug list`), oldest first, as
+  summaries: instance id, scenario, domain, script, when written and until when
+  kept, whether the instance still runs, SIP messages, size.
   """
   @spec traces() :: [map]
   def traces(), do: safe(fn -> Kelix.Traces.list() end, [])
 
   @doc """
-  The diagrams kept for instance `id`, oldest first, documents included
-  (`kelictl debug show <id>`).
+  The journal of instance `id` (`kelictl debug show <id>`, kelescope's popup):
+  its summary plus `meta` and `events`, **unrendered** — the `FSL.Journal`
+  events, SIP messages with their text. The reader draws it.
   """
-  @spec trace(pos_integer) :: {:ok, [map]} | {:error, :not_found}
+  @spec trace(pos_integer) :: {:ok, map} | {:error, :not_found}
   def trace(id) when is_integer(id),
     do: safe(fn -> Kelix.Traces.get(id) end, {:error, :not_found})
+
+  @doc """
+  Subscribe `pid` to the kept journals (kelescope's panel), on the model of
+  `subscribe_monitor/1`: returns `%{limits: …, traces: [summary]}`, then `pid`
+  receives `{:kelix_traces, {:upsert, summary}}` when a journal is kept and when
+  its instance ends, and `{:kelix_traces, {:remove, id}}` when it expires or is
+  evicted. `pid` may be on another node; a dead subscriber is dropped.
+  """
+  @spec subscribe_traces(pid) :: map
+  def subscribe_traces(pid),
+    do: safe(fn -> Kelix.Traces.subscribe(pid) end, %{limits: %{}, traces: []})
+
+  @doc "Stop a subscription started by `subscribe_traces/1`."
+  @spec unsubscribe_traces(pid) :: :ok
+  def unsubscribe_traces(pid), do: safe(fn -> Kelix.Traces.unsubscribe(pid) end, :ok)
 
   @doc """
   Reload one or more scenario scripts by name (`kelictl reload-script <name…>`).

@@ -777,12 +777,16 @@ defmodule Kelix.ConfigTest do
   describe "parse/1 — [debug]" do
     test "absent → one hour, a hundred traces" do
       assert {:ok, cfg} = Config.parse("")
-      assert cfg.debug == %{trace_retention: 3600, max_traces: 100}
+      assert cfg.debug == %{trace_retention: 3600, max_traces: 100, max_trace_bytes: 1_048_576}
     end
 
     test "both keys are read" do
-      assert {:ok, cfg} = Config.parse("[debug]\ntrace_retention = 600\nmax_traces = 20\n")
-      assert cfg.debug == %{trace_retention: 600, max_traces: 20}
+      assert {:ok, cfg} =
+               Config.parse(
+                 "[debug]\ntrace_retention = 600\nmax_traces = 20\nmax_trace_bytes = 4096\n"
+               )
+
+      assert cfg.debug == %{trace_retention: 600, max_traces: 20, max_trace_bytes: 4096}
     end
 
     test "a non-positive value or a stray key is refused" do

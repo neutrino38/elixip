@@ -1,43 +1,54 @@
 defmodule Kelix.Traces do
   @moduledoc """
-  The sequence diagrams an operator asked for, kept in memory.
+  The journals an operator asked for, kept in memory, **unrendered**.
 
   `kelictl debug <id> on` turns the journal of a live scenario on
-  (`Kelix.Control.debug_scenario/2`); the diagram is written when the scenario
-  ends, or at once with `kelictl debug <id> off`. Either way it lands here,
-  through `SIP.FSL.Host.journal_output/3` — `Kelix.Config` names `store/3` as the
-  node's `:sequence_output` — and `kelictl debug list` / `debug show <id>` read
-  it back.
+  (`Kelix.Control.debug_scenario/2`). It is written when the scenario ends, or
+  at once with `kelictl debug <id> off`, and lands here through
+  `SIP.FSL.Host.journal_events/2`: `Kelix.Config` names `store/2` as the node's
+  `:sequence_output`.
 
-  **Memory only.** A trace is kept `[debug] trace_retention` seconds after it was
-  written (3600 by default), and at most `[debug] max_traces` of them (100),
-  the oldest dropped first to make room. Nothing is written to disk and a restart
-  loses them all: they are an operator's working material, not a record.
+  What is kept is the journal itself — the `FSL.Journal` events, SIP messages
+  included, and the run's metadata — never a drawing of it. Each reader draws
+  it its own way: `kelictl debug show` as a text ladder or PlantUML, kelescope
+  as a popup. This module stores, bounds, expires and tells; it renders and
+  interprets nothing.
 
-  One instance can leave several diagrams — `on`, `off`, `on` again — and
-  `get/1` returns them all, oldest first. PlantUML reads a file of several
-  `@startuml` blocks as several diagrams, so they concatenate as they are.
+  **One journal per instance**, filed under the instance id `kelictl monitor`
+  prints. FSL starts no journal again in a run after `off`, so an instance
+  flushes at most once; `has?/1` lets the control layer refuse a second `on`
+  rather than accept one FSL would ignore.
+
+  **Memory only.** A journal is kept `[debug] trace_retention` seconds after it
+  was written (3600 by default), `[debug] max_traces` of them at most (100), the
+  oldest dropped first, and each is cut at `[debug] max_trace_bytes` of message
+  text (1 MiB) with a `:cut` event, as Trix does. A restart loses them all: they
+  are an operator's working material, not a record.
+
+  **Pushes.** `subscribe/1` returns the snapshot and then sends
+  `{:kelix_traces, {:upsert, summary}}` when a journal is kept and again when
+  its instance ends, and `{:kelix_traces, {:remove, id}}` when it expires or is
+  evicted.
   """
   use GenServer
   require Logger
 
-  @typedoc "A kept diagram. `id` is the instance id of `kelictl monitor`, nil for a run the pool does not know."
-  @type entry :: %{
-          n: pos_integer,
-          id: pos_integer | nil,
+  @typedoc "A kept journal, as `summary/1` shows it (no events, no metadata)."
+  @type summary :: %{
+          id: pos_integer,
           scenario: String.t(),
           domain: String.t() | nil,
           script: String.t() | nil,
-          pid: pid | nil,
           written_at: DateTime.t(),
-          format: String.t(),
-          size: non_neg_integer,
-          document: String.t()
+          expires_at: DateTime.t(),
+          running: boolean,
+          sip_count: non_neg_integer,
+          bytes: non_neg_integer
         }
 
-  # How often expired traces are swept, at most. A trace is also filtered out on
-  # read the moment it expires, so this only bounds how long its memory lingers.
-  @max_sweep_ms 60_000
+  # What an event costs besides its message text, in the byte count: small, but
+  # a journal of a thousand state changes is not free either.
+  @event_overhead 64
 
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -49,28 +60,51 @@ defmodule Kelix.Traces do
   end
 
   @doc """
-  Keep a finished diagram — the `:sequence_output` of this node, called by
-  `SIP.FSL.Host.journal_output/3` in the scenario's own process. Answers what
-  `c:FSL.Host.journal_output/3` expects.
+  Keep a finished journal — the node's `:sequence_output`, called by
+  `SIP.FSL.Host.journal_events/2` in the scenario's own process. Answers what
+  `c:FSL.Host.journal_events/2` expects.
+
+  A run the pool did not start has no instance id to be filed under (a child
+  machine's slot is `{id, name}`): it is not kept, and the answer says so.
   """
-  @spec store(String.t(), map, module, GenServer.server()) :: {:ok, term} | {:error, term}
-  def store(document, meta, renderer, server \\ __MODULE__) do
-    GenServer.call(server, {:store, document, meta, format(renderer), self()})
+  @spec store([map], map, GenServer.server()) :: {:ok, term} | {:error, term}
+  def store(events, meta, server \\ __MODULE__) do
+    case Map.get(meta, :slot) do
+      id when is_integer(id) -> GenServer.call(server, {:store, id, events, meta, self()})
+      _other -> {:error, :no_instance_id}
+    end
   catch
     :exit, reason -> {:error, {:trace_store_unavailable, reason}}
   end
 
-  @doc "The kept traces, oldest first, without their documents."
-  @spec list(GenServer.server()) :: [map]
+  @doc "The kept journals, oldest first, as summaries."
+  @spec list(GenServer.server()) :: [summary]
   def list(server \\ __MODULE__), do: GenServer.call(server, :list)
 
-  @doc "Every trace kept for instance `id`, oldest first, documents included."
-  @spec get(pos_integer, GenServer.server()) :: {:ok, [entry]} | {:error, :not_found}
+  @doc "The journal of instance `id`: its summary, `meta` and `events`."
+  @spec get(pos_integer, GenServer.server()) :: {:ok, map} | {:error, :not_found}
   def get(id, server \\ __MODULE__), do: GenServer.call(server, {:get, id})
 
-  @doc "The retention (seconds) and capacity this store runs with."
-  @spec limits() :: %{trace_retention: pos_integer, max_traces: pos_integer}
-  def limits(), do: GenServer.call(__MODULE__, :limits)
+  @doc "Is a journal kept for instance `id`?"
+  @spec has?(pos_integer, GenServer.server()) :: boolean
+  def has?(id, server \\ __MODULE__), do: GenServer.call(server, {:has?, id})
+
+  @doc "The retention (seconds), capacity and per-journal bound this store runs with."
+  @spec limits(GenServer.server()) :: map
+  def limits(server \\ __MODULE__), do: GenServer.call(server, :limits)
+
+  @doc """
+  Subscribe `pid` to the kept journals: returns `%{limits: …, traces: [summary]}`
+  and registers `pid` in the same call, so no change falls in between. `pid` is
+  monitored and dropped when it dies — a kelescope node that disconnects
+  included.
+  """
+  @spec subscribe(pid, GenServer.server()) :: %{limits: map, traces: [summary]}
+  def subscribe(pid, server \\ __MODULE__), do: GenServer.call(server, {:subscribe, pid})
+
+  @doc "Stop a subscription started by `subscribe/1`."
+  @spec unsubscribe(pid, GenServer.server()) :: :ok
+  def unsubscribe(pid, server \\ __MODULE__), do: GenServer.call(server, {:unsubscribe, pid})
 
   # ── server ──────────────────────────────────────────────────────────────────
 
@@ -85,111 +119,219 @@ defmodule Kelix.Traces do
         end
       end)
 
-    state = %{
-      retention_ms: limits.trace_retention * 1000,
-      max: limits.max_traces,
-      limits: limits,
-      seq: 0,
-      # newest first: eviction drops from the tail
-      traces: []
-    }
+    limits = Map.merge(%Kelix.Config{}.debug, limits)
 
-    schedule_sweep(state)
-    {:ok, state}
+    {:ok, %{limits: limits, entries: %{}, subscribers: %{}}}
   end
 
   @impl true
-  def handle_call({:store, document, meta, format, from_pid}, _from, state) do
-    slot = Map.get(meta, :slot)
-    row = instance_row(slot)
-    n = state.seq + 1
+  def handle_call({:store, id, events, meta, from_pid}, _from, state) do
+    if Map.has_key?(state.entries, id) do
+      Logger.warning(
+        module: __MODULE__,
+        message: "a second journal for instance #{id}: it replaces the first"
+      )
+    end
+
+    {events, bytes} = bound(events, state.limits.max_trace_bytes)
+    row = instance_row(id)
+    now = DateTime.utc_now()
 
     entry = %{
-      n: n,
-      id: if(is_integer(slot), do: slot),
+      id: id,
       scenario: Map.get(meta, :scenario),
       domain: row && row.domain,
       script: row && row.script,
       pid: from_pid,
-      written_at: DateTime.utc_now(),
-      at_ms: now_ms(),
-      format: format,
-      size: byte_size(document),
-      document: document
+      monitor: Process.monitor(from_pid),
+      written_at: now,
+      written_ms: now_ms(),
+      expires_at: DateTime.add(now, state.limits.trace_retention, :second),
+      sip_count: Enum.count(events, &match?(%{kind: :message}, &1)),
+      bytes: bytes,
+      meta: meta,
+      events: events
     }
 
-    traces = Enum.take([entry | expire(state.traces, state)], state.max)
+    state = drop_monitor(state, Map.get(state.entries, id))
+
+    Process.send_after(
+      self(),
+      {:expire, id, entry.written_ms},
+      state.limits.trace_retention * 1000
+    )
+
+    state =
+      %{state | entries: Map.put(state.entries, id, entry)}
+      |> evict()
+
+    push(state, {:upsert, summary(entry)})
 
     Logger.info(
       module: __MODULE__,
       message:
-        "sequence diagram of instance #{entry.id || "?"} (#{entry.scenario}) kept " <>
-          "in memory, #{entry.size} bytes"
+        "journal of instance #{id} (#{entry.scenario}) kept in memory: " <>
+          "#{entry.sip_count} SIP messages, #{bytes} bytes"
     )
 
-    {:reply, {:ok, {:trace, entry.id || n}}, %{state | seq: n, traces: traces}}
+    {:reply, {:ok, {:kelix_trace, id}}, state}
   end
 
-  def handle_call(:list, _from, state) do
-    traces = expire(state.traces, state)
-    rows = traces |> Enum.reverse() |> Enum.map(&summary(&1, state))
-    {:reply, rows, %{state | traces: traces}}
-  end
+  def handle_call(:list, _from, state), do: {:reply, summaries(state), state}
 
   def handle_call({:get, id}, _from, state) do
-    traces = expire(state.traces, state)
-
     reply =
-      case traces |> Enum.filter(&(&1.id == id)) |> Enum.reverse() do
-        [] -> {:error, :not_found}
-        found -> {:ok, Enum.map(found, &Map.merge(summary(&1, state), %{document: &1.document}))}
+      case Map.fetch(state.entries, id) do
+        {:ok, entry} ->
+          {:ok, Map.merge(summary(entry), %{meta: entry.meta, events: entry.events})}
+
+        :error ->
+          {:error, :not_found}
       end
 
-    {:reply, reply, %{state | traces: traces}}
+    {:reply, reply, state}
   end
+
+  def handle_call({:has?, id}, _from, state),
+    do: {:reply, Map.has_key?(state.entries, id), state}
 
   def handle_call(:limits, _from, state), do: {:reply, state.limits, state}
 
+  def handle_call({:subscribe, pid}, _from, state) do
+    subscribers =
+      if Map.has_key?(state.subscribers, pid),
+        do: state.subscribers,
+        else: Map.put(state.subscribers, pid, Process.monitor(pid))
+
+    state = %{state | subscribers: subscribers}
+    {:reply, %{limits: state.limits, traces: summaries(state)}, state}
+  end
+
+  def handle_call({:unsubscribe, pid}, _from, state) do
+    case Map.pop(state.subscribers, pid) do
+      {nil, _} ->
+        {:reply, :ok, state}
+
+      {ref, subscribers} ->
+        Process.demonitor(ref, [:flush])
+        {:reply, :ok, %{state | subscribers: subscribers}}
+    end
+  end
+
   @impl true
-  def handle_info(:sweep, state) do
-    schedule_sweep(state)
-    {:noreply, %{state | traces: expire(state.traces, state)}}
+  # Only the timer of the journal it was armed for: a replaced entry has another.
+  def handle_info({:expire, id, written_ms}, state) do
+    case Map.get(state.entries, id) do
+      %{written_ms: ^written_ms} = entry -> {:noreply, remove(state, entry)}
+      _other -> {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    case Map.pop(state.subscribers, pid) do
+      {^ref, subscribers} ->
+        {:noreply, %{state | subscribers: subscribers}}
+
+      _not_a_subscriber ->
+        # An instance whose journal is kept has ended: say so once.
+        case Enum.find(Map.values(state.entries), &(&1.monitor == ref)) do
+          nil ->
+            {:noreply, state}
+
+          entry ->
+            entry = %{entry | monitor: nil}
+            state = %{state | entries: Map.put(state.entries, entry.id, entry)}
+            push(state, {:upsert, summary(entry)})
+            {:noreply, state}
+        end
+    end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ── internals ───────────────────────────────────────────────────────────────
 
-  defp expire(traces, state) do
-    cutoff = now_ms() - state.retention_ms
-    Enum.filter(traces, &(&1.at_ms > cutoff))
+  defp summary(entry) do
+    entry
+    |> Map.take([:id, :scenario, :domain, :script, :written_at, :expires_at, :sip_count, :bytes])
+    |> Map.put(:running, entry.monitor != nil)
   end
 
-  defp summary(entry, state) do
-    entry
-    |> Map.drop([:document, :at_ms])
-    |> Map.merge(%{
-      running: is_pid(entry.pid) and Process.alive?(entry.pid),
-      expires_in_s: max(div(entry.at_ms + state.retention_ms - now_ms(), 1000), 0)
-    })
+  defp summaries(state) do
+    state.entries |> Map.values() |> Enum.sort_by(& &1.written_ms) |> Enum.map(&summary/1)
   end
+
+  # The oldest go first, past max_traces.
+  defp evict(state) do
+    excess = map_size(state.entries) - state.limits.max_traces
+
+    if excess > 0 do
+      state.entries
+      |> Map.values()
+      |> Enum.sort_by(& &1.written_ms)
+      |> Enum.take(excess)
+      |> Enum.reduce(state, &remove(&2, &1))
+    else
+      state
+    end
+  end
+
+  defp remove(state, entry) do
+    state = drop_monitor(state, entry)
+    state = %{state | entries: Map.delete(state.entries, entry.id)}
+    push(state, {:remove, entry.id})
+    state
+  end
+
+  defp drop_monitor(state, %{monitor: ref}) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    state
+  end
+
+  defp drop_monitor(state, _entry), do: state
+
+  defp push(state, msg) do
+    for pid <- Map.keys(state.subscribers), do: send(pid, {:kelix_traces, msg})
+    :ok
+  end
+
+  # Keep the head of the journal up to `max` bytes of message text, then a :cut.
+  defp bound(events, max) do
+    {kept, bytes, cut?} =
+      Enum.reduce_while(events, {[], 0, false}, fn event, {acc, bytes, _cut} ->
+        cost = @event_overhead + body_size(event)
+
+        if bytes + cost > max,
+          do: {:halt, {acc, bytes, true}},
+          else: {:cont, {[event | acc], bytes + cost, false}}
+      end)
+
+    kept =
+      if cut? do
+        at =
+          case kept do
+            [%{at: at} | _] -> at
+            _ -> Map.get(List.first(events) || %{}, :at, 0)
+          end
+
+        [%{kind: :cut, at: at} | kept]
+      else
+        kept
+      end
+
+    {Enum.reverse(kept), bytes}
+  end
+
+  defp body_size(%{body: body}) when is_binary(body), do: byte_size(body)
+  defp body_size(_event), do: 0
 
   # Which domain and script the instance serves, while it is still registered —
-  # it is: a diagram is written from the instance's own process, before it exits.
-  defp instance_row(slot) when is_integer(slot) do
-    Enum.find(Kelix.InstancePool.list(), &(&1.id == slot))
+  # it is: a journal is written from the instance's own process, before it exits.
+  defp instance_row(id) do
+    Enum.find(Kelix.InstancePool.list(), &(&1.id == id))
   catch
     :exit, _ -> nil
   end
-
-  defp instance_row(_slot), do: nil
-
-  defp format(FSL.Diagram.PlantUML), do: "plantuml"
-  defp format(FSL.Diagram.Mermaid), do: "mermaid"
-  defp format(renderer), do: inspect(renderer)
-
-  defp schedule_sweep(state),
-    do: Process.send_after(self(), :sweep, min(state.retention_ms, @max_sweep_ms))
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 end

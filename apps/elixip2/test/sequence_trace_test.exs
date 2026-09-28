@@ -217,17 +217,18 @@ defmodule SIP.Test.SequenceTrace do
       assert [%{party: "outbound"}] = SipTrace.take()
     end
 
-    test "journal_output/3 hands the diagram to :sequence_output, else to a file" do
-      assert SIP.FSL.Host.journal_output("doc", %{}, FSL.Diagram.PlantUML) == :default
+    test "journal_events/2 hands the journal, unrendered, to :sequence_output, else :default" do
+      events = [%{kind: :command, at: 1, type: :sip, name: "send_INVITE"}]
+      assert SIP.FSL.Host.journal_events(events, %{}) == :default
 
       defmodule Sink do
-        def keep(doc, meta, renderer), do: {:ok, {doc, meta, renderer}}
+        def keep(events, meta), do: {:ok, {events, meta}}
       end
 
       Application.put_env(:elixip2, :sequence_output, {Sink, :keep})
 
-      assert SIP.FSL.Host.journal_output("doc", %{slot: 3}, FSL.Diagram.PlantUML) ==
-               {:ok, {"doc", %{slot: 3}, FSL.Diagram.PlantUML}}
+      assert SIP.FSL.Host.journal_events(events, %{slot: 3}) ==
+               {:ok, {events, %{slot: 3}}}
     end
   end
 

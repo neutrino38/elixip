@@ -447,6 +447,8 @@ defmodule SIP.FSL.Host do
   @impl true
   def journal_started(sip_ctx) do
     :ok = SIP.Scenario.SipTrace.watch()
+    # The monitor row says so, for kelictl and kelescope (`traced`).
+    FSL.Monitor.note(:traced, true)
 
     if is_pid(Map.get(sip_ctx, :dialogpid)),
       do: SIP.Scenario.SipTrace.adopt(sip_ctx.dialogpid)
@@ -467,16 +469,21 @@ defmodule SIP.FSL.Host do
   def journal_collect, do: SIP.Scenario.SipTrace.take()
 
   @doc """
-  Where a finished diagram goes: to the `{module, function}` named by the
-  `:elixip2, :sequence_output` application env, called with the document, the
-  journal's metadata and the renderer — kelixip keeps them in memory for its
-  operator (`Kelix.Traces`). Without one, a file in the working directory, as
-  `elixipp --log-sequence` has always written.
+  Where a finished journal goes: to the `{module, function}` named by the
+  `:elixip2, :sequence_output` application env, called with the events and the
+  journal's metadata, **unrendered** — kelixip keeps them in memory for its
+  operator (`Kelix.Traces`), and each reader draws them its own way. Without
+  one, `:default`: FSL renders the diagram to a file in the working directory,
+  as `elixipp --log-sequence` has always written.
+
+  Either way the instance's journal is over, and its monitor row says so.
   """
   @impl true
-  def journal_output(document, meta, renderer) do
+  def journal_events(events, meta) do
+    FSL.Monitor.note(:traced, false)
+
     case Application.get_env(:elixip2, :sequence_output) do
-      {module, fun} -> apply(module, fun, [document, meta, renderer])
+      {module, fun} -> apply(module, fun, [events, meta])
       nil -> :default
     end
   end
@@ -498,5 +505,6 @@ defmodule SIP.FSL.Host do
   "nobody measured".
   """
   @spec monitor_columns() :: keyword()
-  def monitor_columns, do: [medias: "n/a", mediaserver: "none", outbound: "n/a"]
+  def monitor_columns,
+    do: [medias: "n/a", mediaserver: "none", outbound: "n/a", traced: false]
 end

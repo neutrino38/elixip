@@ -128,6 +128,30 @@ defmodule Kelix.ControlAPITest do
       assert call(put_json.(%{})).status == 400
     end
 
+    test "GET /traces/:id answers the journal itself, its secrets masked" do
+      events = [%{kind: :command, at: 5, type: :sip, name: "send_INVITE"}]
+
+      meta = %{
+        slot: 424_242,
+        scenario: "X",
+        pid: "p",
+        t0: 0,
+        config: [username: "bob", passwd: "s3cret"]
+      }
+
+      {:ok, _} = Kelix.Traces.store(events, meta)
+
+      conn = call(conn(:get, "/traces/424242"))
+      assert conn.status == 200
+      trace = body(conn)
+
+      assert trace["id"] == 424_242
+      assert [%{"kind" => "command", "name" => "send_INVITE"}] = trace["events"]
+      assert trace["meta"]["config"] == %{"username" => "bob", "passwd" => "****"}
+      refute conn.resp_body =~ "s3cret"
+      assert {:ok, _, _} = DateTime.from_iso8601(trace["expires_at"])
+    end
+
     test "GET /traces is a list; GET /traces/:id → 404 unknown, 400 not an id" do
       conn = call(conn(:get, "/traces"))
       assert conn.status == 200

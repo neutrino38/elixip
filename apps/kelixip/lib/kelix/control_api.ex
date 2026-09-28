@@ -24,7 +24,7 @@ defmodule Kelix.ControlAPI do
   | `shutdown_scenario/1` | `POST /scenarios/:id/shutdown` |
   | `debug_scenario/2` | `POST /scenarios/:id/debug` (body `{"enabled": bool}`) |
   | `traces/0` | `GET /traces` |
-  | `trace/1` | `GET /traces/:id` |
+  | `trace/1` | `GET /traces/:id` (the journal, unrendered, secrets masked) |
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
   | `reload_domains/0` | `POST /domains/reload` |
   | `reload_all/0` | `POST /reload-all` |
@@ -85,7 +85,7 @@ defmodule Kelix.ControlAPI do
     case Integer.parse(id) do
       {n, ""} ->
         case Control.trace(n) do
-          {:ok, entries} -> json(conn, 200, Enum.map(entries, &trace_json/1))
+          {:ok, trace} -> json(conn, 200, trace_json(trace))
           {:error, :not_found} -> json(conn, 404, %{error: "not found"})
         end
 
@@ -186,7 +186,10 @@ defmodule Kelix.ControlAPI do
   post "/scenarios/:id/debug" do
     case {Integer.parse(id), conn.body_params["enabled"]} do
       {{n, ""}, enabled} when is_boolean(enabled) ->
-        respond(conn, Control.debug_scenario(n, if(enabled, do: :on, else: :off)))
+        case Control.debug_scenario(n, if(enabled, do: :on, else: :off)) do
+          {:error, :journal_written} -> json(conn, 409, %{error: "journal already written"})
+          result -> respond(conn, result)
+        end
 
       {{_n, ""}, _other} ->
         json(conn, 400, %{error: "body must be {\"enabled\": true | false}"})
@@ -424,11 +427,23 @@ defmodule Kelix.ControlAPI do
   defp respond(conn, %{} = map), do: json(conn, 200, jsonable(map))
   defp respond(conn, other), do: json(conn, 200, jsonable(other))
 
-  # A kept trace as JSON: the instance pid stays on the node, the time is ISO 8601.
+  # A kept journal as JSON: times in ISO 8601, and the `config` of its metadata
+  # masked as the renderers mask it — a REST client is not trusted to.
   defp trace_json(entry) do
     entry
-    |> Map.delete(:pid)
     |> Map.update!(:written_at, &DateTime.to_iso8601/1)
+    |> Map.update!(:expires_at, &DateTime.to_iso8601/1)
+    |> Map.update(:meta, nil, &mask_meta/1)
+  end
+
+  defp mask_meta(meta) do
+    Map.update(meta, :config, [], fn config ->
+      Map.new(config, fn {key, value} ->
+        # mask/2 answers "****" for a secret and inspect/1 of anything else:
+        # only the verdict is taken, the other values stay as they were.
+        {key, if(FSL.Diagram.mask(key, value) == "****", do: "****", else: value)}
+      end)
+    end)
   end
 
   defp json(conn, status, data) do

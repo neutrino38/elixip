@@ -59,7 +59,11 @@ defmodule Kelix.Config do
           modules: map,
           control_api: map,
           metrics: map,
-          debug: %{trace_retention: pos_integer, max_traces: pos_integer}
+          debug: %{
+            trace_retention: pos_integer,
+            max_traces: pos_integer,
+            max_trace_bytes: pos_integer
+          }
         }
 
   @default_max_message_size 64_000
@@ -114,10 +118,11 @@ defmodule Kelix.Config do
             modules: %{},
             control_api: %{},
             metrics: %{},
-            # The sequence diagrams an operator asked for (`kelictl debug <id> on`),
-            # kept in memory by Kelix.Traces: for `trace_retention` seconds once
-            # written, `max_traces` at most, the oldest dropped first. Lost on restart.
-            debug: %{trace_retention: 3600, max_traces: 100}
+            # The journals an operator asked for (`kelictl debug <id> on`), kept in
+            # memory by Kelix.Traces: for `trace_retention` seconds once written,
+            # `max_traces` at most, the oldest dropped first, each cut at
+            # `max_trace_bytes` of message text. Lost on restart.
+            debug: %{trace_retention: 3600, max_traces: 100, max_trace_bytes: 1_048_576}
 
   @protos %{"udp" => :udp, "tcp" => :tcp, "tls" => :tls, "wss" => :wss}
   @log_levels ~w(debug info warning error)
@@ -225,9 +230,10 @@ defmodule Kelix.Config do
     # selection is declared here and called back into.
     Application.put_env(:elixip2, :mediaserver_selector, {Kelix.Router, :media_for_profiles})
 
-    # Where a scenario's sequence diagram goes once written: into Kelix.Traces, in
-    # memory, for `kelictl debug show` — a server has no working directory an
-    # operator reads files from. Read by SIP.FSL.Host.journal_output/3.
+    # Where a scenario's journal goes once written: into Kelix.Traces, in memory
+    # and unrendered, for `kelictl debug show` and kelescope to draw — a server
+    # has no working directory an operator reads files from. Read by
+    # SIP.FSL.Host.journal_events/2.
     Application.put_env(:elixip2, :sequence_output, {Kelix.Traces, :store})
 
     # Which of our addresses to publish to a peer outside, per bound address: the
@@ -485,13 +491,15 @@ defmodule Kelix.Config do
   defp parse_debug(%{} = d) do
     defaults = %__MODULE__{}.debug
 
-    with :ok <- reject_keys(d, ~w(trace_retention max_traces), "[debug]"),
+    with :ok <- reject_keys(d, ~w(trace_retention max_traces max_trace_bytes), "[debug]"),
          {:ok, retention} <- opt_pos_integer(d, "trace_retention", "[debug]"),
-         {:ok, max} <- opt_pos_integer(d, "max_traces", "[debug]") do
+         {:ok, max} <- opt_pos_integer(d, "max_traces", "[debug]"),
+         {:ok, bytes} <- opt_pos_integer(d, "max_trace_bytes", "[debug]") do
       {:ok,
        %{
          trace_retention: retention || defaults.trace_retention,
-         max_traces: max || defaults.max_traces
+         max_traces: max || defaults.max_traces,
+         max_trace_bytes: bytes || defaults.max_trace_bytes
        }}
     end
   end

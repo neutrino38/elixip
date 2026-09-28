@@ -218,10 +218,22 @@ defmodule Kelix.Control.CLI do
 
   defp parse(["debug", "list"]), do: {:ok, :traces, :traces, []}
 
-  defp parse(["debug", "show", id]) do
-    case Integer.parse(id) do
-      {n, ""} -> {:ok, :trace, :trace, [n]}
-      _ -> {:error, "debug show: <id> must be an integer"}
+  # `--format-puml` and `--full` anywhere after `show`, like `--notify` for
+  # reload-script: the rendering is kelictl's, the node answers the journal.
+  defp parse(["debug", "show" | rest]) do
+    {puml?, rest} = pop_flag(rest, "--format-puml")
+    {full?, rest} = pop_flag(rest, "--full")
+    format = if puml?, do: :plantuml, else: :ladder
+
+    case rest do
+      [id] ->
+        case Integer.parse(id) do
+          {n, ""} -> {:ok, {:trace, format, full?}, :trace, [n]}
+          _ -> {:error, "debug show: <id> must be an integer"}
+        end
+
+      _ ->
+        {:error, usage_debug()}
     end
   end
 
@@ -365,8 +377,8 @@ defmodule Kelix.Control.CLI do
   defp complete(["debug"], prefix),
     do: {:complete, {:monitor, [], :instance_ids}, prefix, ["list", "show", "help"]}
 
-  defp complete(["debug", "show"], prefix),
-    do: {:complete, {:traces, [], :instance_ids}, prefix, []}
+  defp complete(["debug", "show" | _typed], prefix),
+    do: {:complete, {:traces, [], :instance_ids}, prefix, ["--format-puml", "--full"]}
 
   defp complete(["debug", id], prefix) when id not in ["list", "show", "help"],
     do: {:complete, nil, prefix, ["on", "off"]}
@@ -491,8 +503,14 @@ defmodule Kelix.Control.CLI do
   defp render({:debug, id, _onoff}, {:error, :not_found}),
     do: {@exit_not_found, "no scenario #{id} in progress (kelictl monitor)"}
 
-  defp render(:trace, {:error, :not_found}),
-    do: {@exit_not_found, "no trace kept for this id (kelictl debug list)"}
+  defp render({:trace, _format, _full?}, {:error, :not_found}),
+    do: {@exit_not_found, "no journal kept for this id (kelictl debug list)"}
+
+  defp render({:debug, id, "on"}, {:error, :journal_written}),
+    do:
+      {@exit_conflict,
+       "the journal of scenario #{id} was already written, and a scenario has only one — " <>
+         "`kelictl debug show #{id}`"}
 
   defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
   defp render(:reg_domain, {:error, :not_found}), do: {1, "no such domain"}
@@ -542,7 +560,8 @@ defmodule Kelix.Control.CLI do
        ],
        rows,
        &[
-         to_string(&1.id),
+         # ● : the instance's journal is on (kelictl debug <id> on)
+         if(Map.get(&1, :traced), do: "#{&1.id} ●", else: to_string(&1.id)),
          &1.domain,
          to_string(&1.function),
          # WHICH scenario runs here — the file domains.toml routed to, the way
@@ -709,37 +728,43 @@ defmodule Kelix.Control.CLI do
 
   defp render({:debug, id, "on"}, :ok) do
     {0,
-     "journal on for scenario #{id}: its diagram is kept when it ends, " <>
+     "journal on for scenario #{id}: it is kept when the scenario ends, " <>
        "or now with `kelictl debug #{id} off` — then `kelictl debug show #{id}`"}
   end
 
   defp render({:debug, id, "off"}, :ok),
     do: {0, "journal of scenario #{id} written — `kelictl debug show #{id}`"}
 
-  defp render(:traces, []), do: {0, "no trace kept"}
+  defp render(:traces, []), do: {0, "no journal kept"}
 
   defp render(:traces, rows) when is_list(rows) do
+    now = DateTime.utc_now()
+
     {0,
      table(
-       ["id", "scenario", "domain", "script", "written (UTC)", "instance", "size", "kept for"],
+       ["id", "scenario", "domain", "script", "written (UTC)", "instance", "SIP", "size", "kept for"],
        rows,
        &[
-         dash(&1.id && to_string(&1.id)),
+         to_string(&1.id),
          dash(&1.scenario),
          dash(&1.domain),
          dash(&1.script),
          Calendar.strftime(&1.written_at, "%Y-%m-%d %H:%M:%S"),
          if(&1.running, do: "running", else: "ended"),
-         "#{&1.size} B",
-         format_uptime(&1.expires_in_s * 1000)
+         to_string(&1.sip_count),
+         "#{&1.bytes} B",
+         format_uptime(max(DateTime.diff(&1.expires_at, now, :millisecond), 0))
        ]
      )}
   end
 
-  # The documents as they are, so `kelictl debug show 12 > call.puml` is a file
-  # PlantUML reads — several diagrams are several @startuml blocks in one file.
-  defp render(:trace, {:ok, entries}),
-    do: {0, entries |> Enum.map(& &1.document) |> Enum.join("\n") |> String.trim_trailing()}
+  # The node answers the journal; drawing it is kelictl's. PlantUML goes through
+  # FSL's own renderer, so `> call.puml` is a file PlantUML reads, secrets masked.
+  defp render({:trace, :plantuml, _full?}, {:ok, trace}),
+    do: {0, FSL.Diagram.PlantUML.render(trace.events, trace.meta) |> String.trim_trailing()}
+
+  defp render({:trace, :ladder, full?}, {:ok, trace}),
+    do: {0, Kelix.Control.Ladder.render(trace.events, trace.meta, full: full?)}
 
   defp render(:ok, :notfound), do: {1, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
@@ -1548,10 +1573,12 @@ defmodule Kelix.Control.CLI do
       mediaserver show <name>         one media server in detail
       mediaserver enable|disable <name>  take a media server in/out of the pool
       stop <id>                       shut down one scenario
-      debug <id> on|off               sequence diagram of a live scenario:
+      debug <id> on|off               journal of a live scenario:
                                       start it now / write it now
-      debug list                      the diagrams kept in memory
-      debug show <id>                 print them (PlantUML)
+      debug list                      the journals kept in memory
+      debug show <id> [--full]        print one as a ladder, with each
+                                      message's text if --full
+      debug show <id> --format-puml   print one as PlantUML
       reload-all                      reload domains.toml + the scripts + the
                                       module configs that can be applied live
                                       (what systemctl reload runs; config.toml
@@ -1758,25 +1785,33 @@ defmodule Kelix.Control.CLI do
 
   defp help_topic("debug") do
     """
-    kelictl debug — sequence diagrams of live scenarios
+    kelictl debug — the journal of a live scenario
 
       debug <id> on        [POST /scenarios/<id>/debug {"enabled": true}]
-          Start the sequence diagram of scenario <id> (the id `monitor` prints)
-          now, in the middle of whatever it is waiting for. The SIP dialogs it
-          already has open are traced from this point on.
+          Start the journal of scenario <id> (the id `monitor` prints, where a
+          journalled row is marked ●) now, in the middle of whatever it is
+          waiting for. The SIP dialogs it already has open are traced from
+          this point on.
       debug <id> off       [POST /scenarios/<id>/debug {"enabled": false}]
-          Write the diagram now; the scenario goes on untraced. Without `off`,
-          it is written when the scenario ends.
+          Write the journal now; the scenario goes on untraced. Without `off`,
+          it is written when the scenario ends. A scenario has one journal:
+          once written, `on` is refused.
       debug list           [GET /traces]
-          The diagrams kept in memory: instance, scenario, domain, script, when
-          written, whether the instance still runs, how long it is kept.
-      debug show <id>      [GET /traces/<id>]
-          Print the diagrams of instance <id> as PlantUML, oldest first:
-          `kelictl debug show 12 > call.puml`.
+          The journals kept in memory: instance, scenario, domain, script, when
+          written, whether the instance still runs, SIP messages, size, how
+          long it is kept.
+      debug show <id> [--full]        [GET /traces/<id>, the journal as JSON]
+          The journal of instance <id> as a ladder, one column per peer, the
+          way sngrep draws a call. --full prints each SIP message after its
+          arrow, the body decoded.
+      debug show <id> --format-puml
+          The same journal as PlantUML: `kelictl debug show 12 --format-puml
+          > call.puml`.
 
-    Diagrams are kept in memory only, [debug] trace_retention seconds after they
-    are written (3600) and [debug] max_traces at most (100), the oldest dropped
-    first; config.toml sets both. A restart loses them.
+    Journals are kept in memory only, [debug] trace_retention seconds after
+    they are written (3600), [debug] max_traces at most (100), the oldest
+    dropped first, and each cut at [debug] max_trace_bytes of message text
+    (1 MiB); config.toml sets all three. A restart loses them.
 
     Full documentation: docs/kelixip/running.md
     """
@@ -1787,7 +1822,9 @@ defmodule Kelix.Control.CLI do
   defp usage_module(), do: "usage: kelictl module list | module reload <name>"
 
   defp usage_debug(),
-    do: "usage: kelictl debug <id> on|off | debug list | debug show <id>"
+    do:
+      "usage: kelictl debug <id> on|off | debug list | " <>
+        "debug show <id> [--full] [--format-puml]"
 
   defp usage_registration() do
     "usage: kelictl registration list [domain] | registration show <domain> <aor> | " <>

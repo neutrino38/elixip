@@ -64,10 +64,22 @@ defmodule Kelix.InstancePool do
     account: "",
     medias: "n/a",
     mediaserver: "none",
-    outbound: "n/a"
+    outbound: "n/a",
+    # the instance's journal is on right now (kelictl debug, kelescope)
+    traced: false
   }
 
-  @fsm_keys [:scenario, :state, :event, :command, :account, :medias, :mediaserver, :outbound]
+  @fsm_keys [
+    :scenario,
+    :state,
+    :event,
+    :command,
+    :account,
+    :medias,
+    :mediaserver,
+    :outbound,
+    :traced
+  ]
 
   # ── API ──────────────────────────────────────────────────────────────────────
 
