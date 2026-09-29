@@ -91,12 +91,13 @@ defmodule SIP.Scenario.SipTrace do
 
   @doc """
   Let `pid` act for the calling scenario: a dialog binding to `pid` as its
-  application binds to the scenario, under the leg `tag`. For a process a
+  application binds to the scenario, under the leg `tag` — which wins over the
+  dialog's own, so a fan-out labels each device's lane. For a process a
   scenario starts to own a dialog on its behalf (`SIP.Session.Page.Relay`).
 
   No-op when the caller is not traced, so an untraced scenario leaves no row.
   """
-  @spec delegate(pid(), atom() | nil) :: :ok
+  @spec delegate(pid(), atom() | binary() | nil) :: :ok
   def delegate(pid, tag \\ nil) when is_pid(pid) do
     with tab when tab != nil <- table(),
          {scenario, _tag} <- scenario_of(tab, self()) do
@@ -132,8 +133,8 @@ defmodule SIP.Scenario.SipTrace do
   @spec bind(pid(), pid() | nil, atom() | nil) :: :ok
   def bind(dialog_pid, app_pid, tag) when is_pid(dialog_pid) and is_pid(app_pid) do
     with tab when tab != nil <- table(),
-         {scenario, _tag} <- scenario_of(tab, app_pid) do
-      :ets.insert(tab, {{:watch, dialog_pid}, {scenario, tag}})
+         {scenario, app_tag} <- scenario_of(tab, app_pid) do
+      :ets.insert(tab, {{:watch, dialog_pid}, {scenario, app_tag || tag}})
     end
 
     :ok

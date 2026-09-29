@@ -546,6 +546,32 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  # The final answers to a page that are a verdict on the content or the sender,
+  # not on the moment: a device that said one of these will say it again.
+  # 403 blocked sender, 413 too large, 415 unsupported type, 488 not acceptable,
+  # 603 decline, 606 not acceptable anywhere.
+  @page_refusals [403, 413, 415, 488, 603, 606]
+
+  @doc """
+  What one device's answer to a page-mode MESSAGE means for the message:
+
+    * `:delivered` — a 2xx other than 202: the device has it;
+    * `:accepted` — a 202: the device took it without saying it reached anyone
+      (a client quarantining an unknown sender answers so);
+    * `:refused` — a verdict on the content or the sender (403, 413, 415, 488,
+      603, 606): trying again later changes nothing;
+    * `:unreachable` — anything else, a request that never got a final answer
+      (`:failed`) included: *not now*, which is what storage is for.
+
+  One reading for the relay that fans a MESSAGE out (`SBB.Page`) and for the
+  delivery from storage that later retries it.
+  """
+  @spec page_verdict(100..699 | :failed) :: :delivered | :accepted | :refused | :unreachable
+  def page_verdict(202), do: :accepted
+  def page_verdict(code) when code in 200..299, do: :delivered
+  def page_verdict(code) when code in @page_refusals, do: :refused
+  def page_verdict(_code_or_failed), do: :unreachable
+
   # The Content-Type of the content inside a CPIM envelope: the envelope's own
   # headers come first, then the MIME headers of the content, then the content.
   # Only the header blocks are searched — a Content-Type line in the text of the

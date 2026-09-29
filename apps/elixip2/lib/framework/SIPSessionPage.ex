@@ -99,7 +99,12 @@ defmodule SIP.Session.Page do
           allowlist (Subject, Conversation-ID…);
         * `:date` — the `Date` to write (`%DateTime{}` or string);
         * `:timeout` — the lifetime of the dialog carrying the page, in seconds
-          (60 by default).
+          (60 by default);
+        * `:ref` — any term, echoed as `ref:` in the `{:page, …}` event: what
+          tells the answers of several pages in flight apart, and what
+          `SIP.Session.Page.abandon_pages/1` silences them by;
+        * `:leg` — the label of the page's lane in the journal (`page` by
+          default).
       """
       @doc """
       Set this conversation aside and end the instance: what `opts` names is
@@ -182,10 +187,61 @@ defmodule SIP.Session.Page do
     req = page(sip_ctx, to, body, content_type, opts)
     timeout = Keyword.get(opts, :timeout, 60)
 
-    {:ok, _relay} = SIP.Session.Page.Relay.start(req, target_label(to), timeout, sip_ctx.debug)
+    {:ok, relay} =
+      SIP.Session.Page.Relay.start(
+        req,
+        target_label(to),
+        timeout,
+        sip_ctx.debug,
+        Keyword.take(opts, [:ref, :leg])
+      )
+
+    if Keyword.has_key?(opts, :ref), do: track(opts[:ref], relay)
     note_activity(sip_ctx)
     SIP.Context.set(sip_ctx, :lasterr, :ok)
   end
+
+  # The relays started with a `:ref`, by the process that started them — the
+  # instance itself, so its dictionary rather than a table of the node's. A relay
+  # that has ended has nothing left to silence.
+  @relays {__MODULE__, :relays}
+
+  @doc """
+  Silence the pages in flight sent with one of `refs` as their `:ref`: their
+  answers will not be reported, and those already in the mailbox are taken out
+  of it.
+
+  For a sender that has made up its mind before every page is answered — a fan-out
+  that won on the first 200 — and would otherwise find the late answers in its
+  mailbox, where the next fan-out, or a clause matching `{:page, …}`, would take
+  them for its own. The pages themselves are not stopped: a MESSAGE cannot be
+  cancelled, and each one's transaction still ends, in the journal, as it
+  happens.
+  """
+  @spec abandon_pages([term()]) :: :ok
+  def abandon_pages(refs) when is_list(refs) do
+    {abandoned, kept} = Enum.split_with(tracked(), fn {ref, _relay} -> ref in refs end)
+    Process.put(@relays, kept)
+
+    # An answer sent before its relay was muted precedes the relay's
+    # acknowledgement, so once every relay has acknowledged, none is still on
+    # its way — and each relay reports once at most.
+    Enum.each(abandoned, fn {_ref, relay} -> SIP.Session.Page.Relay.mute(relay) end)
+    Enum.each(refs, &flush_answer/1)
+  end
+
+  defp flush_answer(ref) do
+    receive do
+      {:page, _outcome, %{ref: ^ref}} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp tracked,
+    do: @relays |> Process.get([]) |> Enum.filter(fn {_ref, pid} -> Process.alive?(pid) end)
+
+  defp track(ref, relay), do: Process.put(@relays, [{ref, relay} | tracked()])
 
   # ── Conversations ───────────────────────────────────────────────────────────
 
@@ -325,7 +381,8 @@ defmodule SIP.Session.Page.Relay do
 
   When the scenario is traced, the relay is adopted into its trace before the
   dialog exists (`SIP.Scenario.SipTrace.delegate/2`), so the MESSAGE and its answer
-  land in the scenario's journal, under the leg `page`.
+  land in the scenario's journal, under the leg `page` — or the `:leg` it was
+  given, one per device when a fan-out sends several.
   """
 
   require Logger
@@ -341,19 +398,40 @@ defmodule SIP.Session.Page.Relay do
   @doc """
   Send `req` from a relay reporting to the calling process. Returns once the
   relay is running; the outcome arrives as a message.
+
+  Options: `:ref`, echoed in the outcome's data; `:leg`, the journal label.
   """
-  @spec start(map(), binary(), pos_integer(), boolean()) :: {:ok, pid()}
-  def start(req, to, timeout, debug) do
+  @spec start(map(), binary(), pos_integer(), boolean(), keyword()) :: {:ok, pid()}
+  def start(req, to, timeout, debug, opts \\ []) do
     owner = self()
-    relay = spawn(fn -> init(owner, req, to, timeout, debug) end)
+    report = if Keyword.has_key?(opts, :ref), do: %{to: to, ref: opts[:ref]}, else: %{to: to}
+    relay = spawn(fn -> init(owner, req, report, timeout, debug) end)
     # Before the dialog exists: the dialog binds to its application on creation,
     # and the MESSAGE goes out from inside that creation.
-    :ok = SIP.Scenario.SipTrace.delegate(relay, @tag)
+    :ok = SIP.Scenario.SipTrace.delegate(relay, Keyword.get(opts, :leg, @tag))
     send(relay, :go)
     {:ok, relay}
   end
 
-  defp init(owner, req, to, timeout, debug) do
+  @doc """
+  Stop `relay` from reporting its outcome, and return once it has said so —
+  or has ended. An outcome it sent before is already in the caller's mailbox.
+  The page carries on: its transaction still ends as it happens.
+  """
+  @spec mute(pid()) :: :ok
+  def mute(relay) when is_pid(relay) do
+    mref = Process.monitor(relay)
+    send(relay, {:mute, self(), mref})
+
+    receive do
+      {:muted, ^mref} -> Process.demonitor(mref, [:flush])
+      {:DOWN, ^mref, :process, _pid, _reason} -> :ok
+    end
+
+    :ok
+  end
+
+  defp init(owner, req, report, timeout, debug) do
     ref = Process.monitor(owner)
 
     receive do
@@ -363,37 +441,49 @@ defmodule SIP.Session.Page.Relay do
 
     case SIP.Dialog.start_dialog(req, timeout, :outbound, debug, tag: @tag) do
       {:ok, _dialog_pid, _dialog_id} ->
-        await(owner, ref, to, timeout * 1_000 + @margin_ms)
+        await(owner, ref, report, timeout * 1_000 + @margin_ms)
 
       {:error, reason} ->
-        failed(owner, to, reason)
+        failed(owner, report, reason)
 
       other ->
-        failed(owner, to, other)
+        failed(owner, report, other)
     end
   end
 
-  defp await(owner, ref, to, wait_ms) do
+  # `owner` is nil once muted: the relay still waits for the answer — its dialog
+  # ends with it, and the journal shows it — but tells nobody.
+  defp await(owner, ref, report, wait_ms) do
     receive do
       {@tag, {code, rsp, _tid, _dlg}} when is_integer(code) and code >= 200 ->
-        send(owner, {:page, :answered, %{code: code, reason: rsp.reason, to: to, response: rsp}})
+        tell(
+          owner,
+          {:page, :answered, Map.merge(report, %{code: code, reason: rsp.reason, response: rsp})}
+        )
 
       {@tag, {:dialog_terminated, _dlg, reason}} ->
-        failed(owner, to, reason)
+        failed(owner, report, reason)
+
+      {:mute, from, mref} ->
+        send(from, {:muted, mref})
+        await(nil, ref, report, wait_ms)
 
       {:DOWN, ^ref, :process, _pid, _reason} ->
         :ok
 
       # provisionals, {:onnewdialog, …}
       {@tag, _other} ->
-        await(owner, ref, to, wait_ms)
+        await(owner, ref, report, wait_ms)
     after
-      wait_ms -> failed(owner, to, :timeout)
+      wait_ms -> failed(owner, report, :timeout)
     end
   end
 
-  defp failed(owner, to, reason) do
-    Logger.info(module: __MODULE__, message: "Page to #{to} not sent: #{inspect(reason)}")
-    send(owner, {:page, :failed, %{reason: reason, to: to}})
+  defp failed(owner, report, reason) do
+    Logger.info(module: __MODULE__, message: "Page to #{report.to} not sent: #{inspect(reason)}")
+    tell(owner, {:page, :failed, Map.put(report, :reason, reason)})
   end
+
+  defp tell(nil, _outcome), do: :ok
+  defp tell(owner, outcome), do: send(owner, outcome)
 end

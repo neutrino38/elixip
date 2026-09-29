@@ -1,6 +1,6 @@
 # chat-basic-plan.md — building basic instant messaging
 
-**Status (2026-09-29): C1 to C3d implemented — C3d on its in-memory store, the SQL one waits for C5; the page relay (C4) next.** The design is
+**Status (2026-09-29): C1 to C4 implemented — C3d on its in-memory store, the SQL one waits for C5; `Kelix.DB.Pool` (C5) next.** The design is
 [DESIGN-CHAT.md](DESIGN-CHAT.md); this document is the order it gets built in,
 what each phase delivers, and what proves it.
 
@@ -522,6 +522,44 @@ device (`;unittest=alice-phone`, `;unittest=alice-desk`).
 200, one 202 and one 480 give a 202, one 603 and one 480 give `:refused` with the
 603, three 480s give `:unreachable`, and a device that never answers does not
 delay the 200 the other one earned.
+
+**As built** (2026-09-29):
+
+- **`SBB.Page`** (`dsl/sbb/page.ex`, `use SBB.Page`, `page(args: …)`) takes
+  `:peer` (a registrar peer — every q group at once — or a list of URIs),
+  `:request` (`last_uas_req()` by default) and `:timeout`. It does **not**
+  answer the inbound MESSAGE: the code is in the outcome, the script answers
+  it (`reply_message(code)`), after storing first if it wants to;
+- **every outcome carries `served`** — the device keys that gave a 2xx or a
+  refusal, the set the Silo's `served:` takes — and `answers`, device key →
+  code or `{:failed, reason}`;
+- **the wait is bounded, 16 s by default.** Not in the plan: a device that
+  never answers holds a 202 (or a refusal) until its transaction gives up at
+  32 s — timer F, the very moment the sender's own transaction gives up, so
+  the answer would reach nobody. Past the bound a silent device counts as not
+  reached;
+- **the codes are read once, in the message layer**: `SIP.Msg.Ops.page_verdict/1`
+  → `:delivered | :accepted | :refused | :unreachable`, for the relay now and
+  the Silo's flush (C6) later. 413 joins the refusals — a message too large
+  now is too large at every flush;
+- **late answers do not leak.** A fan-out decided on the first 200 leaves pages
+  in flight. `send_page/4` gains `:ref` (echoed in the event) and `:leg` (the
+  journal lane label); `SIP.Session.Page.abandon_pages/1` mutes their relays —
+  each acknowledges, so nothing it sent before is still on its way — and takes
+  their answers already in the mailbox out of it. The pages themselves carry
+  on, and their transactions end in the journal as they happen;
+- **the journal lane per device**: `SipTrace.bind/3` prefers the label a
+  delegate was given over the dialog's own tag, so each relay's lane reads
+  `page user@host`;
+- **`Kelix.Mod.Registrar.targets/2` keeps `+sip.instance`** on each target, as
+  a header parameter — `serialize_ruri/1` drops it from the Request-URI — so
+  the device keys the relay reports are the ones the Silo will compare with at
+  flush, not the fallback contact URI.
+
+Tests: `apps/elixip2/test/sbb_page_test.exs` (the five cases above, the late
+answer, the journal lanes, `decide/2` and `devices/1`),
+`apps/kelix_modules/test/registrar_test.exs` (`+sip.instance` on the target).
+The reference script using it is C8's.
 
 ### C5 — `Kelix.DB.Pool`
 

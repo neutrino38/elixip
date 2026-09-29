@@ -933,6 +933,13 @@ defmodule Kelix.Mod.Registrar do
     |> Enum.map(fn {_q, group} -> Enum.map(group, &target_uri/1) end)
   end
 
+  defp keep_instance(ruri, contact) do
+    case SIP.Uri.get_header_param(contact, "+sip.instance") do
+      {:ok, value} when is_binary(value) -> SIP.Uri.set_header_param(ruri, "+sip.instance", value)
+      _none -> ruri
+    end
+  end
+
   # The Contact `q` (RFC 3261 §20.10): 0..1, highest preference first. Absent
   # means the device stated no preference, which ranks it top — the single-contact
   # case, i.e. nearly all of them, must not sort below one that asked for 0.3.
@@ -962,8 +969,14 @@ defmodule Kelix.Mod.Registrar do
   # this becomes (RFC 3261 §16.6 item 2). The URI parameters are kept in full —
   # §19.1.5 requires it — which is the whole reason this is one framework call
   # and not a list of parameter names maintained here.
+  #
+  # One header parameter is carried back on: `+sip.instance`, the device's
+  # identity (RFC 5626), so a relay fanning a MESSAGE out can say which devices
+  # it reached in the terms the Silo remembers them by (`SIP.Msg.Ops.device_key/1`).
+  # It cannot reach the wire from there — a Request-URI is serialized by
+  # `SIP.Uri.serialize_ruri/1`, which drops every header parameter.
   defp target_uri(%Contact{contact: c} = binding) do
-    c = SIP.Uri.to_request_uri(c)
+    c = c |> SIP.Uri.to_request_uri() |> keep_instance(c)
     binding = %Contact{binding | contact: c}
 
     case binding.received do
