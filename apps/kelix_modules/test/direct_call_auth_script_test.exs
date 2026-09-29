@@ -51,6 +51,12 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     def handle_call(:established?, _from, state),
       do: {:reply, state.state == :established, state}
 
+    # The stamp of dialog-state-plan.md DS3, from the authenticate block.
+    def handle_call({:set_remote_aor, aor}, _from, state) do
+      send(state.test, {:stamped, aor})
+      {:reply, :ok, state}
+    end
+
     def handle_call(_msg, _from, state), do: {:reply, :ok, state}
     def handle_info(_msg, state), do: {:noreply, state}
 
@@ -210,12 +216,16 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
 
     # Nothing is relayed on the strength of an unauthenticated INVITE.
     refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 500
+    # …and a challenge proves nobody: no leg is stamped.
+    refute_received {:stamped, _}
   end
 
   test "the INVITE that comes back with a valid digest is relayed to the registered contact",
        %{scenario: module} do
     :ok = register_callee()
     _tp = mockup_pid()
+    :ok = SIP.Dialog.Events.subscribe()
+    on_exit(fn -> SIP.Dialog.Events.unsubscribe() end)
 
     {:ok, dialog} = MockDialog.start_link(self())
     pid = spawn_call(module, dialog, invite())
@@ -230,6 +240,20 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     assert fwd.ruri.userpart == @callee
     assert fwd.ruri.domain == "10.0.0.9"
+
+    # Each leg is stamped with the served AOR its far end is PROVEN to be
+    # (dialog-state-plan.md §1): Alice's by the digest, Bob's by the registrar
+    # that grouped his bindings. Bob's leg is a real dialog, so it pushes its
+    # call state as soon as it exists.
+    assert_receive {:stamped, %SIP.Uri{userpart: @caller, domain: @domain}}, 1_000
+
+    assert_receive {:sip_dialog, _outbound,
+                    %{
+                      state: :trying,
+                      direction: :outbound,
+                      remote_aor: %SIP.Uri{userpart: @callee, domain: @domain}
+                    }},
+                   1_000
   end
 
   # The whole call, ended by the CALLEE — the half no suite covered, and where the

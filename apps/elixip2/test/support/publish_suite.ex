@@ -121,6 +121,24 @@ defmodule SIP.Test.PublishSuite do
           assert SIP.Publication.remaining(stored) in (@traits.expires() - 2)..@traits.expires()
         end
 
+        # The script ends right after its 200, and so does the dialog that carried
+        # the PUBLISH: a request answered, nothing to hang up. No BYE is tried —
+        # the dialog does not allow one.
+        test "the script ending after its 200 ends the dialog quietly" do
+          tp = attach("publish-quiet")
+
+          log =
+            ExUnit.CaptureLog.capture_log(fn ->
+              rsp = publish(tp, instance: "publish-quiet", body: wire_document(:open))
+              assert rsp.response == 200
+              Process.sleep(200)
+            end)
+
+          refute log =~ "Could not hang up"
+          refute log =~ "[warning]"
+          refute_received {:sip_mockup, {:request_sent, :BYE, _}}
+        end
+
         test "a refresh presenting that tag keeps the document and is given a new one" do
           tp = attach("publish-refresh")
           first = publish(tp, instance: "publish-refresh", body: wire_document(:open))

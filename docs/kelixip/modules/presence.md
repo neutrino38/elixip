@@ -14,6 +14,20 @@ and a PUBLISH are challenged with a **401**, in the realm of the served domain,
 through `Kelix.Mod.AuthDb` — so they need `kelixip-mod-auth_db` installed and a
 `[module.auth_db]` block. A refresh is challenged like the first request.
 
+A user publishes their **own** state only. `presence-publish.exs` answers **403**
+to a PUBLISH whose presentity is not the user the digest proved: Alice holding a
+valid password does not make her the authority on Bob's state. The presentity is
+the Request-URI's user part (RFC 3903 §4.1).
+
+Both scripts log one line per state change: the PUBLISH names the presentity, the
+new state and the entity-tag; the NOTIFY names the watcher, the presentity, the
+package and the state sent.
+
+```
+PUBLISH presence for sip:bob@example.com: new: open, on-the-phone (etag 3f2a…, 3600s)
+NOTIFY presence to sip:alice@example.com about sip:bob@example.com: open, on-the-phone
+```
+
 Its records are kamailio's `presentity` and `active_watchers` rows, held in
 memory. Nothing survives a restart: a dialog cannot be resurrected, so a watcher
 re-subscribes and a publisher re-publishes.
@@ -96,13 +110,25 @@ an entry with no state is reported `terminated;reason=noresource`.
 The state notified for a resource is, in order:
 
 1. the live document its presentity PUBLISHed;
-2. when nothing live is published, **open** while one of the user's devices is
-   registered, as reported by the registrar script (see
-   [Registrations as presence](#registrations-as-presence));
-3. otherwise, on a domain with a `[domain.registrar]` block and for a user known
-   to `auth_db`: **closed**;
-4. otherwise no state (`nil`): a domain with no registrar, a domain this node does
-   not serve, an unknown user, or an event package other than `presence`.
+2. a state another module reported for it with `report/4` — a conference room,
+   reported by [`mcu_presence`](mcu_presence.md), or a user on the phone, reported
+   by [`dialog_state`](dialog_state.md);
+3. **open** while one of the user's devices is registered, as reported by the
+   registrar script (see [Registrations as presence](#registrations-as-presence));
+4. on a domain with a `[domain.registrar]` block and for a user known to
+   `auth_db`: **closed**;
+5. otherwise no state (`nil`): a domain with no registrar, a domain this node does
+   not serve, or an unknown user.
+
+On the `dialog` package (RFC 4235, a BLF key) the registration says nothing about
+a call, and the list is shorter: the state a module reported — the user's calls,
+from [`dialog_state`](dialog_state.md) — then, for a user `auth_db` knows, an
+**empty** dialog list, then no state. An idle phone is "no call", not
+`noresource`: the key stays subscribed. Any other package has no state.
+
+A resource with no state ends its subscription: the reference scripts notify
+`terminated;reason=noresource`, when the SUBSCRIBE is accepted as well as when the
+state goes while it is watched.
 
 ### Registrations as presence
 
@@ -158,7 +184,7 @@ Per-domain block — `[[domain.presence]]` (activates the function for a domain)
 
 ```elixir
 import Kelix.Mod.Presence,
-  only: [publish: 2, watch: 2, watch_many: 3, unwatch: 1, state_of: 2]
+  only: [publish: 2, watch: 2, watch_many: 3, unwatch: 1, state_of: 2, exists?: 2, own_state?: 1]
 ```
 
 Each facade is non-blocking: a collection that is down answers `{:error, :down}`
@@ -248,6 +274,44 @@ None states open or closed: the module asks the registrar whether any device of
 the AOR still holds a registration, leaving out the ending dialog's own bindings
 (`Kelix.Mod.Registrar.registered?/3`).
 
+### `exists?/2`
+
+```elixir
+exists?(sip_ctx, aor :: String.t()) :: boolean
+```
+
+Whether the presentity `aor` (a user part) exists on the context's domain: a
+subscriber known to `auth_db`, or a resource a module reports a state for. The
+reference subscribe script answers **404** when it does not. A collection that is
+down answers `false`.
+
+### `own_state?/1`
+
+```elixir
+own_state?(sip_ctx) :: boolean
+```
+
+Whether the PUBLISH the instance serves is about the user its digest proved —
+the Request-URI's user part against the identity `assert_identity/1` recorded,
+case-insensitively. `false` when nothing was authenticated. What
+`presence-publish.exs` asks before it publishes anything.
+
+### `report/4`, `report/5`
+
+```elixir
+report(domain, user, source :: atom, document | nil) :: :ok | {:error, :down | :timeout}
+report(domain, user, source :: atom, document | nil, package) :: :ok | {:error, :down | :timeout}
+```
+
+For a module, not a script: states the state of `sip:<user>@<domain>` on the
+module's own authority, under the name `source`. `report/4` is the `presence`
+package; `report/5` names the package (`"dialog"` takes a `%SIP.DialogInfo.Doc{}`).
+`nil` withdraws it. The state
+ranks as described in [State of a resource](#state-of-a-resource), and the
+watchers are pushed when the resulting state changes.
+
+Every state a process reported is withdrawn when that process ends.
+
 ### `state_of/2`
 
 ```elixir
@@ -261,13 +325,38 @@ subscribing.
 
 | Command | REST | Description |
 |---|---|---|
-| `kelictl presence list domain=D` | `GET /modules/presence/presentities` | Published states, one row per entity-tag |
-| `kelictl presence show domain=D aor=bob` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
-| `kelictl presence watchers domain=D aor=bob` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
-| `kelictl presence remove domain=D aor=bob` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
+| `kelictl presence list D` | `GET /modules/presence/presentities` | One row per presentity: what its watchers are told, and who says so |
+| `kelictl presence show bob@D` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
+| `kelictl presence watchers bob@D` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
+| `kelictl presence remove bob@D` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
 
-The columns are kamailio's, under kamailio's names — `presentity_uri`, `event`,
-`etag`, `expires`, `status`, `callid`.
+`bob@D` is `domain=D aor=bob`, and both forms are accepted.
+
+`list` is the overview:
+
+```
+aor           status  activity      calls  watchers  sources
+bob           open    -             -      0         registrar
+magali.buu    open    on_the_phone  1      1         publish, dialog_state, registrar
+```
+
+`status` and `activity` are what a watcher of the `presence` package is told —
+a live publication wins over a reported state. `calls` counts the dialogs a
+watcher of the `dialog` package is told of, `watchers` the live subscriptions, and
+`sources` names who states something about the presentity.
+
+`show` and `watchers` give the detail, under kamailio's column names —
+`presentity_uri`, `event`, `etag`, `expires`, `status`, `callid`.
+
+A state has a `source`: `publish` for a PUBLISH, `registrar` for a registration
+reported by the registrar script (see
+[Registrations as presence](#registrations-as-presence)), and the name a module
+reported it under — `mcu` for a conference room. A `registrar` or module state has
+no `etag`, `expires` nor `sender`, and is shown beside a live publication of the
+same presentity, which it does not override.
+
+`activity` is the RPID activity of a `presence` document (`on_the_phone`, `away`…),
+empty when the document states none.
 
 `remove` drops the published state, not the subscriptions: a watcher stays
 subscribed and is told there is no state left.
@@ -282,10 +371,33 @@ from its own state:
 ```
 
 When the last publication goes — a removal, or a lifetime that lapsed — the
-document pushed is the [state](#state-of-a-resource) that follows: open or closed
-from the registrations, or `nil` where they do not apply. A registration change
-on a watched, unpublished resource is pushed the same way. What to notify for `nil` is the script's decision; the reference script
-sends an explicitly closed state.
+document pushed is the [state](#state-of-a-resource) that follows: a reported
+state, open or closed from the registrations, or `nil` where none applies. A
+reported state or a registration that changes on a watched resource is pushed the
+same way. What to notify for `nil` is the script's decision; the reference
+scripts end the subscription with `noresource`.
+
+### Live presence panel
+
+`Kelix.Control.subscribe_presence(pid, domain)` returns a domain's presentities
+and then pushes their changes to `pid` (kelescope's presence panel):
+
+```elixir
+{:ok, %{domain: "example.com", presentities: [row]}}
+
+{:kelix_presence, domain, {:upsert, row}}
+{:kelix_presence, domain, {:remove, aor}}
+
+row :: %{domain, aor, presentity_uri, status, activity, note, states, watchers}
+```
+
+A presentity is listed while it holds a publication, a watcher, a reported
+registration or a state a module reported; `states` then holds a `registrar`,
+`mcu` or `dialog_state` state. `status` is
+`"open"`, `"closed"` or `nil`, as a watcher of the `presence` package is told;
+`states` and `watchers` carry the columns of `list` and `watchers`.
+`unsubscribe_presence(pid, domain)` stops the pushes; a subscriber that dies is
+dropped. Without the presence module, the list is empty.
 
 ## Examples
 
@@ -315,8 +427,12 @@ state subscribe do
        ) do
     {:ok, sub} ->
       case Kelix.Mod.Presence.watch(sip_ctx, sub) do
+        {:ok, nil} ->
+          terminate_subscription(:noresource)
+          goto(ending, "200 + NOTIFY noresource")
+
         {:ok, doc} ->
-          notify(doc || SIP.Presence.Doc.new(sub.presentity_uri, :closed))
+          notify(doc)
           goto(subscribed, "200 + NOTIFY")
 
         {:error, reason} ->
@@ -335,9 +451,12 @@ Sending the state on when it changes:
 ```elixir
 state subscribed do
   on_events do
+    {:presence, :state, _resource, nil} ->
+      terminate_subscription(:noresource)
+      goto(ending, "state gone: noresource")
+
     {:presence, :state, _resource, doc} ->
-      sub = last_subscription()
-      notify(doc || SIP.Presence.Doc.new(sub.presentity_uri, :closed))
+      notify(doc)
       stay("state pushed")
   end
 end
@@ -352,7 +471,7 @@ state publish do
       case Kelix.Mod.Presence.publish(sip_ctx, pub) do
         {:ok, etag, expires} ->
           reply_publish(200, etag: etag, expires: expires)
-          scenario_success("published (#{expires}s)")
+          scenario_success("published #{SIP.Publication.presentity_uri(pub)} (#{expires}s)")
 
         {:error, 412} ->
           reply_publish(412, "Conditional Request Failed")

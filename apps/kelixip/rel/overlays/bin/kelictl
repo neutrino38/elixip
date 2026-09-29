@@ -75,7 +75,7 @@ case "${1:-}" in
 esac
 if [ $# -eq 2 ] && [ "$2" = "help" ]; then
   case "$1" in
-    registration | domain | mediaserver | module) MODE=eval ;;
+    registration | domain | mediaserver | module | debug) MODE=eval ;;
   esac
 fi
 

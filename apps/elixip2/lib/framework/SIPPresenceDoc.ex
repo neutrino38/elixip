@@ -122,6 +122,34 @@ defmodule SIP.Presence.Doc do
     if Enum.any?(tuples, &(&1.status == :open)), do: :open, else: :closed
   end
 
+  @doc """
+  One line saying what the document states, for a log: the composite status,
+  the RPID activity as the wire spells it, the note, and the device count when
+  there is more than one.
+
+      iex> SIP.Presence.Doc.new("sip:bob@ives.fr", :open, activity: :on_the_phone, note: "desk")
+      ...> |> SIP.Presence.Doc.summary()
+      ~s(open, on-the-phone, note "desk")
+  """
+  @spec summary(t()) :: binary()
+  def summary(%__MODULE__{} = doc) do
+    [
+      to_string(status(doc)),
+      activity_label(doc.activity),
+      doc.note && ~s(note "#{doc.note}"),
+      length(doc.tuples) > 1 && "#{length(doc.tuples)} devices"
+    ]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.join(", ")
+  end
+
+  defp activity_label(nil), do: nil
+
+  defp activity_label(activity) when is_atom(activity),
+    do: activity |> to_string() |> String.replace("_", "-")
+
+  defp activity_label(activity), do: activity
+
   @doc "`status/1` as a question."
   @spec open?(t()) :: boolean()
   def open?(%__MODULE__{} = doc), do: status(doc) == :open

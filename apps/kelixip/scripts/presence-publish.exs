@@ -11,9 +11,10 @@
 # outcome means.
 #
 # WHOSE state is being published is the first question, and the digest is what
-# answers it: a PUBLISH carries the presentity in a `From` anyone can write, and
-# an unauthenticated one lets a stranger say that a user is offline — or online,
-# which is worse.
+# answers it: a PUBLISH names its presentity in a Request-URI anyone can write,
+# and an unauthenticated one lets a stranger say that a user is offline — or
+# online, which is worse. A user publishes their OWN state only: Alice holding
+# a valid password is no reason to believe what she says about Bob.
 defmodule Kelix.PresencePublish do
   use SIP.Scenario
   use Kelix.Mod.AuthDb
@@ -44,10 +45,8 @@ defmodule Kelix.PresencePublish do
   # state, not a proxy on the way to it (RFC 3261 §22.1). The realm defaults to
   # the served domain.
   #
-  # The identity the digest proves is recorded in the context. A deployment that
-  # wants "you may only publish your own state" writes that comparison in
-  # `authorize` below, against `Kelix.Mod.AuthDb` having already refused a `From`
-  # asserting someone else (its `identity_check`).
+  # The identity the digest proves is recorded in the context, and `authorize`
+  # holds it against the presentity.
   state authenticate_publisher do
     AuthDb.SBB.authenticate(code: 401)
 
@@ -71,18 +70,22 @@ defmodule Kelix.PresencePublish do
     end
   end
 
-  # Whose state is this? The only check this reference makes is that the
-  # presentity exists in the subscriber base: publishing state for a user nobody
-  # provisioned is 404, and it is how a typo stops here instead of becoming a
-  # resource watchers can subscribe to.
+  # Whose state is this? The publisher's own, or nobody's: 403 for a PUBLISH
+  # about anyone else. The presentity then exists by construction — the digest
+  # just proved it is a subscriber.
   state authorize do
-    req = last_uas_req()
-
-    if Kelix.Mod.AuthDb.subscriber?(SIP.Msg.Ops.target_aor(req), sip_ctx.domain) do
-      goto(publish, "presentity exists")
+    if Kelix.Mod.Presence.own_state?(sip_ctx) do
+      goto(publish, "publishing own state")
     else
-      reply_publish(404, "Not Found")
-      scenario_success("404 no such presentity")
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "PUBLISH for #{presentity(sip_ctx)} by #{ctx_get(:asserted_identity)} refused: " <>
+            "a user publishes their own state only"
+      )
+
+      reply_publish(403, "Forbidden")
+      scenario_success("403 state of someone else")
     end
   end
 
@@ -95,14 +98,22 @@ defmodule Kelix.PresencePublish do
           # `expires: 0`, since there is no state left to name.
           {:ok, etag, expires} ->
             reply_publish(200, etag: etag, expires: expires)
-            scenario_success("published (#{expires}s)")
+
+            Logger.info(
+              module: __MODULE__,
+              message:
+                "PUBLISH #{pub.event} for #{SIP.Publication.presentity_uri(pub)}: " <>
+                  "#{SIP.Publication.describe(pub)} (etag #{etag || "-"}, #{expires}s)"
+            )
+
+            scenario_success("published #{SIP.Publication.presentity_uri(pub)} (#{expires}s)")
 
           # A tag we do not hold: expired under the publisher's feet, or issued
           # by a node that has since restarted. The publisher must start over
           # with an initial PUBLISH, which is exactly what the 412 tells it.
           {:error, 412} ->
             reply_publish(412, "Conditional Request Failed")
-            scenario_success("412 unknown entity-tag")
+            scenario_success("412 unknown entity-tag for #{SIP.Publication.presentity_uri(pub)}")
 
           # The store is down or wedged — Kelix.Module.safe_call/3 degrades to
           # this instead of blocking us (§8.2). 503, not 500: nothing is broken,
@@ -119,6 +130,10 @@ defmodule Kelix.PresencePublish do
         scenario_success("PUBLISH refused with #{code}")
     end
   end
+
+  # For the log line only: the presentity as the Request-URI names it.
+  defp presentity(sip_ctx),
+    do: "sip:#{SIP.Msg.Ops.target_aor(last_uas_req())}@#{sip_ctx.domain}"
 
   # Cooperative shutdown (§5.3): a publisher instance holds nothing to release.
   on_shutdown do

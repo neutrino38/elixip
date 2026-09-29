@@ -262,6 +262,11 @@ defmodule Kelix.Mod.Registrar do
   (`%{peer | fork: :serial}` rings them one at a time, `:none` tries the first
   and stops).
 
+  The peer also names the AOR it was built for (`aor`, folded to the served
+  domain and lower-cased as the store keys it): the leg dialled with it is
+  stamped as that AOR's, and its call state pushed to whoever watches it
+  (docs/design/dialog-state-plan.md §1).
+
   Returns `{:ok, peer}`, or one of three atoms, each mapping to one SIP answer:
   `:notfound` (no live binding — 480), `:no_aor` (the request carries no usable
   R-URI user part — 400), `:unavailable` (the store or this module could not
@@ -891,7 +896,10 @@ defmodule Kelix.Mod.Registrar do
   defp do_targets(state, domain, req) when is_binary(domain) do
     case SIP.Msg.Ops.target_aor(req) do
       aor when is_binary(aor) ->
-        case live_contacts(state, fold_alias(domain), downcase(aor)) do
+        domain = fold_alias(domain)
+        aor = downcase(aor)
+
+        case live_contacts(state, domain, aor) do
           [] ->
             :notfound
 
@@ -901,7 +909,8 @@ defmodule Kelix.Mod.Registrar do
                uris: q_groups(contacts),
                use_srv: false,
                ruri: :peer,
-               fork: :parallel
+               fork: :parallel,
+               aor: %SIP.Uri{scheme: "sip:", userpart: aor, domain: domain}
              }}
         end
 
@@ -1116,19 +1125,20 @@ defmodule Kelix.Mod.Registrar do
   # registrar's hot path (every REGISTER), so a domain nobody is watching must
   # cost nothing beyond the `count_subs` push above.
   defp broadcast_detail(state, domain, aor) do
-    case Map.get(state.detail_subs, domain, MapSet.new()) do
-      subs when map_size(subs) == 0 ->
-        :ok
+    subs = Map.get(state.detail_subs, domain, MapSet.new())
 
-      subs ->
-        msg =
-          case live_contacts(state, domain, aor) do
-            [] -> {:remove, aor}
-            contacts -> {:upsert, render_registration(domain, aor, contacts)}
-          end
+    # `MapSet.size/1`: a MapSet is a struct, and `map_size/1` of it is never 0.
+    if MapSet.size(subs) == 0 do
+      :ok
+    else
+      msg =
+        case live_contacts(state, domain, aor) do
+          [] -> {:remove, aor}
+          contacts -> {:upsert, render_registration(domain, aor, contacts)}
+        end
 
-        for pid <- subs, do: send(pid, {:kelix_registrations, domain, msg})
-        :ok
+      for pid <- subs, do: send(pid, {:kelix_registrations, domain, msg})
+      :ok
     end
   end
 

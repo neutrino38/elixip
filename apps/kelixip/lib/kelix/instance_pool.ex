@@ -64,10 +64,22 @@ defmodule Kelix.InstancePool do
     account: "",
     medias: "n/a",
     mediaserver: "none",
-    outbound: "n/a"
+    outbound: "n/a",
+    # the instance's journal is on right now (kelictl debug, kelescope)
+    traced: false
   }
 
-  @fsm_keys [:scenario, :state, :event, :command, :account, :medias, :mediaserver, :outbound]
+  @fsm_keys [
+    :scenario,
+    :state,
+    :event,
+    :command,
+    :account,
+    :medias,
+    :mediaserver,
+    :outbound,
+    :traced
+  ]
 
   # ── API ──────────────────────────────────────────────────────────────────────
 
@@ -94,6 +106,14 @@ defmodule Kelix.InstancePool do
   @doc "Cooperatively shut down one instance by its `id` (from `list/0`). `:ok` / `{:error, :not_found}`."
   @spec shutdown(pos_integer, term) :: :ok | {:error, :not_found}
   def shutdown(id, reason \\ :operator), do: GenServer.call(__MODULE__, {:shutdown, id, reason})
+
+  @doc """
+  Turn the sequence journal of one running instance on (`:on`) or write it out
+  now (`:off`) — `{:scenario_ctl, :journal, op}`, which every `on_events` wait
+  takes without leaving it. `:ok` / `{:error, :not_found}`.
+  """
+  @spec journal(pos_integer, :on | :off) :: :ok | {:error, :not_found}
+  def journal(id, op) when op in [:on, :off], do: GenServer.call(__MODULE__, {:journal, id, op})
 
   @doc """
   Subscribe `pid` to live joined rows **and return the snapshot** — the
@@ -187,6 +207,17 @@ defmodule Kelix.InstancePool do
 
       inst ->
         send(inst.pid, {:scenario_ctl, :shutdown, reason})
+        {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:journal, id, op}, _from, state) do
+    case find_instance(state, id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      inst ->
+        send(inst.pid, {:scenario_ctl, :journal, op})
         {:reply, :ok, state}
     end
   end

@@ -135,6 +135,11 @@ defmodule SIP.Subscription do
   def key(%__MODULE__{} = sub),
     do: {sub.callid, sub.to_tag, sub.from_tag, sub.event, sub.event_id}
 
+  @doc "The watcher as `sip:user@domain`, `nil` when the SUBSCRIBE named none."
+  @spec watcher_uri(t()) :: binary() | nil
+  def watcher_uri(%__MODULE__{watcher_username: nil}), do: nil
+  def watcher_uri(%__MODULE__{watcher_username: u, watcher_domain: d}), do: "sip:#{u}@#{d}"
+
   @doc "kamailio's `status` integer, read as an atom. An unknown value reads `:terminated`."
   @spec status(t() | non_neg_integer()) ::
           :active | :pending | :terminated | :waiting | :polite_block
@@ -271,7 +276,10 @@ defmodule SIP.Session.Notifier do
 
       `doc` is whatever this subscription's event package models; it is handed to
       its `serialize/2` with the content type negotiated at acceptance. A binary
-      is passed through packages that model their document as text.
+      is passed through packages that model their document as text. A document
+      with a `version` field (RFC 4235's dialog-info) is stamped with the
+      subscription's version before it goes out: the count is the framework's,
+      never the scenario's.
       """
       defmacro notify(doc) do
         quote do
@@ -604,6 +612,7 @@ defmodule SIP.Session.Notifier do
         to_user: to_user,
         to_domain: to_domain,
         user_agent: Map.get(req, :useragent),
+        version: continued_version(sip_ctx),
         ref: make_ref()
       }
       # An un-SUBSCRIBE is accepted like any other (RFC 6665 §4.4.4 makes it a
@@ -629,6 +638,16 @@ defmodule SIP.Session.Notifier do
       {:error, reason} ->
         Logger.warning("Subscription accepted but the dialog refused it: #{inspect(reason)}")
         {SIP.Context.appdata_set(sip_ctx, :subscription, sub), {:ok, sub}}
+    end
+  end
+
+  # A refresh is the SAME subscription (RFC 6665 §4.1.2.2), and its NOTIFY count
+  # goes on from where it was: a document version that fell back to 0 is one a
+  # watcher discards as older than the last it saw (RFC 4235 §4.1.1).
+  defp continued_version(sip_ctx) do
+    case SIP.Context.appdata_get(sip_ctx, :subscription) do
+      %SIP.Subscription{version: version} -> version
+      _first -> 0
     end
   end
 
@@ -670,7 +689,7 @@ defmodule SIP.Session.Notifier do
   end
 
   defp send_notify(sip_ctx, sub, doc) do
-    case sub.package.serialize(sub.content_type, doc) do
+    case sub.package.serialize(sub.content_type, stamp_version(doc, sub.version)) do
       {:ok, body} ->
         rc = SIP.Dialog.send_notify(sip_ctx.dialogpid, body, sub.content_type)
 
@@ -690,6 +709,14 @@ defmodule SIP.Session.Notifier do
         SIP.Context.set(sip_ctx, :lasterr, {:error, reason})
     end
   end
+
+  # `version` is the SUBSCRIPTION's (RFC 4235 §4.1.1, RFC 4662 §5.1): a document
+  # that carries one — dialog-info does, PIDF does not — is stamped with it here,
+  # so the scenario building the document never counts NOTIFYs.
+  defp stamp_version(%{version: _} = doc, version) when is_map(doc),
+    do: %{doc | version: version}
+
+  defp stamp_version(doc, _version), do: doc
 
   @doc false
   @spec do_notify_list(%SIP.Context{}, %{binary() => term()}) :: %SIP.Context{}
@@ -797,7 +824,7 @@ defmodule SIP.Session.Notifier do
   end
 
   defp list_part(sub, uri, doc) do
-    case sub.package.serialize(sub.content_type, doc) do
+    case sub.package.serialize(sub.content_type, stamp_version(doc, sub.version)) do
       {:ok, body} ->
         id = SIP.Presence.Rlmi.instance_id(uri)
         cid = id <> "@kelixip"

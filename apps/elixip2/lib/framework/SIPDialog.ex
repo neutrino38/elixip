@@ -13,15 +13,24 @@ defmodule SIP.Dialog do
     case Registry.start_link(keys: :unique, name: Registry.SIPDialog) do
       {:ok, pid} ->
         Logger.info("SIP dialog layer started with PID #{inspect(pid)}")
-        :ok
+        start_events_registry()
 
       {:error, {:already_started, _pid}} ->
-        # Layer already running (e.g. started by a previous test module): treat as success
-        :ok
+        # Layer already running (e.g. started by a previous test module, or
+        # supervised by an application that does not know the events registry):
+        # treat as success
+        start_events_registry()
 
       {code, _pid} ->
         Logger.error("SIP dialog layer failed to start with error #{code}")
         code
+    end
+  end
+
+  defp start_events_registry() do
+    case Registry.start_link(keys: :duplicate, name: SIP.Dialog.Events.registry()) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
     end
   end
 
@@ -148,7 +157,8 @@ defmodule SIP.Dialog do
     name = {:via, Registry, {Registry.SIPDialog, dialog_id, :cast}}
     tag = Keyword.get(opts, :tag)
     forking = Keyword.get(opts, :fork, false)
-    dialog_params = {req2, direction, self(), timeout, debug, dialog_id, tag, forking}
+    remote_aor = Keyword.get(opts, :remote_aor)
+    dialog_params = {req2, direction, self(), timeout, debug, dialog_id, tag, forking, remote_aor}
 
     case GenServer.start(SIP.DialogImpl, dialog_params, name: name) do
       {:ok, dlg_pid} ->
@@ -486,6 +496,22 @@ defmodule SIP.Dialog do
   end
 
   @doc """
+  Stamp `dialog_pid` with the AOR of a served domain its far end is **proven**
+  to be — proven by the caller, which is the module that authenticated the far
+  end or resolved its bindings, never a header read off the dialog. From then
+  on the dialog's call state is pushed to `SIP.Dialog.Events` subscribers,
+  starting with its current one. Also an option of `start_dialog/5`.
+  """
+  @spec set_remote_aor(pid(), SIP.Uri.t()) :: :ok
+  def set_remote_aor(dialog_pid, %SIP.Uri{} = aor) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, {:set_remote_aor, aor})
+  end
+
+  @doc "The dialog's call state as `SIP.Dialog.Events` pushes it, read on demand."
+  @spec info(pid()) :: map()
+  def info(dialog_pid) when is_pid(dialog_pid), do: GenServer.call(dialog_pid, :info)
+
+  @doc """
   End `dialog_pid` now, stating why: its application receives the one
   `{:dialog_terminated, dialog_pid, reason}` the contract promises, with `reason`
   verbatim.
@@ -625,6 +651,18 @@ defmodule SIP.Dialog do
           ]) do
       Logger.debug("callid: #{inspect(k)} -> #{inspect(p)}")
     end
+  end
+
+  @doc """
+  Every dialog process this node holds, once each — what a module resyncing
+  against the live dialogs walks, `info/1` on each (a REGISTER dialog is
+  registered twice, under its triplet and under its registration).
+  """
+  @spec pids() :: [pid()]
+  def pids() do
+    Registry.SIPDialog
+    |> Registry.select([{{:_, :"$1", :_}, [], [:"$1"]}])
+    |> Enum.uniq()
   end
 
   # check_nonce/2 is gone with the per-dialog nonce map: a nonce carries its own

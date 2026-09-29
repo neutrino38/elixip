@@ -149,6 +149,7 @@ defmodule SIP.Test.FSL.MonitorPush do
                  :medias,
                  :mediaserver,
                  :outbound,
+                 :traced,
                  :depth,
                  :slot
                ])
@@ -161,6 +162,8 @@ defmodule SIP.Test.FSL.MonitorPush do
       assert row.medias == "n/a"
       assert row.mediaserver == "none"
       assert row.outbound == "n/a"
+      # not journalled until someone asks (kelictl debug <id> on)
+      assert row.traced == false
     end
 
     @tag :sip_columns

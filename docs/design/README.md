@@ -38,9 +38,13 @@ The user-facing counterparts live at the repository root —
 | [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
 | [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
+| [dialog-state-plan.md](dialog-state-plan.md) | call occupancy of a served AOR: the `dialog` package (RFC 4235), the stamp auth_db and the registrar put on a leg, the `dialog_state` module and its push for the ACD |
 | [presence-basic-plan.md](presence-basic-plan.md) | the build order of the above, phase by phase: what basic presence is, and what each step proves |
 | [presence-rls-plan.md](presence-rls-plan.md) | the buddy list on top of it: one SUBSCRIBE covering N resources (RFC 4662 / 5367), lot by lot |
 | [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
+| [debug-improvments.md](debug-improvments.md) | scenario debugging: the sequence diagram drawn from the real SIP messages — what is built, its limits, what comes next (in French) |
+| [debug-fsl-port-plan.md](debug-fsl-port-plan.md) | carrying the step above across the FSL extraction: what goes into the `finite_state_language` package, what stays in the SIP binding, in which order |
+| [kelescope-debug-scenario.md](kelescope-debug-scenario.md) | a live scenario's journal in kelescope — what the node must add (FSL 0.4.1, `Kelix.Traces`, the pushes, `kelictl debug show` as a text ladder) and the kelescope side, against a frozen contract |
 
 ## Designed elsewhere
 

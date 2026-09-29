@@ -42,7 +42,7 @@ do about it — the release's own script would only say `cat: Permission denied`
 
 | Command | R/W | Does |
 |---|---|---|
-| `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
+| `kelictl status` | R | Version, uptime, counters, listeners, media pool, node state |
 | `kelictl monitor` | R | Scenarios in progress: id, domain, function, **script**, account, FSM state/event/command, negotiated medias, media server, outbound destination (reuses the `--monitor` view) |
 | `kelictl monitor continuous` | R | Same view, redrawn live as scenarios appear, change state or end — no polling. Runs until stdin closes (Ctrl+D) |
 | `kelictl registration list [domain]` | R | Registrations, one list per domain — [registrar](modules/registrar.md#control-commands) |
@@ -56,6 +56,9 @@ do about it — the release's own script would only say `cat: Permission denied`
 | `kelictl mediaserver show <name>` | R | One media server in detail, including what it says about itself |
 | `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
+| `kelictl debug <id> on\|off` | W | Start the journal of a live scenario now, or write it now — [below](#the-journal-of-a-live-scenario) |
+| `kelictl debug list` | R | The journals kept in memory |
+| `kelictl debug show <id> [--full] [--format-puml]` | R | One journal, as a sngrep-like ladder (default) or PlantUML |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
 | `kelictl module list` | R | Loaded modules: version, implementation, how many commands and facades each contributes |
 | `kelictl module reload <name>` | W | Reload a module's config |
@@ -76,7 +79,7 @@ $ kelictl registration help       # the same text, in the order you were typing
 $ kelictl mcu help conference.update   # a module command, from its own declaration
 ```
 
-Topics: `registration`, `domain`, `mediaserver`, `module`, `reload`, `drain`. Each
+Topics: `registration`, `domain`, `mediaserver`, `module`, `debug`, `reload`, `drain`. Each
 one prints its commands with **the REST route beside each** — the same
 `[GET /path]` convention a module's declared help uses, so the two frontals are
 read together. A bare `kelictl`, `-h` and `--help` all print the command list.
@@ -102,6 +105,8 @@ $ kelictl registration show acme.tld <TAB>  the AORs registered in acme.tld
 $ kelictl mcu <TAB>                         the commands the mcu module declares
 $ kelictl mcu conference.create <TAB>       domain=  name=  layout=  …
 $ kelictl stop <TAB>                        the ids of the scenarios in progress
+$ kelictl debug <TAB>                       the same ids, and list / show / help
+$ kelictl debug show <TAB>                  the ids that have a diagram kept
 ```
 
 The script holds **no** command name: it calls `kelictl complete <words…>`, which
@@ -125,6 +130,7 @@ live node, which is still running the previous release.
 ```console
 $ kelictl status
 node:            kelixip@127.0.0.1
+version:         1.5.5
 uptime:          0h0m1s
 active calls:    0
 listeners:       udp:0.0.0.0:5060, tcp:0.0.0.0:5060
@@ -147,6 +153,8 @@ registrar:     default_expires=3600 module=Registrar.Example.V1 script=registrar
 presence:
   presence SUBSCRIBE -> presence-subscribe.exs  [Kelix.PresenceSubscribe.V1]
   presence PUBLISH   -> presence-publish.exs    [Kelix.PresencePublish.V1]
+  dialog   SUBSCRIBE -> presence-subscribe.exs  [Kelix.PresenceSubscribe.V1]
+  dialog   PUBLISH   -> (not served)
 dial-plan:
   1. 0[1-9]XXXXXXXX -> user2pstn.exs  [User2Pstn.V1]
   2. (default)      -> catchall.exs   [Catchall.V3 — file changed since load]
@@ -293,6 +301,76 @@ true field by field: a `-` is "the server did not state it".
 The reference for the endpoint itself — every field, and what each one commits
 to — is the mediaserver repository, `docs/reference/status-http.md`.
 
+### The journal of a live scenario
+
+A call that misbehaves can be traced while it runs, without restarting anything:
+
+```console
+$ kelictl monitor
+id    domain       function  script     account  state    event  command  …
+12    example.com  calls     relay.exs  alice    talking  ACK    -        …
+
+$ kelictl debug 12 on
+journal on for scenario 12: it is kept when the scenario ends, or now with `kelictl debug 12 off` — then `kelictl debug show 12`
+
+$ kelictl monitor
+id    domain       function  script     account  state    event  command  …
+12 ●  example.com  calls     relay.exs  alice    talking  ACK    -        …
+
+$ kelictl debug 12 off
+journal of scenario 12 written — `kelictl debug show 12`
+
+$ kelictl debug list
+id  scenario  domain       script     written (UTC)        instance  SIP  size     kept for
+12  Relay.V3  example.com  relay.exs  2026-09-28 14:02:11  running   9    14230 B  0h59m48s
+
+$ kelictl debug show 12
+Scenario : Relay.V3   (#PID<0.412.0>)
+peer1: dev71.dev.ives.fr:443/wss — Call-ID 35739021077
+
+            alice                     dev71.dev.ives.fr:443/wss
+              |                                   |
+  +0.000s     | journal on (talking)              |
+  +4.210s     |<----------- BYE #3 ---------------|
+  +4.211s     |----------- 200 OK / 3 BYE ------->|
+  +4.212s     | talking -> hangup                 |
+              |                                   |
+```
+
+- **`on`** takes effect at once, in the middle of whatever the scenario is
+  waiting for. The journal opens with a note naming that state, and every SIP
+  message the scenario's dialogs send or receive from then on is recorded, one
+  column per Call-ID. The dialogs already open are included, both legs of a
+  B2BUA too. The scenario itself sees nothing; the monitor marks its row `●`.
+- **`off`**, or the end of the scenario, writes the journal. A scenario has
+  **one** journal: once written, `on` is refused ("already written", exit
+  code 4), and the scenario goes on untraced.
+- **`debug show <id>`** draws the journal:
+  - by default as a ladder, one column per peer and the media server, the way
+    sngrep draws a call;
+  - `--full` prints each SIP message after its arrow, with its body decoded
+    when it was compressed (`deflate`, `gzip`);
+  - `--format-puml` prints PlantUML instead, with the passwords of the
+    scenario's configuration masked:
+    `kelictl debug show 12 --format-puml > call-12.puml`.
+
+The node keeps the journal itself, not a drawing of it. `kelictl` draws it as
+above, and kelescope draws it in a popup. REST (`GET /traces/<id>`) answers
+the journal as JSON ([rest-api.md](rest-api.md)).
+
+Journals are kept **in memory only**, and a restart loses them. Three limits
+apply, all set in [installation.md](installation.md):
+
+- `[debug] trace_retention`: how long a journal is kept after it is written
+  (one hour by default);
+- `[debug] max_traces`: how many are kept (100), the oldest dropped first;
+- `[debug] max_trace_bytes`: how much message text one journal keeps (1 MiB).
+  Past it, the journal ends with "journal truncated".
+
+Only messages that go through a transaction of the scenario's dialogs are
+recorded. A stateless reply of the dialog layer, or an OPTIONS outside any
+dialog, is not.
+
 ### Reloading a running node
 
 ```console
@@ -420,6 +498,14 @@ kelictl presence list weshwesh.eu              # = domain=weshwesh.eu
 kelictl presence show weshwesh.eu magali.buu   # = domain=… aor=…
 ```
 
+A bare `user@domain` is an address: for a command declaring `aor` and `domain`, it
+binds both. With the domain already given, it binds `aor` to the user part when
+the two domains agree, and is kept whole otherwise.
+
+```
+kelictl presence show magali.buu@weshwesh.eu   # = domain=weshwesh.eu aor=magali.buu
+```
+
 A bare token spelling a declared argument's name stays a flag (`force` =
 `force=true`).
 
@@ -480,8 +566,9 @@ entry, of which the `mcu` module is only one consumer. `domain`, `mediaserver`
 and `module` are core nouns and never reach a module, so a mistyped sub-command
 prints their usage rather than "unknown module".
 
-Of the shipped modules, [mcu](modules/mcu.md), [auth_db](modules/auth_db.md) and
-[presence](modules/presence.md) contribute commands today;
+Of the shipped modules, [mcu](modules/mcu.md), [auth_db](modules/auth_db.md),
+[presence](modules/presence.md), [mcu_presence](modules/mcu_presence.md) and
+[dialog_state](modules/dialog_state.md) contribute commands today;
 [registrar](modules/registrar.md) contributes none — its registrations are a core
 noun, addressed as a sub-resource of their domain. The mechanism is documented in
 [modules/README.md](modules/README.md#module-administration-kelictl--rest-api).

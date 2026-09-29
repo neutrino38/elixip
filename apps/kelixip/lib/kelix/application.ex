@@ -44,6 +44,7 @@ defmodule Kelix.Application do
       {Registry, keys: :unique, name: Registry.SIP.Transac},
       {Registry, keys: :unique, name: Registry.SIPTransport},
       {Registry, keys: :unique, name: Registry.SIPDialog},
+      {Registry, keys: :duplicate, name: Registry.SIPDialogEvents},
       # ConfigRegistry: the low-level primitive the future Kelix.Router configures
       # (§4). Supervised Agent holding the SIP.Session.ConfigRegistry struct.
       Supervisor.child_spec(
@@ -76,6 +77,10 @@ defmodule Kelix.Application do
       # Script loading/versioning (§5) and the shared instance factory (§4.2).
       Kelix.ScriptRegistry,
       Kelix.InstancePool,
+      # The sequence diagrams an operator asked for (`kelictl debug`), in memory
+      # only. After the pool, whose rows it reads to say which domain and script
+      # a diagram came from; retention and capacity from `[debug]`.
+      Kelix.Traces,
       # Module system (§8): the loaded-module catalogue + the module-contributed
       # control-surface registry, then the supervisor that starts one child per
       # [module.<name>] block (registrar from domains.toml, the rest from

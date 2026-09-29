@@ -111,7 +111,16 @@ defmodule SIP.DialogImpl do
     callid: nil,
     totag: nil,
     destip: nil,
-    destport: 0
+    destport: 0,
+    # The AOR of a served domain the far end of this dialog is PROVEN to be —
+    # set by the module that proved it, never derived from a header (design
+    # docs/design/dialog-state-plan.md §1). A stamped INVITE dialog pushes its
+    # call state through SIP.Dialog.Events; the fields below are that state.
+    remote_aor: nil,
+    call_state: :trying,
+    end_event: nil,
+    created_at: nil,
+    confirmed_at: nil
   ]
 
   defp on_new_transaction(state, req, _transact_id)
@@ -355,6 +364,17 @@ defmodule SIP.DialogImpl do
             {:ok, newstate} =
               arm_expiration_timer(newstate, req)
               |> check_closing_transaction(req, transaction_pid)
+
+            # RFC 3261 §15.1.1: the session is over as soon as the BYE is handed
+            # to its transaction. The call state says so now, not when the answer
+            # comes back — a far end slow to answer the BYE is not still on a call.
+            newstate =
+              if req.method == :BYE,
+                do:
+                  newstate
+                  |> SIP.Dialog.Events.ended(:local_bye)
+                  |> SIP.Dialog.Events.transition(:terminated),
+                else: newstate
 
             # Surface the client transaction pid to the caller (see SIP.Dialog.new_request/2).
             {{:ok, transaction_pid}, newstate}
@@ -824,8 +844,13 @@ defmodule SIP.DialogImpl do
         |> Map.put(:contenttype, content_type)
         |> Map.put("Content-Encoding", encoding_of(sub))
 
+      # The type is stamped AFTER the body: `update_sip_msg/2` names a bare
+      # binary `application/sdp`, which is what a NOTIFY carrying PIDF used to
+      # announce itself as.
       :as_is ->
-        SIP.Msg.Ops.update_sip_msg(req, {:body, body})
+        req
+        |> SIP.Msg.Ops.update_sip_msg({:body, body})
+        |> Map.put(:contenttype, content_type)
     end
   end
 
@@ -948,10 +973,35 @@ defmodule SIP.DialogImpl do
   # `answer_nobody_awaits/2` already does for a 2xx nobody is left to ACK — hang
   # up if there is a session, stop in any case (see `handle_info({:DOWN, …})`).
   defp bind_app(state, app_pid) when is_pid(app_pid) do
+    SIP.Scenario.SipTrace.bind(self(), app_pid, state.tag)
     %SIP.DialogImpl{state | app: app_pid, app_monitor: Process.monitor(app_pid)}
   end
 
   defp bind_app(state, _app_pid), do: state
+
+  defp invite_dialog?(%SIP.DialogImpl{msg: %{method: :INVITE}}), do: true
+  defp invite_dialog?(_state), do: false
+
+  defp active_notifier_subscription?(%SIP.DialogImpl{
+         direction: :inbound,
+         subscription: %SIP.Subscription{},
+         subscription_ended: false
+       }),
+       do: true
+
+  defp active_notifier_subscription?(_state), do: false
+
+  # 64*T1, the lifetime of a non-INVITE client transaction (RFC 3261 §17.1.2.2):
+  # the transaction in flight has ended by then, answered or not. The timer is
+  # the one an ended subscription lingers on, and stops the dialog the same way.
+  defp linger(state) do
+    state = cancel_expiration_timer(state)
+
+    %SIP.DialogImpl{
+      state
+      | expirationtimer: :erlang.start_timer(32_000, self(), :subscription_linger)
+    }
+  end
 
   defp app_alive?(%SIP.DialogImpl{app: app}) when is_pid(app), do: Process.alive?(app)
   defp app_alive?(_state), do: false
@@ -988,8 +1038,16 @@ defmodule SIP.DialogImpl do
       {{:ok, _transaction_pid}, state} ->
         {:noreply, state}
 
-      # No transport, too many transactions, already closing: nothing more can
-      # be done for the far end, and there is nothing left to wait for.
+      # A BYE is already on its way — relayed by the application just before it
+      # ended. The dialog stops when that transaction ends; stopping now would
+      # kill it and leave it one chance on UDP. The linger is the net under it.
+      {:already_closing, state} ->
+        if pending_client_transaction?(state),
+          do: {:noreply, linger(state)},
+          else: {:stop, {:shutdown, :app_down}, state}
+
+      # No transport, too many transactions: nothing more can be done for the
+      # far end, and there is nothing left to wait for.
       {rc, state} ->
         Logger.warning(
           dialogpid: "#{inspect(self())}",
@@ -1098,7 +1156,8 @@ defmodule SIP.DialogImpl do
            atom() | nil, boolean()}
         ) :: {:ok, map()} | {:stop, atom() | {any(), any()}}
 
-  def init({req, :inbound, pid, timeout, debug, dialog_id, tag, _forking}) when is_req(req) do
+  def init({req, :inbound, pid, timeout, debug, dialog_id, tag, _forking, remote_aor})
+      when is_req(req) do
     trap_transaction_exits()
     {fromtag, callid, totag} = dialog_id
     # Generate totag if needed
@@ -1140,12 +1199,14 @@ defmodule SIP.DialogImpl do
       # remote target to be routed to.
       remotetarget: Map.get(req, :contact),
       routeset: Map.get(req, :recordroute, []),
-      allows: allows(req.method)
+      allows: allows(req.method),
+      remote_aor: remote_aor,
+      created_at: DateTime.utc_now()
     }
 
     # `pid` is the server transaction that created this dialog — recorded like
     # every other one, with the request it carries.
-    state = add_transaction(state, pid, req, uas_module(req))
+    state = add_transaction(state, pid, req, uas_module(req)) |> SIP.Dialog.Events.dispatch()
 
     # Dispatch the initial request to the upper layer. `pid` is the server
     # transaction that created this dialog; it is forwarded so the processing
@@ -1200,7 +1261,8 @@ defmodule SIP.DialogImpl do
   end
 
   # Dialog started by an outbound request
-  def init({req, :outbound, pid, timeout, debug, dialog_id, tag, forking}) when is_req(req) do
+  def init({req, :outbound, pid, timeout, debug, dialog_id, tag, forking, remote_aor})
+      when is_req(req) do
     trap_transaction_exits()
     {fromtag, callid, _totag} = dialog_id
 
@@ -1219,10 +1281,12 @@ defmodule SIP.DialogImpl do
       totag: nil,
       # Empty, as §12.2.2 has it — see check_seqno/2.
       cseqin: nil,
-      allows: allows(req.method)
+      allows: allows(req.method),
+      remote_aor: remote_aor,
+      created_at: DateTime.utc_now()
     }
 
-    state = bind_app(state, pid)
+    state = bind_app(state, pid) |> SIP.Dialog.Events.dispatch()
 
     {state, req} = fix_outbound_request(state, req, true)
 
@@ -1314,6 +1378,13 @@ defmodule SIP.DialogImpl do
     # out BEFORE {:dialog_terminated, …} so a scenario that ends on the latter
     # still sees it.
     state = notify_subscription_end(state, :invariant)
+
+    # The paths that know why they ended have said so (`Events.ended/2`); a
+    # CANCEL and an external `terminate/2` only carry their reason here.
+    state
+    |> SIP.Dialog.Events.ended(if reason == :cancelled, do: :cancelled, else: :error)
+    |> SIP.Dialog.Events.transition(:terminated)
+
     send_to_app(state, {:dialog_terminated, self(), reason})
 
     :ok
@@ -1396,13 +1467,29 @@ defmodule SIP.DialogImpl do
         message: "Inbound dialog established"
       )
 
-      %SIP.DialogImpl{state | state: :established}
+      %SIP.DialogImpl{state | state: :established} |> SIP.Dialog.Events.transition(:confirmed)
     else
       state
     end
   end
 
   defp establish_inbound(state, _req, _resp_code), do: state
+
+  # The final non-2xx WE give the request that created an inbound dialog: the
+  # call was refused here, whatever the code — except a challenge. A 401/407
+  # asks for credentials, and the request comes back on this dialog under a new
+  # CSeq (see `establish_inbound/3`). Read as a refusal, it marked every
+  # authenticated call rejected, and the first reason recorded is the one its
+  # end reports.
+  defp refuse_inbound(
+         state = %SIP.DialogImpl{direction: :inbound, state: :initial, msg: %{cseq: cseq}},
+         %{cseq: cseq},
+         resp_code
+       )
+       when resp_code in 300..699 and resp_code not in [401, 407],
+       do: SIP.Dialog.Events.ended(state, :rejected)
+
+  defp refuse_inbound(state, _req, _resp_code), do: state
 
   # Counterpart of await_ack/4: the ACK arrived, so release the IST. Cast once —
   # the transaction ignores the ACK retransmissions that follow, and it may
@@ -1428,6 +1515,14 @@ defmodule SIP.DialogImpl do
   # Obtain the call ID of a given dialog
   def handle_call(:getdialogid, _from, state) do
     {:reply, {state.fromtag, state.callid, state.totag}, state}
+  end
+
+  def handle_call({:set_remote_aor, %SIP.Uri{} = aor}, _from, state) do
+    {:reply, :ok, SIP.Dialog.Events.stamp(state, aor)}
+  end
+
+  def handle_call(:info, _from, state) do
+    {:reply, SIP.Dialog.Events.info(state), state}
   end
 
   # Is the request that created this dialog answered 2xx, i.e. is there a session
@@ -1511,13 +1606,14 @@ defmodule SIP.DialogImpl do
           state
 
         rc when rc in 101..199 ->
-          add_totag(state, nil)
+          add_totag(state, nil) |> SIP.Dialog.Events.transition(:early)
 
         rc when rc in 200..699 ->
           # await_ack/4 after close_transaction/2: the latter clears the field.
           add_totag(state, nil)
           |> close_transaction(uas_t)
           |> await_ack(req, resp_code, uas_t)
+          |> refuse_inbound(req, resp_code)
           |> establish_inbound(req, resp_code)
 
         _ ->
@@ -1548,6 +1644,7 @@ defmodule SIP.DialogImpl do
       # The NIST that carried the BYE is deliberately left alive by terminate/2
       # (stop_client_transactions/1 spares server transactions): it still has to
       # absorb the retransmissions of a BYE whose 200 has not arrived yet.
+      state = SIP.Dialog.Events.ended(state, :remote_bye)
       {:stop, :normal, ret, %SIP.DialogImpl{state | state: :terminated}}
     else
       {:reply, ret, state}
@@ -2394,6 +2491,7 @@ defmodule SIP.DialogImpl do
         routeset: Map.get(rsp, :recordroute)
     }
     |> adopt_winning_branch(transact_pid)
+    |> SIP.Dialog.Events.transition(:confirmed)
   end
 
   defp handle_UAS_response(state, rsp, _transact_pid)
@@ -2459,6 +2557,7 @@ defmodule SIP.DialogImpl do
     )
 
     %{state | state: :terminated}
+    |> SIP.Dialog.Events.ended(outbound_end_event(rsp.response))
   end
 
   defp handle_UAS_response(state = %SIP.DialogImpl{}, rsp, transact_pid)
@@ -2488,7 +2587,7 @@ defmodule SIP.DialogImpl do
           message: "Final dialog transaction completed by final anwswer #{rsp.response}"
         )
 
-        %{state | state: :terminated}
+        %{state | state: :terminated} |> SIP.Dialog.Events.ended(:local_bye)
 
       rsp.response == 481 ->
         # RFC 3261 §12.2.1.2: whatever the request was, the far end has just said
@@ -2513,6 +2612,12 @@ defmodule SIP.DialogImpl do
   defp handle_UAS_response(state, _rsp, _transact_pid) do
     state
   end
+
+  # Why an outbound call attempt ended, as RFC 4235 §4.1.4 names it. A 487 is
+  # the answer to the CANCEL we sent: the attempt was cancelled, not refused.
+  defp outbound_end_event(408), do: :timeout
+  defp outbound_end_event(487), do: :cancelled
+  defp outbound_end_event(_code), do: :rejected
 
   # The dialog states in which the dialog goes on living. Anything else is a
   # dialog that has said its last word and must stop — the single reading of that
@@ -2708,8 +2813,13 @@ defmodule SIP.DialogImpl do
             close_transaction(new_state, transact_pid)
           end
         else
-          # Provisional responses.
-          state
+          # Provisional responses. RFC 4235 §3.7.1: a 1xx with a remote tag is an
+          # early dialog, one without is merely proceeding; a 100 says nothing.
+          cond do
+            rsp.response == 100 -> state
+            state.totag != nil -> SIP.Dialog.Events.transition(state, :early)
+            true -> SIP.Dialog.Events.transition(state, :proceeding)
+          end
         end
       else
         Logger.warning(
@@ -2889,16 +2999,37 @@ defmodule SIP.DialogImpl do
   # nothing will answer on this dialog any more, so it ends here rather than
   # collecting in-dialog transactions it can only reject.
   #
-  # An established dialog is hung up first: RFC 3261 §15 makes the BYE the only
-  # way to end one, and the far end is otherwise left off-hook on a call nobody
-  # is in. The BYE is sent from `handle_info(:hang_up_unowned_dialog, …)`, the
-  # same one `answer_nobody_awaits/2` uses, and the dialog stops when that
-  # transaction ends.
+  # What "ending" owes the far end depends on what the dialog carries:
+  #
+  #   * a CALL that is established is hung up: RFC 3261 §15 makes the BYE the
+  #     only way to end one, and the far end is otherwise left off-hook on a
+  #     call nobody is in. The BYE is sent from
+  #     `handle_info(:hang_up_unowned_dialog, …)`, the same one
+  #     `answer_nobody_awaits/2` uses, and the dialog stops when that
+  #     transaction ends;
+  #   * a SUBSCRIPTION we notify that is still active gets its final NOTIFY,
+  #     `deactivated` — RFC 6665 §4.2.2: the watcher may re-subscribe at once,
+  #     and reaches a live notifier. Without it the watcher believes itself
+  #     subscribed until the lifetime lapses;
+  #   * anything else has no session to end. A BYE there is refused
+  #     (`allows/1`), and a PUBLISH, a MESSAGE or an ended subscription is
+  #     "established" only in that its request was answered 2xx
+  #     (`establish_inbound/3`). What it may still owe is a request of ours in
+  #     flight — the final NOTIFY above, or the one the subscription ending
+  #     just sent — so the dialog lingers for that transaction's lifetime
+  #     instead of stopping, which would kill it (`terminate/2`).
   def handle_info(
         {:DOWN, ref, :process, pid, reason},
         state = %SIP.DialogImpl{app_monitor: ref, app: pid}
       ) do
-    Logger.warning(
+    # A request answered, then its script ending, is the normal life of every
+    # dialog that carries no call: not worth a warning.
+    level =
+      if reason in [:normal, :shutdown] and not invite_dialog?(state),
+        do: :info,
+        else: :warning
+
+    Logger.log(level,
       dialogpid: "#{inspect(self())}",
       module: __MODULE__,
       message: "Application #{inspect(pid)} is gone (#{inspect(reason)}); ending the dialog"
@@ -2908,7 +3039,7 @@ defmodule SIP.DialogImpl do
     state = %SIP.DialogImpl{state | app: nil, app_monitor: nil}
 
     cond do
-      state.state == :established ->
+      invite_dialog?(state) and state.state == :established ->
         case pending_invite_transaction(state) do
           # The 2xx was answered while the application was still there, and the
           # ACK it owed never went out. It goes now, before the BYE.
@@ -2919,14 +3050,19 @@ defmodule SIP.DialogImpl do
             hang_up_orphaned_dialog(state)
         end
 
+      active_notifier_subscription?(state) ->
+        state |> finish_subscription(:deactivated) |> close_after_subscription()
+
       # A request of ours is still out there, and its answer is worth waiting
-      # for: a 2xx that arrives now is ACKed and hung up by
+      # for. On a call leg, a 2xx that arrives now is ACKed and hung up by
       # `answer_nobody_awaits/2` — the very case that established "the dialog
       # outlives its application" — and anything else ends the dialog through
       # `handle_UAS_response/3` as it always did. Stopping here instead would
       # strand a callee that is about to pick up.
       pending_client_transaction?(state) ->
-        {:noreply, state}
+        if invite_dialog?(state),
+          do: {:noreply, state},
+          else: {:noreply, linger(state)}
 
       true ->
         {:stop, {:shutdown, :app_down}, state}

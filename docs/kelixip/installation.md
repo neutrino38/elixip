@@ -21,6 +21,8 @@ deployment installs only what it uses — the core itself implements no SIP func
 | `kelixip-mod-registrar` | the [registrar](modules/registrar.md) / user-location module |
 | `kelixip-mod-auth_db` (RPM)<br>`kelixip-mod-auth-db` (deb) | the [database authentication](modules/auth_db.md) module |
 | `kelixip-mod-mcu` | the [conference mixer](modules/mcu.md) — the one module that also needs a **reachable media server** |
+| `kelixip-mod-presence` | the [presence](modules/presence.md) collection |
+| `kelixip-mod-mcu_presence` (RPM)<br>`kelixip-mod-mcu-presence` (deb) | [conference rooms as presentities](modules/mcu_presence.md) — requires `kelixip-mod-mcu` and `kelixip-mod-presence` |
 
 ```bash
 # Alma Linux 9
@@ -149,6 +151,11 @@ survives the upgrade and the packaged one lands next to it — as `*.rpmnew` on 
 (`%config(noreplace)`), as `*.dpkg-dist` on the deb (a `conffile`; an interactive
 `dpkg` may ask instead). Worth diffing either way, since new keys show up there first.
 The unit is restarted by the upgrade, which drains in-progress scenarios first.
+
+After an upgrade, check the `version:` line of `kelictl status`. It is the version of
+the code the node is **running**, read from the release it booted on. `rpm -q` answers
+for the payload on disk, which is not the same fact: a node that was not restarted, or
+an install that silently kept an older payload, shows the older version here.
 
 Removing the package stops the service and drops the generated cookie. On the deb, a
 plain `apt remove` keeps `/var/lib/kelixip` and `/var/log/kelixip`; `apt purge` removes
@@ -375,6 +382,18 @@ scrape it.
 | `enabled` | bool | `true` |
 | `addr` | IP | `127.0.0.1` |
 | `port` | 1..65535 | `9095` |
+
+#### `[debug]` — journals of live scenarios
+
+How long, how many, and how much of the journals `kelictl debug <id> on`
+produces are kept. They are held in memory only; a restart loses them. See
+[administration.md](administration.md#the-journal-of-a-live-scenario).
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `trace_retention` | seconds, > 0 | `3600` | How long a journal is kept after it is written |
+| `max_traces` | integer, > 0 | `100` | How many are kept; the oldest is dropped to make room |
+| `max_trace_bytes` | bytes, > 0 | `1048576` | How much SIP message text one journal keeps; past it, the journal is cut |
 
 ##### `tag` and `networks` — the side of the network
 
@@ -663,7 +682,7 @@ min_expires          = 60
 
 ```bash
 systemctl status kelixip
-kelictl status                            # listeners bound, modules loaded, domains version
+kelictl status                            # version, listeners bound, modules loaded, domains version
 curl -s http://127.0.0.1:9095/health      # {"status":"ok","live":true,"ready":true}
 ```
 

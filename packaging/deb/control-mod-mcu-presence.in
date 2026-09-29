@@ -1,0 +1,20 @@
+Package: kelixip-mod-mcu-presence
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@), kelixip-mod-mcu (= @VERSION@), kelixip-mod-presence (= @VERSION@)
+Description: Conference rooms as presentities, for kelixip
+ The link between the conference mixer and the presence collection: each
+ conference room is a presentity, sip:<did>@<domain>, open while it runs, open
+ and busy when it is full, closed while its media server is lost. A watcher
+ subscribes to a room alone or in its buddy list, as it would to a user. Enable
+ it with a [module.mcu_presence] block in config.toml, next to [module.mcu] and
+ [module.presence].
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

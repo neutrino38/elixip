@@ -20,6 +20,8 @@ loads exactly the modules it needs.
 | `auth_db` | `Kelix.Mod.AuthDb` | Digest authentication against a subscriber database | `kelixip-mod-auth_db` / `kelixip-mod-auth-db` | [auth_db.md](auth_db.md) |
 | `mcu` | `Kelix.Mod.Mcu` | Conferencing (medooze media server) | `kelixip-mod-mcu` | [mcu.md](mcu.md), REST endpoints [mcu-api.md](mcu-api.md), scenario guide [mcu_module_guide.md](mcu_module_guide.md) |
 | `presence` | `Kelix.Mod.Presence` | Presence collection: published states, watchers, fan-out | `kelixip-mod-presence` | [presence.md](presence.md) |
+| `mcu_presence` | `Kelix.Mod.McuPresence` | Conference rooms as presentities (needs `mcu` and `presence`) | `kelixip-mod-mcu_presence` / `kelixip-mod-mcu-presence` | [mcu_presence.md](mcu_presence.md) |
+| `dialog_state` | `Kelix.Mod.DialogState` | Call occupancy of the served users: BLF, on-the-phone, ACD feed (needs `presence`) | `kelixip-mod-dialog_state` / `kelixip-mod-dialog-state` | [dialog_state.md](dialog_state.md) |
 
 The module name is the one to use in a `[module.<name>]` block and in a script's
 `uses_modules`; the Elixir module is what a script imports the facades from.

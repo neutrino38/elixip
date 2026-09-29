@@ -96,6 +96,9 @@ defmodule SIP.Scenario.SequenceJournal do
   defdelegate record_transition(to, event, type), to: FSL.Journal
 
   @doc false
+  defdelegate record(event), to: FSL.Journal
+
+  @doc false
   defdelegate events(), to: FSL.Journal
 
   @doc false

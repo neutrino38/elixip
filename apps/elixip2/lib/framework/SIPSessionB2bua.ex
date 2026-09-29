@@ -50,6 +50,11 @@ defmodule SIP.B2bua.Peer do
       `:proxyuri` application env. (P2b-3 — the global one is honoured today.)
     * `trunk_pid` — reserved for the future trunk process holding reachability
       state. Ignored in v1.
+    * `aor` — the served AOR (`%SIP.Uri{}`) whose registered contacts `uris`
+      are, set by the module that grouped them (`Kelix.Mod.Registrar.targets/2`)
+      and `nil` for every other peer. The outbound leg is stamped with it at
+      creation (`SIP.Dialog.set_remote_aor/2`), so the call state of that AOR
+      is pushed to whoever watches it (docs/design/dialog-state-plan.md §1).
   """
   defstruct uris: [],
             use_srv: false,
@@ -62,6 +67,7 @@ defmodule SIP.B2bua.Peer do
             notify_progress: false,
             outbound_proxy: nil,
             trunk_pid: nil,
+            aor: nil,
             # The rungs this peer's `uris` expand to, each target already carrying
             # its address and its `net_side` — what `b2bua_resolve/1` produced.
             # `nil` means "not resolved yet", and the forward path then resolves as
@@ -1396,7 +1402,8 @@ defmodule SIP.Session.B2bua do
 
     dialog_opts = [
       tag: @outbound_tag,
-      fork: if(sibling_uris == [], do: forking, else: sibling_uris)
+      fork: if(sibling_uris == [], do: forking, else: sibling_uris),
+      remote_aor: peer.aor
     ]
 
     case SIP.Dialog.start_dialog(fwd, timeout, :outbound, sip_ctx.debug, dialog_opts) do
@@ -3199,6 +3206,16 @@ defmodule SIP.Session.B2bua do
   end
 
   # ── Teardown ────────────────────────────────────────────────────────────────
+
+  @doc """
+  The dialogs of this B2BUA's outbound legs, as `{leg_tag, dialog_pid}` — the
+  inbound one is the context's `dialogpid`. `[]` for a scenario that created
+  none. Read by the sequence journal when it starts on a call already set up.
+  """
+  @spec leg_dialogs(SIP.Context.t()) :: [{atom(), pid()}]
+  def leg_dialogs(sip_ctx) do
+    for {tag, %Leg{dialogpid: pid}} <- state(sip_ctx).legs, is_pid(pid), do: {tag, pid}
+  end
 
   @doc """
   Wind down BOTH legs of this B2BUA, whatever the exit path (success, failure,

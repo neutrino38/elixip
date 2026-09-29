@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.0
+Version:        1.6.1
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        9%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -62,8 +62,9 @@ Prometheus metrics.
 The core ships NO SIP function. The registrar, the authentication back-end, the
 conference mixer and the presence collection are loadable modules delivered as
 separate packages (kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu,
-kelixip-mod-presence) which drop their bytecode into the root-owned module
-directory; a deployment installs only what it uses.
+kelixip-mod-presence, kelixip-mod-mcu_presence, kelixip-mod-dialog_state) which
+drop their bytecode into the
+root-owned module directory; a deployment installs only what it uses.
 
 This package embeds its own Erlang runtime — no system Erlang or Elixir is needed.
 
@@ -114,6 +115,33 @@ with [[domain.presence]] blocks in domains.toml.
 
 Who may watch whom is NOT decided here: the reference scripts are, and that is
 where a deployment writes its rule.
+
+%package mod-mcu_presence
+Summary:        Conference rooms as presentities, for kelixip
+Requires:       %{name} = %{version}
+Requires:       %{name}-mod-mcu = %{version}
+Requires:       %{name}-mod-presence = %{version}
+
+%description mod-mcu_presence
+The link between the conference mixer and the presence collection: each
+conference room is a presentity, sip:<did>@<domain>, open while it runs, open and
+busy when it is full, closed while its media server is lost. A watcher subscribes
+to a room alone or in its buddy list, as it would to a user. Enable it with a
+[module.mcu_presence] block in config.toml, next to [module.mcu] and
+[module.presence].
+
+%package mod-dialog_state
+Summary:        Call occupancy of the served users, for kelixip
+Requires:       %{name} = %{version}
+Requires:       %{name}-mod-presence = %{version}
+
+%description mod-dialog_state
+The call state of each served user, reported to the presence collection: a BLF
+key subscribed with Event: dialog (RFC 4235) lights while its user rings or
+talks, a presence watcher sees on-the-phone while a call is up, and an ACD is
+pushed every transition. Only a call whose party is proven a user of the domain
+counts: authenticated by digest, or reached through its registrations. Enable
+it with a [module.dialog_state] block in config.toml, next to [module.presence].
 
 %prep
 %setup -q
@@ -265,7 +293,9 @@ fi
 
 %files mod-mcu
 %doc doc/modules/mcu.md doc/modules/mcu_module_guide.md
-%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu*.beam
+# Mcu and Mcu.* — not Mcu*, which would take McuPresence from its own package.
+%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu.beam
+%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu.*.beam
 # The reference conference scripts. They call the module's verbs and nothing else
 # provides them, so a host that has them can run them.
 %{_datadir}/%{name}/mcu*.exs
@@ -279,7 +309,37 @@ fi
 %{_datadir}/%{name}/presence-*.exs
 %{_datadir}/%{name}/registrar-presence.exs
 
+%files mod-mcu_presence
+%doc doc/modules/mcu_presence.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.McuPresence*.beam
+
+%files mod-dialog_state
+%doc doc/modules/dialog_state.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.DialogState*.beam
+
 %changelog
+* Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.1-1
+- kelescope shows presence live: Kelix.Control.subscribe_presence/2 returns a
+  domain's presentities, then pushes each change.
+- kelictl presence list shows a presentity reported registered by
+  registrar-presence.exs, as a state of source "registrar"; list and show gain
+  the source and status columns.
+- The registrar no longer renders an AOR's detail on every REGISTER when no
+  registrations panel is open on its domain.
+- New subpackage kelixip-mod-mcu_presence: a conference room is a presentity
+  (open, busy when full, closed while its media server is lost).
+- presence-subscribe.exs answers noresource to a presentity with no state,
+  instead of closed.
+- BLF keys: the dialog event package (RFC 4235) is served, with Event: dialog
+  in a [[domain.presence]] block. New subpackage kelixip-mod-dialog_state
+  reports each served user's calls to it, and on-the-phone to presence.
+- presence-publish.exs answers 403 to a PUBLISH about another user's state, and
+  both presence scripts log whose state changed to what.
+- A notifier whose script ends keeps retransmitting its final NOTIFY, and one
+  whose script dies sends it (deactivated) instead of leaving the watcher
+  subscribed.
+- User-Agent is now Kelixip/1.6.1.
+
 * Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-9
 - A scenario state that raises tears down what it had set up: teardown now runs
   on the context the failing state had built, so both legs and the media session
@@ -330,6 +390,10 @@ fi
   belong to kelixip-mod-presence alone, as the mcu scripts belong to
   kelixip-mod-mcu.
 
+* Sat Sep 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-2
+- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
+  before the rest of the release landed. No code change.
+
 * Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
 - Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between
   them. New subpackage kelixip-mod-presence — the collection, the entity-tags and
@@ -352,10 +416,6 @@ fi
 - The live-monitor registry is registered as FSL.Monitor, and pushes
   {:fsl_monitor, ...}.
 - User-Agent is now Kelixip/1.6.0.
-
-* Sat Sep 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-2
-- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
-  before the rest of the release landed. No code change.
 
 * Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
 - sip: an INVITE server transaction no longer carries timer F. A call that rang

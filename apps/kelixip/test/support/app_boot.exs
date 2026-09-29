@@ -24,6 +24,7 @@ defmodule Kelix.Test.AppBoot do
     Registry.SIP.Transac,
     Registry.SIPTransport,
     Registry.SIPDialog,
+    Registry.SIPDialogEvents,
     SIP.Session.ConfigRegistry,
     SIP.Auth.Secret,
     FSL.Monitor

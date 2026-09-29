@@ -22,7 +22,8 @@ defmodule SIP.IST do
 
   @impl true
   # Handle ACK sent by UAC
-  def handle_cast( {:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :ACK do
+  def handle_cast( {:onsipmsg, req, remoteip, remoteport }, state) when is_map(req) and req.method == :ACK do
+    SIP.Scenario.SipTrace.received(state, req, remoteip, remoteport)
     # TODO, check the IP/port against the  IP/port of the original request
     if state.state == :confirmed do
       Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
@@ -46,7 +47,8 @@ defmodule SIP.IST do
   end
 
   # Handle CANCEL
-  def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :CANCEL do
+  def handle_cast({:onsipmsg, req, remoteip, remoteport }, state) when is_map(req) and req.method == :CANCEL do
+    SIP.Scenario.SipTrace.received(state, req, remoteip, remoteport)
     state = if state.state in [ :trying, :proceeding ] do
       Logger.info([ transid: state.msg.transid,  module: __MODULE__,
                     message: "Received CANCEL - cancelling this transaction"])
@@ -88,11 +90,13 @@ defmodule SIP.IST do
   # lookup on a media server, a database — is retransmitted into with nothing on the
   # wire yet. Absorb it while we have no response, resend the last one once we have:
   # the retransmission means the UAC has not seen it.
-  def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :INVITE do
+  def handle_cast({:onsipmsg, req, remoteip, remoteport }, state) when is_map(req) and req.method == :INVITE do
+    SIP.Scenario.SipTrace.received(state, req, remoteip, remoteport, retransmit: true)
     case Map.get(state, :rspstr) do
       rspstr when is_binary(rspstr) ->
         Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
                        message: "Retransmitting last response to INVITE"])
+        SIP.Scenario.SipTrace.sent(state, rspstr, retransmit: true)
         sendout_msg(state, rspstr)
 
       _ ->
@@ -102,13 +106,15 @@ defmodule SIP.IST do
     { :noreply, state }
   end
 
-  def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) when is_atom(req.method) do
+  def handle_cast({:onsipmsg, req, remoteip, remoteport }, state) when is_map(req) when is_atom(req.method) do
+    SIP.Scenario.SipTrace.received(state, req, remoteip, remoteport)
     Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
                     message: "Ignoring unsupported SIP request #{req.method}"])
     { :noreply, state }
   end
 
-  def handle_cast({:onsipmsg, rsp, _remoteip, _remoteport }, state) when is_map(rsp) when rsp.method == false do
+  def handle_cast({:onsipmsg, rsp, remoteip, remoteport }, state) when is_map(rsp) when rsp.method == false do
+    SIP.Scenario.SipTrace.received(state, rsp, remoteip, remoteport)
     Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
                     message: "Ignoring unsupported SIP response #{rsp.response}"])
     { :noreply, state }

@@ -58,7 +58,12 @@ defmodule Kelix.Config do
           mediaserver_transport_cc: boolean,
           modules: map,
           control_api: map,
-          metrics: map
+          metrics: map,
+          debug: %{
+            trace_retention: pos_integer,
+            max_traces: pos_integer,
+            max_trace_bytes: pos_integer
+          }
         }
 
   @default_max_message_size 64_000
@@ -72,7 +77,7 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.6.0",
+            user_agent: "Kelixip/1.6.1",
             max_calls: nil,
             # The largest inbound SIP message this node accepts, in bytes. Past it a
             # request is answered 513 instead of being parsed. Read by the framework
@@ -112,7 +117,12 @@ defmodule Kelix.Config do
             mediaserver_transport_cc: false,
             modules: %{},
             control_api: %{},
-            metrics: %{}
+            metrics: %{},
+            # The journals an operator asked for (`kelictl debug <id> on`), kept in
+            # memory by Kelix.Traces: for `trace_retention` seconds once written,
+            # `max_traces` at most, the oldest dropped first, each cut at
+            # `max_trace_bytes` of message text. Lost on restart.
+            debug: %{trace_retention: 3600, max_traces: 100, max_trace_bytes: 1_048_576}
 
   @protos %{"udp" => :udp, "tcp" => :tcp, "tls" => :tls, "wss" => :wss}
   @log_levels ~w(debug info warning error)
@@ -219,6 +229,12 @@ defmodule Kelix.Config do
     # profiles. It cannot reach Kelix.MediaPool — a kelixip surface — so the
     # selection is declared here and called back into.
     Application.put_env(:elixip2, :mediaserver_selector, {Kelix.Router, :media_for_profiles})
+
+    # Where a scenario's journal goes once written: into Kelix.Traces, in memory
+    # and unrendered, for `kelictl debug show` and kelescope to draw — a server
+    # has no working directory an operator reads files from. Read by
+    # SIP.FSL.Host.journal_events/2.
+    Application.put_env(:elixip2, :sequence_output, {Kelix.Traces, :store})
 
     # Which of our addresses to publish to a peer outside, per bound address: the
     # `advertise` of a `[[listen]]` block. Read by `SIP.Transport.publish_ip/2`,
@@ -339,7 +355,7 @@ defmodule Kelix.Config do
          :ok <-
            reject_keys(
              map,
-             ~w(server log listen mediaserver module control_api metrics tls),
+             ~w(server log listen mediaserver module control_api metrics tls debug),
              "config"
            ),
          {:ok, server} <- parse_server(Map.get(map, "server", %{})),
@@ -348,6 +364,7 @@ defmodule Kelix.Config do
          {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")),
          {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")),
          {:ok, tls} <- parse_tls(Map.get(map, "tls")),
+         {:ok, debug} <- parse_debug(Map.get(map, "debug", %{})),
          {:ok, mediaserver} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
@@ -366,7 +383,8 @@ defmodule Kelix.Config do
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
          metrics: metrics,
-         tls: tls
+         tls: tls,
+         debug: debug
        }}
     end
   end
@@ -467,6 +485,26 @@ defmodule Kelix.Config do
   end
 
   defp parse_metrics(_), do: {:error, "[metrics] must be a table"}
+
+  # [debug] — how long, and how many, of the sequence diagrams an operator asked
+  # for are kept in memory (Kelix.Traces). Both optional, both positive.
+  defp parse_debug(%{} = d) do
+    defaults = %__MODULE__{}.debug
+
+    with :ok <- reject_keys(d, ~w(trace_retention max_traces max_trace_bytes), "[debug]"),
+         {:ok, retention} <- opt_pos_integer(d, "trace_retention", "[debug]"),
+         {:ok, max} <- opt_pos_integer(d, "max_traces", "[debug]"),
+         {:ok, bytes} <- opt_pos_integer(d, "max_trace_bytes", "[debug]") do
+      {:ok,
+       %{
+         trace_retention: retention || defaults.trace_retention,
+         max_traces: max || defaults.max_traces,
+         max_trace_bytes: bytes || defaults.max_trace_bytes
+       }}
+    end
+  end
+
+  defp parse_debug(_), do: {:error, "[debug] must be a table"}
 
   # Absent means no checking. Verifying a peer presumes an authority both sides
   # agreed on, which is an interconnect decision and not something a node takes on

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<dialog-info xmlns="urn:ietf:params:xml:ns:dialog-info"
+             version="7" state="full"
+             entity="sip:alice@example.com">
+  <dialog id="123456" call-id="4c2ee1a8" local-tag="3af1c" remote-tag="9b7d0"
+          direction="recipient">
+    <state>confirmed</state>
+    <duration>274</duration>
+    <replaces call-id="a84b4c76e66710" local-tag="1928301774" remote-tag="456887766"/>
+    <referred-by>sip:carol@example.com</referred-by>
+    <route-set>
+      <hop>sip:proxy.example.com;lr</hop>
+    </route-set>
+    <local>
+      <identity display="Alice">sip:alice@example.com</identity>
+      <target uri="sip:alice@pc33.example.com">
+        <param pname="+sip.rendering" pval="yes"/>
+      </target>
+    </local>
+    <remote>
+      <identity display="Bob &amp; Co">sip:bob@example.org</identity>
+      <target uri="sip:bobster@phone21.example.org"/>
+    </remote>
+  </dialog>
+  <dialog id="789012" call-id="b1c2d3e4" local-tag="11aa" remote-tag="22bb"
+          direction="initiator">
+    <state event="rejected" code="486">terminated</state>
+    <remote>
+      <identity>sip:dave@example.org</identity>
+    </remote>
+  </dialog>
+</dialog-info>

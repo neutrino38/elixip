@@ -17,11 +17,12 @@ defmodule Kelix.Control do
 
   # ── read verbs ────────────────────────────────────────────────────────────────
 
-  @doc "Uptime, counters, media-pool and node state (`kelictl status`)."
+  @doc "Version, uptime, counters, media-pool and node state (`kelictl status`)."
   @spec status() :: map
   def status() do
     %{
       node: node(),
+      version: version(),
       uptime_ms: uptime_ms(),
       # Whether this node still tells upstream it takes traffic. A draining node looks
       # healthy in every other line here while answering 503 to the OPTIONS pings, so
@@ -154,6 +155,92 @@ defmodule Kelix.Control do
       {:error, _} -> :ok
     end
   end
+
+  @doc """
+  Subscribe `pid` to one domain's presentities as they change (kelescope's live
+  presence panel) — the model of `subscribe_registrations/2`, answered by the
+  presence module, and an empty list when it is not loaded: nothing can be
+  published nor watched without it, so nothing is missed.
+
+  `domain` is matched the way inbound traffic is — name and aliases,
+  case-insensitively. Returns `%{domain, presentities}`, one row per AOR the
+  domain holds a publication or a watcher for:
+
+      %{domain, aor, presentity_uri, status, activity, note, states, watchers}
+
+  `status` is `"open"`, `"closed"` or `nil`, as a watcher of the `presence`
+  package would be told; `states` and `watchers` are the rows `kelictl presence
+  list` and `kelictl presence watchers` show. `pid` then receives
+  `{:kelix_presence, domain, {:upsert, row}}` (`domain` the canonical name) each
+  time a presentity changes, and `{:kelix_presence, domain, {:remove, aor}}` when
+  nothing is published about it and nobody watches it any more — no polling
+  needed.
+  """
+  @spec subscribe_presence(pid(), String.t()) :: {:ok, map} | {:error, :not_found}
+  def subscribe_presence(pid, domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain) do
+      rows =
+        case presence_facade(:subscribe_presentities, [name, pid], {:ok, []}) do
+          {:ok, rows} when is_list(rows) -> rows
+          _down -> []
+        end
+
+      {:ok, %{domain: name, presentities: rows}}
+    end
+  end
+
+  @doc "Stop a subscription started by `subscribe_presence/2`."
+  @spec unsubscribe_presence(pid(), String.t()) :: :ok
+  def unsubscribe_presence(pid, domain) when is_binary(domain) do
+    case resolve_domain(domain) do
+      {:ok, name} -> presence_facade(:unsubscribe_presentities, [name, pid], :ok)
+      {:error, _} -> :ok
+    end
+
+    :ok
+  end
+
+  defp presence_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("presence", fun, args, default) end, default)
+
+  @doc """
+  Subscribe `pid` to the live calls of a served domain's users, as the
+  `dialog_state` module follows them (docs/design/dialog-state-plan.md §2 — the
+  ACD's feed). Returns the rows as they stand; `pid` then receives
+  `{:kelix_dialogs, domain, {:upsert, row}}` on every transition of a dialog and
+  `{:kelix_dialogs, domain, {:remove, id}}` once it ended, no polling needed.
+
+  `owner` is the process holding the subscription — monitor it and re-subscribe
+  on `:DOWN`, or a module restart stops the push silently. `owner: nil` with an
+  empty list is the answer when the module is not loaded.
+  """
+  @spec subscribe_dialogs(pid(), String.t()) ::
+          {:ok, %{domain: String.t(), owner: pid() | nil, dialogs: [map]}} | {:error, :not_found}
+  def subscribe_dialogs(pid, domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain) do
+      case dialog_state_facade(:subscribe_dialogs, [name, pid], {:ok, %{owner: nil, dialogs: []}}) do
+        {:ok, %{owner: owner, dialogs: rows}} ->
+          {:ok, %{domain: name, owner: owner, dialogs: rows}}
+
+        _down ->
+          {:ok, %{domain: name, owner: nil, dialogs: []}}
+      end
+    end
+  end
+
+  @doc "Stop a subscription started by `subscribe_dialogs/2`."
+  @spec unsubscribe_dialogs(pid(), String.t()) :: :ok
+  def unsubscribe_dialogs(pid, domain) when is_binary(domain) do
+    case resolve_domain(domain) do
+      {:ok, name} -> dialog_state_facade(:unsubscribe_dialogs, [name, pid], :ok)
+      {:error, _} -> :ok
+    end
+
+    :ok
+  end
+
+  defp dialog_state_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("dialog_state", fun, args, default) end, default)
 
   @doc """
   Subscribe `pid` to the conference list as it changes (kelescope's conferencing
@@ -552,6 +639,76 @@ defmodule Kelix.Control do
   end
 
   @doc """
+  Turn the journal of a running scenario on, or write it out now
+  (`kelictl debug <id> on|off`).
+
+  `:on` takes effect at once, in the middle of whatever the scenario is waiting
+  for: the journal starts there, the SIP dialogs already open included, and is
+  kept by `Kelix.Traces` when the scenario ends. `:off` writes it immediately,
+  and the scenario goes on untraced. A scenario busy outside a wait sees the
+  request at its next one; the monitor row's `traced` says when it took it.
+
+  A scenario has **one** journal: FSL starts none again after `:off`, so `:on`
+  for an instance whose journal is already kept answers
+  `{:error, :journal_written}` rather than an `:ok` that would do nothing.
+  """
+  @spec debug_scenario(pos_integer, :on | :off) ::
+          :ok | {:error, :not_found} | {:error, :journal_written}
+  def debug_scenario(id, :on) when is_integer(id) do
+    if safe(fn -> Kelix.Traces.has?(id) end, false),
+      do: {:error, :journal_written},
+      else: Kelix.InstancePool.journal(id, :on)
+  end
+
+  def debug_scenario(id, :off) when is_integer(id), do: Kelix.InstancePool.journal(id, :off)
+
+  @doc "Same as `debug_scenario/2`, logging who asked (`admin`), like `shutdown_scenario/2`."
+  @spec debug_scenario(pos_integer, :on | :off, String.t() | nil) ::
+          :ok | {:error, :not_found} | {:error, :journal_written}
+  def debug_scenario(id, op, admin) when is_integer(id) do
+    result = debug_scenario(id, op)
+
+    Logger.info(
+      module: __MODULE__,
+      message: "debug_scenario #{id} #{op} by admin=#{admin || "unknown"}: #{inspect(result)}"
+    )
+
+    result
+  end
+
+  @doc """
+  The journals kept in memory (`kelictl debug list`), oldest first, as
+  summaries: instance id, scenario, domain, script, when written and until when
+  kept, whether the instance still runs, SIP messages, size.
+  """
+  @spec traces() :: [map]
+  def traces(), do: safe(fn -> Kelix.Traces.list() end, [])
+
+  @doc """
+  The journal of instance `id` (`kelictl debug show <id>`, kelescope's popup):
+  its summary plus `meta` and `events`, **unrendered** — the `FSL.Journal`
+  events, SIP messages with their text. The reader draws it.
+  """
+  @spec trace(pos_integer) :: {:ok, map} | {:error, :not_found}
+  def trace(id) when is_integer(id),
+    do: safe(fn -> Kelix.Traces.get(id) end, {:error, :not_found})
+
+  @doc """
+  Subscribe `pid` to the kept journals (kelescope's panel), on the model of
+  `subscribe_monitor/1`: returns `%{limits: …, traces: [summary]}`, then `pid`
+  receives `{:kelix_traces, {:upsert, summary}}` when a journal is kept and when
+  its instance ends, and `{:kelix_traces, {:remove, id}}` when it expires or is
+  evicted. `pid` may be on another node; a dead subscriber is dropped.
+  """
+  @spec subscribe_traces(pid) :: map
+  def subscribe_traces(pid),
+    do: safe(fn -> Kelix.Traces.subscribe(pid) end, %{limits: %{}, traces: []})
+
+  @doc "Stop a subscription started by `subscribe_traces/1`."
+  @spec unsubscribe_traces(pid) :: :ok
+  def unsubscribe_traces(pid), do: safe(fn -> Kelix.Traces.unsubscribe(pid) end, :ok)
+
+  @doc """
   Reload one or more scenario scripts by name (`kelictl reload-script <name…>`).
   Returns `%{name => :ok | {:error, reason}}`. `notify?` is accepted for parity
   with the spec (in-progress-instance notification is a roadmap refinement).
@@ -901,25 +1058,66 @@ defmodule Kelix.Control do
   # re-parses the tokens) sees one answer. A bare token spelling a declared name
   # stays the flag it always was, and one left over once every declared argument
   # is bound is passed through for the module to refuse.
+  #
+  # A bare `user@domain` is an AOR, as `registration show` reads one: for a command
+  # declaring both `aor` and `domain` it binds the two (`presence show
+  # bob@weshwesh.eu`). With the domain already bound, the user part alone is the
+  # AOR when both name the same domain; otherwise the token is kept whole, and the
+  # module answers for an AOR it does not hold rather than for another domain's bob.
   defp bind_positional(module, cmd, %{"args" => tokens} = args) when is_list(tokens) do
     declared = declared_args(module, cmd)
     free = Enum.reject(declared, &Map.has_key?(args, &1))
 
     {tokens, {args, _free}} =
-      Enum.map_reduce(tokens, {args, free}, fn
-        token, {acc, [name | rest]} = unchanged when is_binary(token) ->
-          if String.contains?(token, "=") or token in declared,
-            do: {token, unchanged},
-            else: {"#{name}=#{token}", {acc |> Map.delete(token) |> Map.put(name, token), rest}}
+      Enum.flat_map_reduce(tokens, {args, free}, fn
+        token, {acc, free} = unchanged when is_binary(token) and free != [] ->
+          cond do
+            String.contains?(token, "=") or token in declared ->
+              {[token], unchanged}
+
+            "aor" in free and String.contains?(token, "@") ->
+              bind_aor(token, Map.delete(acc, token), free)
+
+            true ->
+              [name | rest] = free
+              {["#{name}=#{token}"], {acc |> Map.delete(token) |> Map.put(name, token), rest}}
+          end
 
         token, unchanged ->
-          {token, unchanged}
+          {[token], unchanged}
       end)
 
     Map.put(args, "args", tokens)
   end
 
   defp bind_positional(_module, _cmd, args), do: args
+
+  defp bind_aor(token, args, free) do
+    [user, domain] = String.split(token, "@", parts: 2)
+    free = List.delete(free, "aor")
+
+    cond do
+      "domain" in free ->
+        args = args |> Map.put("domain", domain) |> Map.put("aor", user)
+        {["domain=#{domain}", "aor=#{user}"], {args, List.delete(free, "domain")}}
+
+      same_domain?(domain, Map.get(args, "domain")) ->
+        {["aor=#{user}"], {Map.put(args, "aor", user), free}}
+
+      true ->
+        {["aor=#{token}"], {Map.put(args, "aor", token), free}}
+    end
+  end
+
+  # Alias-aware when the node serves the two names, literal otherwise.
+  defp same_domain?(a, b) when is_binary(a) and is_binary(b) do
+    case {resolve_domain(a), resolve_domain(b)} do
+      {{:ok, name}, {:ok, name}} -> true
+      _ -> String.downcase(a) == String.downcase(b)
+    end
+  end
+
+  defp same_domain?(_a, _b), do: false
 
   defp declared_args(module, cmd) do
     if function_exported?(module, :describe_control, 0) do
@@ -935,6 +1133,16 @@ defmodule Kelix.Control do
   # ── helpers ───────────────────────────────────────────────────────────────────
 
   defp uptime_ms(), do: elem(:erlang.statistics(:wall_clock), 0)
+
+  # Read from the running application's own spec, so it is the code the queried node
+  # is executing — not what the package on its disk says, which after an upgrade
+  # without restart is a different version.
+  defp version() do
+    case Application.spec(:kelixip, :vsn) do
+      nil -> "unknown"
+      vsn -> List.to_string(vsn)
+    end
+  end
 
   defp domain_names() do
     safe(fn -> Enum.map(Kelix.Domains.current().domains, & &1.name) end, [])

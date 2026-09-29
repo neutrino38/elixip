@@ -176,12 +176,12 @@ defmodule Kelix.PresenceScriptTest do
 
   # The event package is injected by the router, exactly as the domain name is:
   # the script is the domain's, the package is the block's.
-  defp spawn_instance(module, dialog, req) do
+  defp spawn_instance(module, dialog, req, package \\ @package) do
     {pid, _ref} =
       SIP.Scenario.Runner.spawn_uas_instance(module,
         dialog_pid: dialog,
         inbound_request: req,
-        config_overrides: [domain: @domain, event_package: @package]
+        config_overrides: [domain: @domain, event_package: package]
       )
 
     on_exit(fn -> send(pid, {:scenario_ctl, :shutdown, :test}) end)
@@ -248,17 +248,48 @@ defmodule Kelix.PresenceScriptTest do
       assert Presence.presentities(@domain) == []
     end
 
-    # bob is provisioned and proves it; the presentity he publishes about is not.
-    # The sender being someone else is the only way to reach this refusal now —
-    # a PUBLISH whose sender is unknown never gets past the digest.
-    test "a presentity nobody provisioned is 404", %{publish: m} do
+    # alice is provisioned and proves it: that makes her the authority on HER
+    # state, not on bob's.
+    test "a PUBLISH about someone else is 403, and nothing is published", %{publish: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = publish(user: @presentity, sender: @watcher)
+      pid = spawn_instance(m, dialog, req)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          submit(pid, dialog, req)
+          assert_receive {:replied, 403, "Forbidden", _, _}, 1000
+        end)
+
+      assert log =~ "PUBLISH for sip:bob@example.com by sip:alice@example.com refused"
+      assert Presence.presentities(@domain) == []
+    end
+
+    test "so is a PUBLISH about a user nobody provisioned", %{publish: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       req = publish(user: "nobody", sender: @presentity)
       pid = spawn_instance(m, dialog, req)
 
       submit(pid, dialog, req)
-      assert_receive {:replied, 404, _, _, _}, 1000
+      assert_receive {:replied, 403, _, _, _}, 1000
       assert Presence.presentities(@domain) == []
+    end
+
+    # The journal says whose state changed, and to what.
+    test "the log names the presentity, the new state and the tag", %{publish: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, publish())
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          submit(pid, dialog, publish())
+          assert_receive {:replied, 200, _, fields, _}, 1000
+          send(self(), {:etag, fields[:sipetag]})
+          Process.sleep(50)
+        end)
+
+      assert_received {:etag, etag}
+      assert log =~ "PUBLISH presence for sip:bob@example.com: new: open (etag #{etag}, 3600s)"
     end
 
     test "a store that is down answers 503 — never silence", %{publish: m} do
@@ -272,6 +303,12 @@ defmodule Kelix.PresenceScriptTest do
   end
 
   describe "presence-subscribe.exs" do
+    # A subscriber nobody publishes about is closed only on a domain that has a
+    # registrar — anywhere else it has no state, which is `noresource`.
+    setup do
+      serve_registrar_domain()
+    end
+
     test "SUBSCRIBE → 200 + NOTIFY carrying the state as it stands", %{subscribe: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       pid = spawn_instance(m, dialog, subscribe())
@@ -288,6 +325,19 @@ defmodule Kelix.PresenceScriptTest do
       # than left waiting for a NOTIFY that would never come.
       assert_receive {:notified, body, "application/pidf+xml"}, 1000
       assert body =~ "closed"
+    end
+
+    test "the log names the watcher, the presentity and the state notified", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          submit(pid, dialog, subscribe())
+          assert_receive {:notified, _body, _}, 1000
+        end)
+
+      assert log =~ "NOTIFY presence to sip:alice@example.com about sip:bob@example.com: closed"
     end
 
     test "one PUBLISH becomes one NOTIFY on the watcher's dialog", %{subscribe: sub, publish: pub} do
@@ -342,6 +392,76 @@ defmodule Kelix.PresenceScriptTest do
       assert row.callid == "call-1"
     end
 
+    # RFC 4235 through the same script: the package is the block's, injected by
+    # the router as the domain is. An idle subscriber is an EMPTY document, not
+    # noresource (dialog-state-plan.md, decision 7): the BLF key shows "no call".
+    test "Event: dialog for a subscriber is 200 + an empty dialog-info", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = subscribe(event: "dialog")
+      pid = spawn_instance(m, dialog, req, "dialog")
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, body, "application/dialog-info+xml"}, 1000
+      assert body =~ ~s(entity="sip:bob@example.com")
+      refute body =~ "<dialog "
+      refute_received {:subscription_ended, _}
+
+      assert [row] = Presence.watchers(@domain, @presentity)
+      assert row.event == "dialog"
+    end
+
+    test "Event: dialog for a user nobody provisioned is 404", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = subscribe(user: "nobody", event: "dialog")
+      pid = spawn_instance(m, dialog, req, "dialog")
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 404, _, _, _}, 1000
+      assert Presence.watchers(@domain, "nobody") == []
+    end
+
+    # A DID is no subscriber: it exists because a module reports a state for it.
+    test "a resource another module reports is served, and ends when it goes",
+         %{subscribe: m} do
+      room = SIP.Presence.Doc.new("sip:8001@#{@domain}", :open, activity: :busy)
+      reporter = reporter_process()
+      :ok = report_from(reporter, "8001", room)
+
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = subscribe(user: "8001")
+      pid = spawn_instance(m, dialog, req)
+      submit(pid, dialog, req)
+
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, body, "application/pidf+xml"}, 1000
+      assert body =~ "open"
+      assert body =~ "busy"
+
+      # the room is destroyed under its watcher
+      :ok = report_from(reporter, "8001", nil)
+      assert_receive {:subscription_ended, :noresource}, 1000
+      refute_received {:notified, _, _}
+
+      # the dialog hands back the end it was asked for; the instance stops watching
+      send(pid, {:subscription_terminated, make_ref(), :noresource})
+      assert eventually(fn -> Presence.watchers(@domain, "8001") == [] end)
+    end
+
+    test "the reporter going away ends the subscription the same way", %{subscribe: m} do
+      reporter = reporter_process()
+      :ok = report_from(reporter, "8001", SIP.Presence.Doc.new("sip:8001@#{@domain}", :open))
+
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = subscribe(user: "8001")
+      pid = spawn_instance(m, dialog, req)
+      submit(pid, dialog, req)
+      assert_receive {:notified, _open, _}, 1000
+
+      send(reporter, :stop)
+      assert_receive {:subscription_ended, :noresource}, 1000
+    end
+
     # The dialog owns the end of a subscription: it sends the final NOTIFY and
     # hands the scenario exactly one of these. The script's part is to stop
     # watching — and the collection's monitor is the net under it.
@@ -354,6 +474,20 @@ defmodule Kelix.PresenceScriptTest do
 
       send(pid, {:subscription_terminated, make_ref(), :timeout})
       assert eventually(fn -> Presence.watchers(@domain, @presentity) == [] end)
+    end
+  end
+
+  # Decision 2 of mcu-presence-plan.md: a watcher waiting on an explicitly closed
+  # state for a resource that has none waits for nothing.
+  describe "presence-subscribe.exs on a domain with no registrar" do
+    test "a subscriber with no state is answered noresource", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      submit(pid, dialog, subscribe())
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:subscription_ended, :noresource}, 1000
+      refute_received {:notified, _, _}
     end
   end
 
@@ -469,6 +603,150 @@ defmodule Kelix.PresenceScriptTest do
       assert row.presentity_uri == bob_uri()
       assert Presence.watchers("visioassistance.net", "900020123") == []
     end
+  end
+
+  # mcu-presence-plan.md, MP4: a conference room is a presentity. The MCU, the
+  # link module and the presence collection all run; the watcher is the reference
+  # notifier script, alone on the room's DID and through a buddy list.
+  describe "a conference room as a presentity" do
+    @room "8001"
+
+    setup do
+      Kelix.Test.Fixtures.serve_domains("""
+      [[domain]]
+      name = "#{@domain}"
+
+        [[domain.presence]]
+        event-package = "presence"
+        subscribe = "presence-subscribe.exs"
+      """)
+
+      {:ok, config} = Kelix.Mod.Mcu.Config.parse(%{"did_range" => "8000-8002"})
+
+      start_supervised!(
+        {Kelix.Mod.Mcu,
+         config: config,
+         module_name: "mcu",
+         mediaservers: [%{name: "mcu1", url: "http://127.0.0.1:18080"}]}
+      )
+
+      start_supervised!(
+        {Kelix.Mod.Mcu.Client,
+         name: "mcu1",
+         base_url: "http://127.0.0.1:18080",
+         transport: Kelix.Mcu.TestStub.transport(self(), %{}),
+         register: {Kelix.Mod.Mcu, "mcu1"},
+         reconnect_ms: 0},
+        id: :client_mcu1
+      )
+
+      SIP.Test.Wait.until!(fn ->
+        match?({:ok, %{status: :up}}, Kelix.Mod.Mcu.mediaserver("mcu1"))
+      end)
+
+      start_supervised!({Kelix.Mod.McuPresence, retry_ms: 20})
+
+      {:ok, conf} =
+        Kelix.Mod.Mcu.create_conference(@domain, did: @room, max_participants: 2, owner: :none)
+
+      assert eventually(fn -> Presence.exists?(@domain, @room) end)
+      %{conf: conf}
+    end
+
+    test "alone: open, busy when full, closed while lost, then noresource",
+         %{subscribe: m, conf: conf} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = subscribe(user: @room)
+      pid = spawn_instance(m, dialog, req)
+      submit(pid, dialog, req)
+
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert room_state() == {"open", nil}
+
+      # filled to max_participants: busy; a leg leaves: open
+      _alice = join_room(conf, "alice")
+      bob = join_room(conf, "bob")
+      assert room_state() == {"open", "busy"}
+
+      :ok = Kelix.Mod.Mcu.leave(bob, :bye)
+      assert room_state() == {"open", nil}
+
+      # its media server lost, then back
+      {:ok, %{client: client}} = Kelix.Mod.Mcu.mediaserver("mcu1")
+      :ok = Kelix.Mod.Mcu.Client.renew_queue(client, Kelix.Mod.Mcu.Client.queue_id(client))
+      assert room_state() == {"closed", nil}
+      assert room_state() == {"open", nil}
+
+      # destroyed under its watcher
+      :ok = Kelix.Mod.Mcu.destroy_conference(conf.uid, force: true)
+      assert_receive {:subscription_ended, :noresource}, 1000
+    end
+
+    test "a DID that is no room is a 404", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = subscribe(user: "8002")
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 404, _, _, _}, 1000
+    end
+
+    test "through a list: the room is an entry, noresource once destroyed",
+         %{rls: m, conf: conf} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe(["sip:#{@room}@#{@domain}"])
+      pid = spawn_instance(m, dialog, req)
+      submit(pid, dialog, req)
+
+      assert_receive {:notified, body, content_type}, 1000
+      assert list_entry(body, content_type) == {"active", nil}
+
+      :ok = Kelix.Mod.Mcu.destroy_conference(conf.uid, force: true)
+
+      assert_receive {:notified, body, content_type}, 2000
+      assert list_entry(body, content_type) == {"terminated", "noresource"}
+    end
+  end
+
+  # What the room's watcher was NOTIFYed: `{basic, activity}`.
+  defp room_state() do
+    assert_receive {:notified, body, "application/pidf+xml"}, 2000
+    {:ok, doc} = SIP.Presence.Pidf.parse(body)
+
+    {doc |> SIP.Presence.Doc.status() |> to_string(), doc.activity && to_string(doc.activity)}
+  end
+
+  # The one entry of a list NOTIFY, as its RLMI manifest names it.
+  defp list_entry(body, content_type) do
+    {manifest, _parts} = read_list(body, content_type)
+    [resource] = manifest.resources
+    [instance] = resource.instances
+    {to_string(instance.state), instance.reason}
+  end
+
+  defp join_room(conf, user) do
+    req = %{
+      method: :INVITE,
+      ruri: %SIP.Uri{userpart: conf.did, domain: @domain},
+      from: %SIP.Uri{userpart: user, domain: "phone.example.com"}
+    }
+
+    {:ok, _conf, part} = Kelix.Mod.Mcu.admit(@domain, req)
+    {:ok, client} = Kelix.Mod.Mcu.Adapter.connect("mcu://" <> conf.mcu)
+
+    {:ok, conn} =
+      Kelix.Mod.Mcu.Adapter.create_peer_connection(client, self(),
+        mcu_participant: part,
+        media: :audio
+      )
+
+    offer =
+      "v=0\r\no=- 1 1 IN IP4 192.168.1.50\r\ns=-\r\nc=IN IP4 192.168.1.50\r\nt=0 0\r\n" <>
+        "m=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+
+    {:ok, _answer} = Kelix.Mod.Mcu.Adapter.set_remote_offer(conn, offer)
+    :ok = Kelix.Mod.Mcu.attach(part)
+    part
   end
 
   # The digest itself, on both halves. It is what says WHO is watching and WHOSE
@@ -620,6 +898,10 @@ defmodule Kelix.PresenceScriptTest do
   end
 
   describe "authentication" do
+    setup do
+      serve_registrar_domain()
+    end
+
     test "an unauthenticated SUBSCRIBE is challenged, and nothing is watched", %{subscribe: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       pid = spawn_instance(m, dialog, subscribe())
@@ -718,6 +1000,51 @@ defmodule Kelix.PresenceScriptTest do
     assert root.contenttype == "application/rlmi+xml"
     {:ok, manifest} = SIP.Presence.Rlmi.parse(root.data)
     {manifest, rest}
+  end
+
+  defp serve_registrar_domain() do
+    Kelix.Test.Fixtures.serve_domains("""
+    [[domain]]
+    name = "example.com"
+
+      [domain.registrar]
+      script = "registrar.exs"
+
+      [[domain.presence]]
+      event-package = "presence"
+      subscribe = "presence-subscribe.exs"
+
+      [[domain.presence]]
+      event-package = "dialog"
+      subscribe = "presence-subscribe.exs"
+    """)
+
+    :ok
+  end
+
+  # A stand-in reporting module: `report/4` monitors its caller, so the report
+  # has to come from a process whose death a test can decide.
+  defp reporter_process() do
+    pid = spawn(&reporter_loop/0)
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    pid
+  end
+
+  defp reporter_loop() do
+    receive do
+      {:report, from, user, doc} ->
+        send(from, {:reported, self(), Presence.report(@domain, user, :mcu, doc)})
+        reporter_loop()
+
+      :stop ->
+        :ok
+    end
+  end
+
+  defp report_from(reporter, user, doc) do
+    send(reporter, {:report, self(), user, doc})
+    assert_receive {:reported, ^reporter, result}
+    result
   end
 
   defp eventually(fun, attempts \\ 20) do

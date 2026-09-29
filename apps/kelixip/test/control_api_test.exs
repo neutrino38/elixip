@@ -31,6 +31,7 @@ defmodule Kelix.ControlAPITest do
       assert conn.status == 200
       b = body(conn)
       assert b["node"] == to_string(node())
+      assert b["version"] == to_string(Application.spec(:kelixip, :vsn))
       assert is_integer(b["uptime_ms"])
       assert is_map(b["instances"])
     end
@@ -116,6 +117,48 @@ defmodule Kelix.ControlAPITest do
     test "POST /scenarios/:id/shutdown on an unknown id → 404" do
       conn = call(conn(:post, "/scenarios/999999/shutdown"))
       assert conn.status == 404
+    end
+
+    test "POST /scenarios/:id/debug: unknown id → 404, bad body → 400" do
+      json = &conn(:post, "/scenarios/999999/debug", Jason.encode!(&1))
+      put_json = &put_req_header(json.(&1), "content-type", "application/json")
+
+      assert call(put_json.(%{enabled: true})).status == 404
+      assert call(put_json.(%{enabled: "yes"})).status == 400
+      assert call(put_json.(%{})).status == 400
+    end
+
+    test "GET /traces/:id answers the journal itself, its secrets masked" do
+      events = [%{kind: :command, at: 5, type: :sip, name: "send_INVITE"}]
+
+      meta = %{
+        slot: 424_242,
+        scenario: "X",
+        pid: "p",
+        t0: 0,
+        config: [username: "bob", passwd: "s3cret"]
+      }
+
+      {:ok, _} = Kelix.Traces.store(events, meta)
+
+      conn = call(conn(:get, "/traces/424242"))
+      assert conn.status == 200
+      trace = body(conn)
+
+      assert trace["id"] == 424_242
+      assert [%{"kind" => "command", "name" => "send_INVITE"}] = trace["events"]
+      assert trace["meta"]["config"] == %{"username" => "bob", "passwd" => "****"}
+      refute conn.resp_body =~ "s3cret"
+      assert {:ok, _, _} = DateTime.from_iso8601(trace["expires_at"])
+    end
+
+    test "GET /traces is a list; GET /traces/:id → 404 unknown, 400 not an id" do
+      conn = call(conn(:get, "/traces"))
+      assert conn.status == 200
+      assert is_list(body(conn))
+
+      assert call(conn(:get, "/traces/999999")).status == 404
+      assert call(conn(:get, "/traces/abc")).status == 400
     end
 
     test "POST /scenarios/:id/shutdown with a non-integer id → 400" do

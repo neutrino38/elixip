@@ -14,6 +14,10 @@
 # its own writes it in `authorize`, next to that question — a
 # `reject_subscription(403, "Forbidden")` in the same place, with the
 # authenticated identity already in the context.
+#
+# A presentity with no state — a room destroyed under its watcher, a user on a
+# domain with no registrar — ends the subscription with `noresource` rather than
+# with an explicitly closed state a watcher would wait on for nothing.
 defmodule Kelix.PresenceSubscribe do
   use SIP.Scenario
   use Kelix.Mod.AuthDb
@@ -85,7 +89,8 @@ defmodule Kelix.PresenceSubscribe do
   end
 
   # May this watcher watch? The only check this reference makes is that the
-  # presentity exists in the subscriber base: subscribing to a user nobody
+  # presentity exists — a subscriber of this deployment, or a resource another
+  # module reports a state for, a conference room: subscribing to one nobody
   # provisioned is 404, not an empty state a watcher would wait on for an hour.
   #
   # The SUBSCRIBE itself needs no carrying around: on_events stores the inbound
@@ -93,7 +98,7 @@ defmodule Kelix.PresenceSubscribe do
   state authorize do
     req = last_uas_req()
 
-    if Kelix.Mod.AuthDb.subscriber?(SIP.Msg.Ops.target_aor(req), sip_ctx.domain) do
+    if Kelix.Mod.Presence.exists?(sip_ctx, SIP.Msg.Ops.target_aor(req)) do
       goto(subscribe, "presentity exists")
     else
       reject_subscription(404, "Not Found")
@@ -108,12 +113,18 @@ defmodule Kelix.PresenceSubscribe do
          ) do
       {:ok, sub} ->
         # The framework holds THIS subscription; the module holds who watches
-        # what. Registering hands back the state as it stands — nil when nothing
-        # has been published about the resource yet, which a watcher is told as
-        # an explicitly closed state rather than by silence.
+        # what. Registering hands back the state as it stands — nil when the
+        # resource has none at all, which ends the subscription: the dialog sends
+        # the final NOTIFY, `terminated;reason=noresource`.
         case Kelix.Mod.Presence.watch(sip_ctx, sub) do
+          {:ok, nil} ->
+            trace_notify(sub, nil)
+            terminate_subscription(:noresource)
+            goto(ending, "200 + NOTIFY noresource")
+
           {:ok, doc} ->
-            notify(doc || SIP.Presence.Doc.new(sub.presentity_uri, :closed))
+            trace_notify(sub, doc)
+            notify(doc)
             goto(subscribed, "200 + NOTIFY")
 
           {:error, reason} ->
@@ -135,10 +146,16 @@ defmodule Kelix.PresenceSubscribe do
     on_events do
       # The fan-out: one PUBLISH became one push per watcher, and each watcher
       # sends its own NOTIFY from its own state (DESIGN-PRESENCE.md, decision 1).
-      # `nil` means nothing is published about the resource any more.
+      # `nil` means the resource has no state any more — a room destroyed, the
+      # module that reported it gone — and ends the subscription.
+      {:presence, :state, _resource, nil} ->
+        trace_notify(last_subscription(), nil)
+        terminate_subscription(:noresource)
+        goto(ending, "state gone: noresource")
+
       {:presence, :state, _resource, doc} ->
-        sub = last_subscription()
-        notify(doc || SIP.Presence.Doc.new(sub.presentity_uri, :closed))
+        trace_notify(last_subscription(), doc)
+        notify(doc)
         stay("state pushed")
 
       # A refresh is another SUBSCRIBE on the same dialog: negotiated again,
@@ -159,6 +176,40 @@ defmodule Kelix.PresenceSubscribe do
       {:dialog_terminated, _dialog_pid, _reason} ->
         scenario_success("dialog ended")
     end
+  end
+
+  # We ended the subscription: the dialog sends the final NOTIFY and hands back
+  # the one `:subscription_terminated` every end produces.
+  state ending do
+    on_events do
+      {:subscription_terminated, _ref, reason} ->
+        Kelix.Mod.Presence.unwatch(sip_ctx)
+        scenario_success("subscription ended: #{reason}")
+
+      {:presence, :state, _resource, _doc} ->
+        stay("subscription ending")
+
+      {:dialog_terminated, _dialog_pid, :transport_down} ->
+        scenario_aborted("watcher connection lost")
+
+      {:dialog_terminated, _dialog_pid, _reason} ->
+        scenario_success("dialog ended")
+    after
+      32_000 ->
+        Kelix.Mod.Presence.unwatch(sip_ctx)
+        scenario_failure("subscription did not end")
+    end
+  end
+
+  # One line per NOTIFY: to whom, about whom, on which package, saying what.
+  defp trace_notify(sub, doc) do
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "NOTIFY #{sub.event} to #{SIP.Subscription.watcher_uri(sub)} " <>
+          "about #{sub.presentity_uri}: " <>
+          if(doc, do: SIP.EventPackage.summary(doc), else: "no state, ending (noresource)")
+    )
   end
 
   # Cooperative shutdown (§5.3). The collection drops us on its own — it monitors

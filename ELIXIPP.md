@@ -486,21 +486,37 @@ missing sub-scenario file, a misspelled macro.
 ## Sequence diagram (`--log-sequence`)
 
 A PlantUML sequence diagram of an instance can be produced either with
-`--log-sequence`, or by setting the debug flag in the scenario itself:
+`--log-sequence`, or by setting the debug flag in the scenario itself — in its
+`config` block, or from any state:
 
 ```elixir
-ctx_set(:debug, true)
+config username: "bob", domain: "mydomain.com", debug: true
+
+state initial_state do
+  ctx_set(:debug, true)
+  ...
 ```
 
-Either way, one file per instance is written, named `<scenario>_<pid>.puml` (the pid
-sanitized to digits and dots). It opens with the SIP configuration applied —
-passwords masked — as PlantUML comments, then renders every command sent, every state
-transition and the terminal outcome. It is restricted to a **single simultaneous
-instance** (refused with `--limit > 1`), since one file is written per instance.
+Either way, one file per instance is written in the current directory, named
+`<scenario>_<pid>.puml` (the pid sanitized to digits and dots). It opens with the
+SIP configuration applied — passwords masked — as PlantUML comments, then draws
+the run in the order it happened, every line prefixed with the time since the
+instance started:
 
-The fidelity is deliberately coarse (v1): outbound commands become request arrows
-(`send_INVITE` → `INVITE`), state changes become notes, and a transition triggered by
-a SIP event carries its description as an inbound arrow.
+- **every SIP message the instance's dialogs sent or received**, as the
+  transaction layer saw it: a solid arrow for a request (`INVITE #1 +SDP`, the
+  CSeq number, `+SDP` when it carried an offer or answer), a dashed one for a
+  response (`200 OK / 1 INVITE`), a grey one for a retransmission. One
+  participant per Call-ID, labelled with the leg tag when the framework gave the
+  dialog one (`outbound` for a B2BUA's far leg) and the peer address and
+  transport (`10.0.0.1:5060/udp`), so a B2BUA shows its two legs side by side and
+  a registration next to a call gets a lane of its own. The header lists the
+  Call-ID behind each lane;
+- the commands the script issued (`send_INVITE`, `send_BYE`, …), as hexagon
+  notes beside the arrows they produced, so a script line can be matched to what
+  went out;
+- the media commands and events, against a `media server` lane;
+- the state transitions, as notes, and the terminal outcome in green or pink.
 
 ```plantuml
 ' Scenario      : UAC.Invite
@@ -509,19 +525,43 @@ a SIP event carries its description as an inbound arrow.
 '   username: "bob"
 '   domain: "mydomain.com"
 '   passwd: ****
+' Peers (one per conversation):
+'   peer1: 10.0.0.1:5060/udp — 4f3a…@10.0.0.7
 '
 @startuml
-participant "bob" as elixip
-participant "mydomain.com" as peer
+participant "bob" as local
+participant "10.0.0.1:5060/udp" as peer1
 
-note over elixip : initial_state
-note over elixip : initial_state -> calling
-elixip -> peer : INVITE
-elixip <-- peer : 200 OK
-note over elixip : calling -> answered
-note over elixip #LightGreen : succeeded: answered
+note over local : +0ms initial_state
+note over local : +1ms initial_state -> calling
+hnote over local : +2ms send_INVITE
+local -> peer1 : +3ms INVITE #1 +SDP
+peer1 --> local : +9ms 100 Trying / 1 INVITE
+peer1 --> local : +110ms 180 Ringing / 1 INVITE
+peer1 --> local : +412ms 200 OK / 1 INVITE +SDP
+local -> peer1 : +413ms ACK #1
+note over local : +414ms calling -> answered
+note over local #LightGreen : +415ms succeeded: answered
 @enduml
 ```
+
+What is drawn is what went through the transactions of the dialogs bound to the
+instance: retransmissions included, the ACK and CANCEL the transaction layer
+builds itself included. Two things are not: a message the dialog layer answers
+statelessly, without a transaction (a 481 to a request no dialog matches), and
+the OPTIONS a proxy sends outside any dialog. The flag set from a state applies
+from that state on: a dialog opened before it is traced from then on, the
+messages it exchanged before are not, and the diagram then opens on the
+transition that followed. Set it in the `config` block, or in `initial_state`,
+for a complete picture.
+
+It is restricted to a **single simultaneous instance** (refused with
+`--limit > 1`), since one file is written per instance.
+
+Without a traced message — a scenario that never reached the SIP stack — the
+diagram falls back to what the script reported: outbound commands become request
+arrows (`send_INVITE` → `INVITE`) and a transition triggered by a SIP event
+carries its description as an inbound arrow.
 
 ## Under the hood (elixipp)
 

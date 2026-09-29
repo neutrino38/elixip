@@ -430,6 +430,64 @@ defmodule SIP.FSL.Host do
   defp variable?({name, _meta, ctx_arg}) when is_atom(name) and is_atom(ctx_arg), do: true
   defp variable?(_), do: false
 
+  # ── The sequence journal ────────────────────────────────────────────────────
+
+  @doc """
+  The journal of this instance has just started: trace its SIP messages.
+
+  The messages go through the dialog and transaction processes, never through
+  this one, so `SIP.Scenario.SipTrace` records them there for whoever watches.
+  Watching is this process declaring itself; its dialogs bind to it as they
+  learn their application. Two things predate the journal and are caught up
+  here: the dialogs already open — the one in the context (a UAS instance's, or
+  a UAC's when `debug` was set mid-run) and a B2BUA's outbound legs, each with
+  its leg tag — adopted; and the request a UAS instance was spawned for, which
+  crossed its transaction before anybody traced, recorded directly.
+  """
+  @impl true
+  def journal_started(sip_ctx) do
+    :ok = SIP.Scenario.SipTrace.watch()
+    # The monitor row says so, for kelictl and kelescope (`traced`).
+    FSL.Monitor.note(:traced, true)
+
+    if is_pid(Map.get(sip_ctx, :dialogpid)),
+      do: SIP.Scenario.SipTrace.adopt(sip_ctx.dialogpid)
+
+    for {tag, pid} <- SIP.Session.B2bua.leg_dialogs(sip_ctx),
+        do: SIP.Scenario.SipTrace.adopt(pid, tag)
+
+    with %{} = req <- inbound_request(sip_ctx),
+         %{} = event <- SIP.Scenario.SipTrace.event(:in, req) do
+      SIP.Scenario.SequenceJournal.record(event)
+    end
+
+    :ok
+  end
+
+  @doc "The SIP messages traced for this instance, handed to the journal and forgotten."
+  @impl true
+  def journal_collect, do: SIP.Scenario.SipTrace.take()
+
+  @doc """
+  Where a finished journal goes: to the `{module, function}` named by the
+  `:elixip2, :sequence_output` application env, called with the events and the
+  journal's metadata, **unrendered** — kelixip keeps them in memory for its
+  operator (`Kelix.Traces`), and each reader draws them its own way. Without
+  one, `:default`: FSL renders the diagram to a file in the working directory,
+  as `elixipp --log-sequence` has always written.
+
+  Either way the instance's journal is over, and its monitor row says so.
+  """
+  @impl true
+  def journal_events(events, meta) do
+    FSL.Monitor.note(:traced, false)
+
+    case Application.get_env(:elixip2, :sequence_output) do
+      {module, fun} -> apply(module, fun, [events, meta])
+      nil -> :default
+    end
+  end
+
   # ── The monitor's columns ───────────────────────────────────────────────────
 
   @doc """
@@ -447,5 +505,6 @@ defmodule SIP.FSL.Host do
   "nobody measured".
   """
   @spec monitor_columns() :: keyword()
-  def monitor_columns, do: [medias: "n/a", mediaserver: "none", outbound: "n/a"]
+  def monitor_columns,
+    do: [medias: "n/a", mediaserver: "none", outbound: "n/a", traced: false]
 end

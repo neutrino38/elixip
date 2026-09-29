@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.6.0"
+# user_agent = "Kelixip/1.6.1"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 # max_message_size = 64000   # biggest inbound SIP message, in bytes; 513 beyond it
 
@@ -92,6 +92,16 @@ port = 9095
 #port  = 8090
 #auth  = "token"
 #token = "CHANGE-ME"
+
+# Journals of live scenarios: `kelictl debug <id> on` turns one on, `kelictl debug
+# show <id>` prints it. They are kept in MEMORY only, and a restart loses them. A
+# journal is kept `trace_retention` seconds after it is written, `max_traces` of
+# them at most, the oldest dropped first, each cut at `max_trace_bytes` of SIP
+# message text.
+#[debug]
+#trace_retention = 3600
+#max_traces      = 100
+#max_trace_bytes = 1048576
 
 # Loadable modules — one block per module to load, from module_dir. Nothing is
 # loaded by default: install the matching kelixip-mod-* package first, or the
@@ -193,6 +203,18 @@ port = 9095
 #message_queue_max = 100            # skip a leg whose script is that far behind
 # /usr/share/doc/kelixip-mod-mcu/ has the whole block key by key (mcu.md), the
 # control surface and what to look at when a call does not join (mcu_module_guide.md).
+
+#[module.mcu_presence]             # dnf install kelixip-mod-mcu_presence
+# Conference rooms as presentities: sip:<did>@<domain> is open while the room runs,
+# open and busy when it is full, closed while its media server is lost. Needs the
+# [module.mcu] and [module.presence] blocks: without either, it refuses to start.
+#domains = ["example.com"]          # absent: every domain the mcu holds rooms on
+
+#[module.dialog_state]              # dnf install kelixip-mod-dialog_state
+# The calls of each served user, reported to presence: a BLF key (Event: dialog)
+# lights while the user rings or talks, presence shows on-the-phone while a call
+# is up. Needs the [module.presence] block: without it, it refuses to start.
+#domains = ["example.com"]          # absent: every served domain
 
 # The media servers, declared here and nowhere else: point-to-point calls take one
 # per call (round-robin + health-check), and the mcu module opens one control channel

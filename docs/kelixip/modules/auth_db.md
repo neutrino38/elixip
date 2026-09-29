@@ -261,6 +261,11 @@ identity proved is recorded in the session context, so the leg the scenario
 places next carries `P-Asserted-Identity: <sip:user@realm>` — unless the request
 asks for `Privacy: id`, which asserts nothing.
 
+The block also stamps the scenario's dialog with that identity: the digest is what
+proves the caller is this user. [`dialog_state`](dialog_state.md) reports the call
+under the user from then on — a call nobody authenticated is reported under no
+one.
+
 The facades stay available: a scenario needing another policy calls
 `authenticate/3` and composes its own responses.
 
