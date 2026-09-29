@@ -1,6 +1,6 @@
 # chat-basic-plan.md — building basic instant messaging
 
-**Status (2026-09-29): C1, C1b, C2, C3 and C3b implemented; trust (C3c) and hibernation (C3d) next.** The design is
+**Status (2026-09-29): C1, C1b, C2, C3, C3b and C3c implemented; hibernation (C3d) next.** The design is
 [DESIGN-CHAT.md](DESIGN-CHAT.md); this document is the order it gets built in,
 what each phase delivers, and what proves it.
 
@@ -250,126 +250,117 @@ The dialog layer already hands a request to whatever pid the router answers
 a live instance for the key gets the MESSAGE; none spawns one, registered under
 the key.
 
-**The key**, declared per `[[domain.chat]]` block, because a bot, a relay and a
-room are three different conversations:
+**The key** is `{domain, block, From AOR, To AOR, flow}` — the block because a
+bot and a relay are two conversations between the same two AORs, the flow as
+`{transport, ip, port}` because it is what lets routing stand for trust (C3c).
+The AORs are `user@domain`, read through `SIP.Msg.Ops` — tags change with every
+message, and a display name is not an identity.
 
 ```toml
 [[domain.chat]]
 pattern      = "mybot"
 script       = "mybot.exs"
-conversation = "pair"     # (From AOR, To AOR), ordered — one per user and bot
-
-[[domain.chat]]
-pattern      = "room-."
-script       = "chatroom.exs"
-conversation = "to"       # the To AOR — one per room, not one per member
-
-[[domain.chat]]
-default      = true
-script       = "p2p-chat.exs"
-conversation = "peers"    # {From AOR, To AOR}, unordered — Bob's answer
-                          # reaches the instance Alice's message started
+idle_timeout = 3600       # seconds of silence that end a conversation (300)
 ```
 
-Absent, `conversation` is `"peers"`. The AORs are `user@domain`, read through
-`SIP.Msg.Ops` — tags change with every message, and a display name is not an
-identity. **Neither the source address nor the transport is in the key**: Trix
-reconnects its WebSocket at every wake-up, a NAT moves a UDP port, and Alice
-writing from her phone then from her desk is one conversation. The source has a
-role, and it is C3c's.
+*Revised 2026-09-29, with C3c.* The key was first declared per block —
+`pair` (From, To), `peers` ({From, To}, unordered, so Bob's answer reached the
+instance Alice's message started) or `to` (a room) — and left the source out.
+With the flow in the key, a conversation is one sender over one flow: `peers`
+and `to` no longer group anything, and the `conversation` key is gone. A shared
+p2p or room state is a module's, later.
 
 **Delivers**
 
-- `Kelix.Conversations`, in the core: a `Registry` with unique keys
-  `{domain, block, key}` → instance pid. The lookup-or-spawn is atomic — two
-  MESSAGEs of one conversation arriving together start one instance, not two;
+- `Kelix.Conversations`, in the core: the key; `Kelix.InstancePool` keeps
+  `key → instance` and does the lookup-or-spawn inside one call of its own, so
+  two MESSAGEs of one conversation arriving together start one instance, not two
+  (a `Registry` cannot do it: it registers the calling process, and the instance
+  does not exist yet when the MESSAGE is routed);
 - `Kelix.Router.dispatch/3` for `:chat`: resolve the block as today, compute the
-  key, then `{:accept, live_pid}` or `InstancePool.accept/4` + register. A
-  conversation holds **one** quota slot, whatever the number of its messages;
-- the chat mixin (`SIP.Session.Page`, C3) absorbs the `{:dialog_terminated, …}`
-  of each MESSAGE dialog closing — one per message, meaningless to a script —
-  and replies on the transaction of the MESSAGE being handled (`last_uas_req()`
-  is per message, as it is per REGISTER in a registrar);
-- **the idle end**: no MESSAGE in or out for `idle_timeout` seconds (a
-  `[[domain.chat]]` key, default 300) and the instance is told
-  `{:conversation, :idle}`. A script that does nothing ends there; one that
-  wants to keep its context hibernates (C3d);
-- the monitor row shows a conversation as one instance, with its message count;
-  the journal of a traced conversation spans all its messages, redacted (C1b).
+  key, then `{:accept, live_pid}` or spawn + register. A conversation holds
+  **one** quota slot, whatever the number of its messages;
+- the `{:dialog_terminated, …}` of each MESSAGE dialog closing — one per message,
+  meaningless to a script — is not sent at all: an inbound dialog opened by an
+  out-of-dialog MESSAGE does not report its end (`SIP.DialogImpl`). FSL gives a
+  host no way to swallow an event, so it is dropped at the source; an outbound
+  page's dialog still reports it, its relay reads it as a failure.
+  `reply_message/2` answers the MESSAGE being handled, on its own dialog
+  (`last_uas_req()` is per message, as it is per REGISTER in a registrar);
+- **the idle end**: no MESSAGE in (routed by the pool) or out (`send_page` tells
+  the pool `{:conversation, :activity, pid}`) for `idle_timeout` seconds, and the
+  pool forgets the key **first**, then tells the instance `{:conversation, :idle}`
+  — so a MESSAGE arriving meanwhile starts a new conversation instead of
+  reaching one on its way out. The SIP host injects a clause for that event into
+  every wait, ending the scenario with success; a scenario matching
+  `{:conversation, _}` (or a catch-all) keeps control, and hibernates (C3d);
+- the monitor row carries `messages` (`chat (N msg)` in `kelictl monitor`); the
+  journal of a traced conversation spans all its messages, redacted (C1b).
 
-**Files** `apps/kelixip/lib/kelix/conversations.ex`, `router.ex`, `domains.ex`
-(`conversation`, `idle_timeout`), `framework/SIPSessionPage.ex`,
-`apps/kelixip/test/conversations_test.exs`.
+A MESSAGE missing a part of the key — no `From` or `To` user, no flow — gets an
+instance of its own.
 
-**Done when** three MESSAGEs from Alice to `mybot` reach one instance; Bob's
-answer to Alice reaches the `p2p-chat.exs` instance her message started; two
-MESSAGEs sent in the same millisecond start one instance; a conversation silent
-for `idle_timeout` ends and frees its slot.
+**Files** `apps/kelixip/lib/kelix/{conversations,instance_pool,router,domains}.ex`,
+`framework/{SIPSessionPage,SIPFSLHost,SIPDialogImpl,SIPMsgOps}.ex`,
+`apps/kelixip/test/conversations_test.exs`, `apps/elixip2/test/page_mode_test.exs`.
 
-**As built.** Three points differ from the text above, each for a mechanism
-the text did not have:
+**Done when** three MESSAGEs from Alice to `mybot` on one flow reach one
+instance; MESSAGEs of one conversation dispatched together start one instance;
+a conversation silent for `idle_timeout` ends and frees its slot.
 
-- **the registry is the pool's own map, not a `Registry`.** A `Registry` only
-  registers the calling process, and the instance does not exist yet when the
-  MESSAGE is routed. `Kelix.Conversations` computes the key (AORs read by
-  `SIP.Msg.Ops.address_of_record/2`); `Kelix.InstancePool` keeps
-  `key → instance` and does the lookup-or-spawn inside one call, which is what
-  makes it atomic;
-- **the dialog layer, not the mixin, drops a page's `{:dialog_terminated, …}`.**
-  FSL gives a host no way to swallow an event: an injected clause must leave the
-  state. An inbound dialog opened by an out-of-dialog MESSAGE therefore does not
-  report its end to its application (`SIP.DialogImpl.page_dialog?/1`); an
-  outbound page's dialog still does, its relay reads it as a failure;
-- **the idle deadline is the pool's.** The pool routes every MESSAGE in and is
-  told of every page out (`{:conversation, :activity, pid}`, sent by `send_page`
-  in an instance that carries a conversation key). At the deadline it forgets
-  the key **first**, then sends `{:conversation, :idle}` — so a MESSAGE arriving
-  meanwhile starts a new conversation instead of reaching one on its way out. The
-  SIP host injects a clause for that event into every wait, ending the scenario
-  with success; a scenario matching `{:conversation, _}` (or a catch-all) keeps
-  control, as with the media-down clause.
-
-A MESSAGE whose `From` or `To` names no user gets no key and an instance of its
-own. The monitor row carries `messages`, shown by `kelictl monitor` as
-`chat (N msg)`. Tests: `apps/kelixip/test/conversations_test.exs`, the
-conversation case of `apps/elixip2/test/page_mode_test.exs`.
-
-### C3c — trust: not challenging every message
+### C3c — trust: the router decides, the script challenges once
 
 Routing by `(From, To)` must not become authentication by `(From, To)`: a `From`
-is forged in one line, and "the conversation exists" would let anyone write as
-Alice — to Bob, or to a bot acting on Alice's behalf — while it lives. So the
-two are separate:
+is forged in one line. So the flow is in the key (C3b): **the router** hands a
+MESSAGE to a live conversation only when it comes from the same `From`, to the
+same `To`, over the same `{transport, ip, port}`. That is what an established
+dialog proves, and why an in-dialog request is not re-challenged either
+(decision 7).
 
-- **routing** is the key of C3b;
-- **trust** — skipping the challenge — needs proof the sender is the one who
-  authenticated. Two proofs, either sufficient:
-  - **the same flow**: the MESSAGE arrives over the transport instance that
-    carried the authenticated one (TCP, TLS, WSS), or from the same IP:port
-    (UDP), within `trust_window` seconds of the last authenticated request.
-    What the flow proves is what an established dialog proves, which is why an
-    in-dialog request is not re-challenged either (decision 7);
-  - **a reused nonce**: `Authorization` carrying a nonce still inside its
-    `max_age` with a `nc` that advances, checked by the digest verification
-    `auth_db` already runs and by `Kelix.NonceCache`'s anti-replay. Linphone
-    does this; JsSIP, as far as we know, does not.
+The script is then simple — it states the rule, it implements none of it:
 
-A reconnection — Trix waking — is a new flow, and is challenged once. That is
-the correct answer, not a regression.
+```elixir
+state wait_message do
+  on_events do
+    {:MESSAGE, _req, _trans, _dlg} -> goto(authenticate)   # the first one
+  end
+end
 
-**Delivers** `Kelix.Mod.AuthDb.trusted?(sip_ctx, req)`: `true` when either proof
-holds for the AOR in `From`, with the conversation's last authenticated flow
-kept in the instance's context by `authenticate/2` itself. The script asks one
-question and matches one answer; it compares no address (CLAUDE.md, *Writing a
-scenario*).
+state authenticate do
+  AuthDb.SBB.authenticate(code: 401)
+  # {:auth, :authenticated, _} → relay, then serve
+end
 
-**Files** `apps/kelix_modules/lib/kelix/mod/auth_db.ex`, its SBB,
-`apps/kelix_modules/test/auth_db_trust_test.exs`.
+state serve do
+  on_events do
+    {:MESSAGE, _req, _trans, _dlg} -> goto(relay)          # the next ones pass
+    {:conversation, :transport_down} -> hibernate(...)     # C3d, a long-lived bot
+  end
+end
+```
 
-**Done when** a second MESSAGE on the same WSS connection is relayed with no
-401; the same MESSAGE with the same `From` from another address is challenged;
-a MESSAGE carrying a reused nonce with `nc` advanced is accepted from anywhere,
-and one replaying the same `nc` is refused.
+A new flow — Trix reconnecting at every wake-up, a NAT moving a UDP port, the
+same user on another device — is a new conversation, challenged once. That is
+the correct answer, not a regression. No trust window and no nonce reuse: the
+flow is the proof, and the router is the one place that reads it.
+
+**The connected flow is watched.** When the conversation came in on TCP, TLS or
+WSS, the pool monitors that transport instance. If it drops, the key is
+forgotten first, then the instance is told `{:conversation, :transport_down}`;
+the next MESSAGE arrives over a new flow and starts a new conversation. A
+script with no clause for the event ends there, successfully (an injected
+clause, as for `:idle`); a long-lived bot matches it and hibernates (C3d), to be
+woken on `(From, To)`.
+
+**Delivers** `SIP.Msg.Ops.source_flow/1` and `source_connection/1` (the flow
+the transport layer stamps on the Request-URI), the flow in
+`Kelix.Conversations`' key, the connection monitor in `Kelix.InstancePool`, the
+`{:conversation, :transport_down}` injected clause.
+
+**Done when** the same `From` and `To` over another flow start another
+conversation; a WSS connection dropping ends the conversation it carried, and
+the next MESSAGE, over a new connection, starts a new one; a UDP conversation
+watches no connection.
 
 ### C3d — hibernation
 
@@ -377,12 +368,20 @@ and one replaying the same `nc` is refused.
 hibernate(resume: :awaiting_answer, keep: [:step, :cart], ttl: 86_400)
 ```
 
-**Delivers** a conversation that outlives its process. On `hibernate/1` the
-instance writes what it names — the state to resume in, the appdata keys in
-`keep` — under its conversation key, and stops; its quota slot is freed. The
-next MESSAGE with the same key finds no live instance, finds the hibernated one,
-and spawns the script **at `resume:`** with the kept data and the waking
-MESSAGE queued, as a UAS instance is spawned with the request that created it.
+**Delivers** a conversation that outlives its process — and its flow. On
+`hibernate/1` the instance writes what it names — the state to resume in, the
+appdata keys in `keep` — under `{domain, block, From AOR, To AOR}`, **without the
+flow**, and stops; its quota slot is freed. Typically on
+`{:conversation, :transport_down}` or `{:conversation, :idle}`: a long-lived bot
+whose user closed the tab.
+
+**The router wakes it.** For a MESSAGE, `Kelix.InstancePool` looks up, in order:
+a live instance on the full key (flow included); a hibernated conversation on
+`(From, To)`; neither, a new instance. A hibernated one is spawned **at
+`resume:`** with the kept data and the waking MESSAGE queued, as a UAS instance
+is spawned with the request that created it, and registered under the new
+flow's key. It came over a new flow: the resumed state decides whether to
+challenge it again, and a bot resuming on a sender it cannot vouch for does.
 
 - **What survives is what the script names.** The FSL context holds pids —
   dialogs, transactions, a media session — that mean nothing after a restart.
@@ -628,9 +627,8 @@ MESSAGE on one machine, and the same pair drives C8's recipe against a node.
   already covers MESSAGE), 404 for an AOR that does not exist, relay (C4), store
   on `:undelivered` and answer **202**, answer 480 for an undelivered
   `:is_composing`, 503 when the Silo is down. A MESSAGE sent **inside an
-  established dialog**, or one its conversation trusts (`AuthDb.trusted?/2`,
-  C3c), is not re-challenged (see *Decisions*). One instance per conversation
-  (`conversation = "peers"`), ending idle;
+  established dialog**, or after the first of its conversation (C3c), is not
+  re-challenged (see *Decisions*). One instance per conversation, ending idle;
 - `scripts/registrar-chat.exs`: `registrar-presence.exs` plus `Silo.flush` after
   each 200 that leaves the AOR registered. A variant, as `registrar-presence.exs`
   is one of `registrar.exs` — see *Decisions*;
@@ -692,13 +690,18 @@ gains the kelixip configuration beside the Kamailio one.
    requests; the script asks it and does not re-derive it, and C8 carries a test
    in which a second MESSAGE in the same dialog is relayed with no 401/407.
    Page mode rarely reuses a dialog, so the same rule is extended to a
-   **conversation** (C3c): not re-challenged when the MESSAGE comes over the flow
-   that authenticated, or carries a reused nonce — never on `(From, To)` alone.
-8. **One scenario per conversation, not per dialog.** The key is declared per
-   block (`pair`, `peers`, `to`) and never includes the source address; the
-   source decides trust (C3c), not routing (C3b). A conversation ends idle,
-   hibernates on request into a serialized state (not a sleeping process), and
-   expires on the `conversation` module's TTL (C3d).
+   **conversation** (C3c): the router only routes into one a MESSAGE from the
+   same `From`, to the same `To`, over the same flow — never on `(From, To)`
+   alone.
+8. **One scenario per conversation, not per dialog.** The key is `(From, To,
+   flow)`, the flow being `{transport, ip, port}`; the router decides whether a
+   MESSAGE joins a live conversation, and that decision is the trust (C3c): the
+   script challenges the first MESSAGE and lets the rest through. A conversation
+   ends idle or with its connected transport, hibernates on request into a
+   serialized state keyed on `(From, To)` (not a sleeping process), is woken by
+   the router, and expires on the `conversation` module's TTL (C3d). *Revised
+   2026-09-29: the key was declared per block (`pair`, `peers`, `to`) and left
+   the source out, with trust proven apart (same flow, reused nonce).*
 9. **A message's content is never recorded outside the Silo, and this is not
    configurable.** Not a filter in kelescope, not a flag an operator can turn
    off while debugging: a switch that reveals the content is a switch someone

@@ -21,7 +21,11 @@ defmodule Kelix.InstancePool do
   here) or out (`{:conversation, :activity, pid}`, sent by the instance's
   `send_page`): its key is forgotten **first**, then the instance is told
   `{:conversation, :idle}` — so a MESSAGE arriving meanwhile starts a new
-  conversation rather than reaching one on its way out.
+  conversation rather than reaching one on its way out. When the conversation
+  came in on a connected transport (TCP, TLS, WSS), that connection is watched
+  too (chat-basic-plan, C3c): if it drops, the key is forgotten the same way and
+  the instance is told `{:conversation, :transport_down}` — the next MESSAGE
+  comes over a new flow, and is a new conversation.
 
   Also the live half of `Kelix.Control.subscribe_monitor/1`: subscribes to
   `FSL.Monitor` once at boot and re-joins its pushes with its own rows
@@ -47,13 +51,19 @@ defmodule Kelix.InstancePool do
           required(:script) => String.t(),
           required(:max_calls) => pos_integer | nil,
           optional(:conversation) =>
-            %{key: Kelix.Conversations.key(), idle_timeout: pos_integer} | nil
+            %{
+              key: Kelix.Conversations.key(),
+              idle_timeout: pos_integer,
+              connection: pid | nil
+            }
+            | nil
         }
 
   # instances:    ref => %{id, pid, dialog_id, domain, function, script, version,
   #                        conversation}, plus messages / idle_ms / last_activity
   #               for a conversation
   # conversations: conversation key => instance ref, while the conversation lives
+  # connections:  monitor ref on a conversation's connected transport => instance ref
   # per_domain:   domain => active count
   # next_id:      monotonic id handed to each instance (stable handle for `shutdown/1`)
   # monitor_subs: MapSet(pid) subscribed via `subscribe_monitor/1`
@@ -62,6 +72,7 @@ defmodule Kelix.InstancePool do
   # counter_subs / counter_mons: same bookkeeping, for `subscribe_domain_counters/1`
   defstruct instances: %{},
             conversations: %{},
+            connections: %{},
             per_domain: %{},
             total_active: 0,
             next_id: 1,
@@ -276,6 +287,9 @@ defmodule Kelix.InstancePool do
   # instance terminated: free its slot + check the script version back in
   def handle_info({:DOWN, ref, :process, pid, reason}, state) do
     case Map.pop(state.instances, ref) do
+      {nil, _} when is_map_key(state.connections, ref) ->
+        {:noreply, connection_down(state, ref)}
+
       {nil, _} ->
         {:noreply, state |> drop_monitor_sub_by_ref(ref) |> drop_counter_sub_by_ref(ref)}
 
@@ -448,17 +462,37 @@ defmodule Kelix.InstancePool do
   # registration that makes the next MESSAGE find it.
   defp register_conversation(state, inst, _ref, nil), do: {state, inst}
 
-  defp register_conversation(state, inst, ref, %{key: key, idle_timeout: idle}) do
+  defp register_conversation(state, inst, ref, %{key: key, idle_timeout: idle} = conv) do
     idle_ms = idle * 1_000
     Process.send_after(self(), {:conversation_idle, ref}, idle_ms)
 
-    inst =
-      Map.merge(inst, %{conversation: key, messages: 1, idle_ms: idle_ms, last_activity: now_ms()})
+    # A connected flow can drop under the conversation; a UDP one cannot.
+    {connections, connection_mon} =
+      case Map.get(conv, :connection) do
+        pid when is_pid(pid) ->
+          mon = Process.monitor(pid)
+          {Map.put(state.connections, mon, ref), mon}
 
-    {%{state | conversations: Map.put(state.conversations, key, ref)}, inst}
+        nil ->
+          {state.connections, nil}
+      end
+
+    inst =
+      Map.merge(inst, %{
+        conversation: key,
+        messages: 1,
+        idle_ms: idle_ms,
+        last_activity: now_ms(),
+        connection_mon: connection_mon
+      })
+
+    {%{state | conversations: Map.put(state.conversations, key, ref), connections: connections},
+     inst}
   end
 
-  defp forget_conversation(state, ref, %{conversation: key}) when key != nil do
+  defp forget_conversation(state, ref, %{conversation: key} = inst) when key != nil do
+    state = forget_connection(state, Map.get(inst, :connection_mon))
+
     case Map.get(state.conversations, key) do
       ^ref -> %{state | conversations: Map.delete(state.conversations, key)}
       _other -> state
@@ -466,6 +500,37 @@ defmodule Kelix.InstancePool do
   end
 
   defp forget_conversation(state, _ref, _inst), do: state
+
+  defp forget_connection(state, nil), do: state
+
+  defp forget_connection(state, mon) do
+    Process.demonitor(mon, [:flush])
+    %{state | connections: Map.delete(state.connections, mon)}
+  end
+
+  # The connected transport a conversation came in on is gone. The key goes first,
+  # as on idle: the sender's next MESSAGE arrives over a new flow and must start a
+  # new conversation — challenged, since nothing proves it is the same sender.
+  defp connection_down(state, mon) do
+    {inst_ref, connections} = Map.pop(state.connections, mon)
+    state = %{state | connections: connections}
+
+    case Map.get(state.instances, inst_ref) do
+      %{conversation: key} = inst when key != nil ->
+        Logger.info(
+          module: __MODULE__,
+          message:
+            "instance #{inst.id}: conversation #{Kelix.Conversations.label(key)} " <>
+              "lost its transport after #{inst.messages} message(s)"
+        )
+
+        send(inst.pid, {:conversation, :transport_down})
+        forget_conversation(state, inst_ref, %{inst | connection_mon: nil})
+
+      _gone ->
+        state
+    end
+  end
 
   defp now_ms(), do: System.monotonic_time(:millisecond)
 

@@ -292,11 +292,14 @@ follows it: the domain is a column, never a pool.
 
 Page mode follows no dialog: every MESSAGE opens one of its own and closes it
 60 s later. A chat scenario is therefore bound to a **conversation**, not to a
-dialog — a key declared per `[[domain.chat]]` block (`pair`, `peers`, `to`)
-built from the `From` and `To` AORs, never from the source address. The source
-decides **trust** (whether a message is re-challenged), not routing. A
-conversation ends when idle, can hibernate on request into a serialized state,
-and expires on the `conversation` module's TTL. The phases are C3b–C3d of
+dialog — keyed on the `From` and `To` AORs and the **flow** the MESSAGE came in
+on (transport, address, port). The router decides whether a MESSAGE joins a
+live conversation, and that decision is the trust: the script challenges the
+first MESSAGE and lets the next ones through, since only the same sender over
+the same flow reaches it. A conversation ends when idle or when its connected
+transport drops, can hibernate on request into a serialized state keyed on
+`(From, To)` — the router wakes it on the next MESSAGE, whatever its flow — and
+expires on the `conversation` module's TTL. The phases are C3b–C3d of
 [chat-basic-plan.md](chat-basic-plan.md).
 
 ## Peer-to-peer chat

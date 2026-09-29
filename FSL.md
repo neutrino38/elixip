@@ -635,11 +635,16 @@ request is rebuilt with the original sender, `To`, content and allowlisted heade
 `target` as its Request-URI. See `SIP.Session.Page` below.
 
 On kelixip, a chat scenario serves a **conversation**, not a single MESSAGE: the next
-MESSAGE between the same parties reaches the running instance, as another
-`{:MESSAGE, req, trans, dialog}` event, and `reply_message/2` answers the one being
-handled. The end of each MESSAGE's own dialog is not reported. After `idle_timeout`
-seconds with no MESSAGE in or out, the instance receives `{:conversation, :idle}`; a
-scenario with no clause for it ends there, successfully.
+MESSAGE from the same `From` to the same `To` over the same flow (transport, address,
+port) reaches the running instance, as another `{:MESSAGE, req, trans, dialog}` event,
+and `reply_message/2` answers the one being handled. Since only that sender reaches
+it, a script challenges the first MESSAGE and lets the next ones through. The end of
+each MESSAGE's own dialog is not reported. Two events end a conversation, and a
+scenario with no clause for them ends there, successfully:
+
+- `{:conversation, :idle}` — `idle_timeout` seconds with no MESSAGE in or out;
+- `{:conversation, :transport_down}` — the connected transport (TCP, TLS, WSS) it came
+  in on dropped.
 
 ```elixir
 state talking do
@@ -648,7 +653,7 @@ state talking do
       reply_message(200)
       stay("message")
 
-    {:conversation, :idle} ->
+    {:conversation, _idle_or_transport_down} ->
       scenario_success("conversation over")
   end
 end

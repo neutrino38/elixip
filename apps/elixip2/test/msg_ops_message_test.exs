@@ -185,4 +185,36 @@ defmodule SIP.Test.MsgOpsMessage do
       assert Ops.address_of_record(%{to: %SIP.Uri{domain: "example.com"}}, :to) == nil
     end
   end
+
+  describe "source_flow/1 and source_connection/1" do
+    defp stamped(mod, pid) do
+      %{
+        ruri: %SIP.Uri{
+          userpart: "bob",
+          domain: "example.com",
+          destip: {192, 0, 2, 7},
+          destport: 5061,
+          tp_module: mod,
+          tp_pid: pid
+        }
+      }
+    end
+
+    test "the transport, address and port the transport layer stamped" do
+      assert Ops.source_flow(stamped(SIP.Transport.UDP, self())) == {"UDP", {192, 0, 2, 7}, 5061}
+      assert Ops.source_flow(stamped(SIP.Transport.WSS, self())) == {"WSS", {192, 0, 2, 7}, 5061}
+    end
+
+    test "a connection only for a connected transport" do
+      assert Ops.source_connection(stamped(SIP.Transport.TLS, self())) == self()
+      assert Ops.source_connection(stamped(SIP.Transport.UDP, self())) == nil
+    end
+
+    test "a request that did not come off the network has neither" do
+      req = %{ruri: %SIP.Uri{userpart: "bob", domain: "example.com"}}
+      assert Ops.source_flow(req) == nil
+      assert Ops.source_connection(req) == nil
+      assert Ops.source_flow(%{}) == nil
+    end
+  end
 end

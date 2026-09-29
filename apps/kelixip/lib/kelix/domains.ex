@@ -385,35 +385,20 @@ defmodule Kelix.Domains do
       {:error,
        "domain #{inspect(domain)}: each [[domain.#{key}]] needs `pattern = \"...\"` or `default = true`"}
 
-  # A chat rule says what one conversation is, and how long one lasts silent
-  # (chat-basic-plan, C3b). A call rule has neither: a call is its dialog.
-  defp rule_keys("chat"), do: ~w(conversation idle_timeout)
+  # A chat rule says how long one of its conversations lasts silent
+  # (chat-basic-plan, C3b). A call rule has no such thing: a call is its dialog.
+  defp rule_keys("chat"), do: ~w(idle_timeout)
   defp rule_keys(_key), do: []
 
-  @conversations %{"pair" => :pair, "peers" => :peers, "to" => :to}
   @default_idle_timeout 300
 
   defp parse_conversation(rule, r, "chat", what) do
-    with {:ok, conversation} <- conversation_kind(Map.get(r, "conversation", "peers"), what),
-         {:ok, idle} <- idle_timeout(Map.get(r, "idle_timeout", @default_idle_timeout), what) do
-      {:ok, %DialRule{rule | conversation: conversation, idle_timeout: idle}}
+    with {:ok, idle} <- idle_timeout(Map.get(r, "idle_timeout", @default_idle_timeout), what) do
+      {:ok, %DialRule{rule | idle_timeout: idle}}
     end
   end
 
   defp parse_conversation(rule, _r, _key, _what), do: {:ok, rule}
-
-  defp conversation_kind(value, what) do
-    case Map.fetch(@conversations, value) do
-      {:ok, kind} ->
-        {:ok, kind}
-
-      :error ->
-        {:error,
-         "#{what}: `conversation` must be one of " <>
-           "#{@conversations |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)}, " <>
-           "got #{inspect(value)}"}
-    end
-  end
 
   defp idle_timeout(value, _what) when is_integer(value) and value > 0, do: {:ok, value}
 

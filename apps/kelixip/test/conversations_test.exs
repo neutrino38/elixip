@@ -1,5 +1,5 @@
 defmodule Kelix.ConversationsTest do
-  # One scenario per conversation, not per MESSAGE (chat-basic-plan, C3b):
+  # One scenario per conversation, not per MESSAGE (chat-basic-plan, C3b, C3c):
   # Router.dispatch → Kelix.Conversations.key → InstancePool lookup-or-spawn.
   # The dialog layer is not in the loop: what it would do with `{:accept, pid}`
   # — send the MESSAGE there — the test does itself.
@@ -29,13 +29,23 @@ defmodule Kelix.ConversationsTest do
     snap
   end
 
-  defp message(from, to, dom, callid \\ nil) do
+  # A MESSAGE as the transport layer hands it over: the flow it came in on is
+  # stamped on its Request-URI. UDP from 192.0.2.1:`port` unless `opts` say
+  # otherwise (`transport:` a module, `tp_pid:` its connection).
+  defp message(from, to, dom, opts \\ []) do
     %{
       method: :MESSAGE,
-      ruri: %SIP.Uri{userpart: to, domain: dom},
+      ruri: %SIP.Uri{
+        userpart: to,
+        domain: dom,
+        destip: Keyword.get(opts, :ip, {192, 0, 2, 1}),
+        destport: Keyword.get(opts, :port, 5060),
+        tp_module: Keyword.get(opts, :transport, SIP.Transport.UDP),
+        tp_pid: Keyword.get(opts, :tp_pid)
+      },
       from: %SIP.Uri{userpart: from, domain: dom},
       to: %SIP.Uri{userpart: to, domain: dom},
-      callid: callid || "c#{System.unique_integer([:positive])}"
+      callid: "c#{System.unique_integer([:positive])}"
     }
   end
 
@@ -53,42 +63,48 @@ defmodule Kelix.ConversationsTest do
 
   defp active(dom), do: Map.get(InstancePool.stats().per_domain, dom, 0)
 
+  # a connected transport instance, as far as the pool can tell
+  defp connection(), do: spawn(fn -> receive do: (:drop -> :ok) end)
+
   describe "the key" do
-    test "pair is ordered, peers is not, to is the To alone" do
-      alice_bob = message("alice", "bob", "d.test")
-      bob_alice = message("bob", "alice", "d.test")
-      carol_bob = message("carol", "bob", "d.test")
+    @rule %DialRule{default?: true, idle_timeout: 300}
 
-      pair = %DialRule{raw: "b.", conversation: :pair}
-      peers = %DialRule{default?: true, conversation: :peers}
-      room = %DialRule{raw: "room-.", conversation: :to}
+    test "From, To and the flow; the direction matters" do
+      a = message("alice", "bob", "d.test")
 
-      refute Conversations.key("d.test", pair, alice_bob) ==
-               Conversations.key("d.test", pair, bob_alice)
+      assert {"d.test", :default, "alice@d.test", "bob@d.test", {"UDP", {192, 0, 2, 1}, 5060}} =
+               Conversations.key("d.test", @rule, a)
 
-      assert Conversations.key("d.test", peers, alice_bob) ==
-               Conversations.key("d.test", peers, bob_alice)
-
-      assert Conversations.key("d.test", room, alice_bob) ==
-               Conversations.key("d.test", room, carol_bob)
-
-      # a call rule declares no conversation
-      assert Conversations.key("d.test", %DialRule{raw: "X."}, alice_bob) == nil
-      # no From user: no key, an instance of its own
-      assert Conversations.key("d.test", peers, %{alice_bob | from: "<sip:d.test>"}) == nil
+      refute Conversations.key("d.test", @rule, a) ==
+               Conversations.key("d.test", @rule, message("bob", "alice", "d.test"))
     end
 
-    test "the source is not part of it: tags, display names and host case are not" do
+    test "another port or another transport is another flow" do
+      k = &Conversations.key("d.test", @rule, &1)
+      a = message("alice", "bob", "d.test")
+
+      refute k.(a) == k.(message("alice", "bob", "d.test", port: 5070))
+      refute k.(a) == k.(message("alice", "bob", "d.test", transport: SIP.Transport.TCP))
+    end
+
+    test "tags, display names and host case are not part of it" do
       a = message("alice", "bob", "d.test")
       b = %{a | from: ~s("Alice" <sip:alice@D.TEST>;tag=zz), callid: "other"}
-      rule = %DialRule{default?: true, conversation: :peers}
-      assert Conversations.key("d.test", rule, a) == Conversations.key("d.test", rule, b)
+      assert Conversations.key("d.test", @rule, a) == Conversations.key("d.test", @rule, b)
+    end
+
+    test "no key: a call rule, a request with no flow, a From with no user" do
+      a = message("alice", "bob", "d.test")
+      assert Conversations.key("d.test", %DialRule{raw: "X."}, a) == nil
+      assert Conversations.key("d.test", @rule, %{a | ruri: %SIP.Uri{userpart: "bob"}}) == nil
+      assert Conversations.key("d.test", @rule, %{a | from: "<sip:d.test>"}) == nil
     end
   end
 
   describe "dispatch" do
-    test "three MESSAGEs from Alice to the bot reach one instance, one slot", %{dom: dom} do
-      snap = snapshot(dom, [[pattern: "mybot", script: @chatter, conversation: "pair"]])
+    test "three MESSAGEs from Alice to the bot on one flow reach one instance, one slot",
+         %{dom: dom} do
+      snap = snapshot(dom, [[pattern: "mybot", script: @chatter]])
 
       pid = deliver(snap, message("alice", "mybot", dom))
       cleanup([pid])
@@ -104,28 +120,20 @@ defmodule Kelix.ConversationsTest do
       refute other == pid
     end
 
-    test "Bob's answer reaches the instance Alice's message started (peers)", %{dom: dom} do
+    # What makes routing stand for trust: the same From on another flow is not
+    # handed to the conversation that authenticated it — it starts one of its own.
+    test "the same From and To over another flow start another conversation", %{dom: dom} do
       snap = snapshot(dom, [[default: true, script: @chatter]])
 
       pid = deliver(snap, message("alice", "bob", dom))
       cleanup([pid])
-      assert deliver(snap, message("bob", "alice", dom)) == pid
+
+      forged = deliver(snap, message("alice", "bob", dom, ip: {203, 0, 113, 9}))
+      cleanup([forged])
+      refute forged == pid
     end
 
-    test "every member of a room reaches the room's instance (to)", %{dom: dom} do
-      snap = snapshot(dom, [[pattern: "room-.", script: @chatter, conversation: "to"]])
-
-      pid = deliver(snap, message("alice", "room-1", dom))
-      cleanup([pid])
-      assert deliver(snap, message("bob", "room-1", dom)) == pid
-
-      other_room = deliver(snap, message("bob", "room-2", dom))
-      cleanup([other_room])
-      refute other_room == pid
-    end
-
-    test "two MESSAGEs of one conversation dispatched together start one instance",
-         %{dom: dom} do
+    test "MESSAGEs of one conversation dispatched together start one instance", %{dom: dom} do
       snap = snapshot(dom, [[default: true, script: @chatter]])
 
       pids =
@@ -171,46 +179,73 @@ defmodule Kelix.ConversationsTest do
       end
 
       assert Process.alive?(pid)
-      assert deliver(snap, message("bob", "alice", dom)) == pid
+      assert deliver(snap, message("alice", "bob", dom)) == pid
+    end
+
+    test "a connected transport dropping ends the conversation; the next flow starts over",
+         %{dom: dom} do
+      snap = snapshot(dom, [[default: true, script: @chatter]])
+      ws = connection()
+      wss = [transport: SIP.Transport.WSS, tp_pid: ws, port: 40_001]
+
+      pid = deliver(snap, message("alice", "bob", dom, wss))
+      assert deliver(snap, message("alice", "bob", dom, wss)) == pid
+      ref = Process.monitor(pid)
+
+      # chatter.exs has no clause for it: the SIP host's injected one ends it
+      send(ws, :drop)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
+      assert eventually(fn -> active(dom) == 0 end)
+
+      ws2 = connection()
+
+      fresh =
+        deliver(
+          snap,
+          message("alice", "bob", dom, transport: SIP.Transport.WSS, tp_pid: ws2, port: 40_002)
+        )
+
+      cleanup([fresh])
+      refute fresh == pid
+    end
+
+    test "a UDP conversation watches no connection", %{dom: dom} do
+      snap = snapshot(dom, [[default: true, script: @chatter]])
+      pid = deliver(snap, message("alice", "bob", dom, tp_pid: connection()))
+      cleanup([pid])
+
+      inst =
+        :sys.get_state(InstancePool).instances |> Map.values() |> Enum.find(&(&1.pid == pid))
+
+      assert inst.connection_mon == nil
     end
   end
 
   describe "[[domain.chat]] keys" do
-    test "conversation and idle_timeout are parsed, with their defaults", %{dom: dom} do
+    test "idle_timeout is parsed, 300 by default", %{dom: dom} do
       snap =
         snapshot(dom, [
-          [pattern: "mybot", script: "b.exs", conversation: "pair", idle_timeout: 60],
+          [pattern: "mybot", script: "b.exs", idle_timeout: 60],
           [default: true, script: "p.exs"]
         ])
 
       [domain] = snap.domains
-
-      assert [%DialRule{conversation: :pair, idle_timeout: 60}, %DialRule{} = default] =
-               domain.chat
-
-      assert default.conversation == :peers
-      assert default.idle_timeout == 300
+      assert [%DialRule{idle_timeout: 60}, %DialRule{idle_timeout: 300}] = domain.chat
     end
 
-    test "a bad value is refused at load, a call rule takes neither", %{dom: dom} do
+    test "a bad value is refused at load, a call rule takes none", %{dom: dom} do
       assert {:error, msg} =
-               Domains.parse(
-                 ~s([[domain]]\nname = "#{dom}"\n[[domain.chat]]\ndefault = true\n) <>
-                   ~s(script = "p.exs"\nconversation = "room")
-               )
-
-      assert msg =~ "conversation"
-
-      assert {:error, _} =
                Domains.parse(
                  ~s([[domain]]\nname = "#{dom}"\n[[domain.chat]]\ndefault = true\n) <>
                    ~s(script = "p.exs"\nidle_timeout = 0)
                )
 
+      assert msg =~ "idle_timeout"
+
       assert {:error, msg} =
                Domains.parse(
                  ~s([[domain]]\nname = "#{dom}"\n[[domain.call]]\ndefault = true\n) <>
-                   ~s(script = "c.exs"\nconversation = "pair")
+                   ~s(script = "c.exs"\nidle_timeout = 60)
                )
 
       assert msg =~ "unknown key"

@@ -1027,6 +1027,46 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  @doc """
+  The flow a request arrived on, as `{transport, ip, port}` — `"UDP"`, `"TCP"`,
+  `"TLS"` or `"WSS"`, the peer's address and port — or `nil` for a request that
+  did not come off the network (hand-built, or not yet stamped).
+
+  The transport layer stamps it on the Request-URI of every inbound request that
+  starts a transaction (`destip`, `destport`, `tp_module`): where an answer must
+  go back is where the request came from. A page-mode conversation is keyed on it
+  (chat-basic-plan, C3c): the same `From` writing to the same `To` over the same
+  flow is the same sender, which a `From` alone does not prove.
+  """
+  @spec source_flow(map()) :: {String.t(), :inet.ip_address(), :inet.port_number()} | nil
+  def source_flow(msg) when is_map(msg) do
+    case Map.get(msg, :ruri) do
+      %SIP.Uri{tp_module: mod, destip: ip, destport: port}
+      when is_atom(mod) and not is_nil(mod) and is_tuple(ip) and is_integer(port) ->
+        {String.upcase(mod.transport_str()), ip, port}
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  The connection a request arrived on — the pid of its connected transport
+  instance (TCP, TLS, WSS) — or `nil` for a connectionless one (UDP), which has
+  no connection to lose, and for a request that did not come off the network.
+  """
+  @spec source_connection(map()) :: pid() | nil
+  def source_connection(msg) when is_map(msg) do
+    case Map.get(msg, :ruri) do
+      %SIP.Uri{tp_module: mod, tp_pid: pid}
+      when is_atom(mod) and not is_nil(mod) and is_pid(pid) ->
+        if mod.is_reliable(), do: pid, else: nil
+
+      _ ->
+        nil
+    end
+  end
+
   # A host may have been parsed as an IP tuple; a row column holds text.
   defp host_string(domain) when is_binary(domain), do: presence(domain)
 

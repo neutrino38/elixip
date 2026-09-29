@@ -234,14 +234,24 @@ defmodule Kelix.Router do
     end
   end
 
-  # One scenario per conversation, not per MESSAGE (chat-basic-plan, C3b): the
-  # chat rule says what a conversation is, `Kelix.Conversations` computes which one
-  # this request belongs to, and `Kelix.InstancePool` finds or starts its instance.
+  # One scenario per conversation, not per MESSAGE (chat-basic-plan, C3b, C3c):
+  # `Kelix.Conversations` computes which one this request belongs to — From, To and
+  # the flow it came in on — and `Kelix.InstancePool` finds or starts its instance.
+  # Routing a MESSAGE into a live conversation is the router's decision, and it is
+  # what lets the script challenge the first one only. The connection, when the
+  # flow has one, goes along so the pool can tell the instance when it drops.
   # An in-dialog MESSAGE never gets here — it reaches its dialog's instance.
   defp conversation_for(%Domain{name: name}, %{function: :chat, rule: %DialRule{} = rule}, req) do
     case Conversations.key(name, rule, req) do
-      nil -> nil
-      key -> %{key: key, idle_timeout: rule.idle_timeout}
+      nil ->
+        nil
+
+      key ->
+        %{
+          key: key,
+          idle_timeout: rule.idle_timeout,
+          connection: SIP.Msg.Ops.source_connection(req)
+        }
     end
   end
 

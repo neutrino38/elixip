@@ -321,14 +321,15 @@ defmodule SIP.Test.FSL.OnEventOrder do
       for clause <- [
             "{:ms_event, _ref, :server_disconnected}",
             "{:conversation, :idle}",
+            "{:conversation, :transport_down}",
             "{:scenario_ctl, :shutdown, _reason}"
           ] do
         assert src =~ clause
       end
 
-      # Four clauses in this wait — three injected, one the scenario's own — and
+      # Five clauses in this wait — four injected, one the scenario's own — and
       # one hook each.
-      assert length(String.split(src, ":on_event")) - 1 == 4
+      assert length(String.split(src, ":on_event")) - 1 == 5
     end
   end
 

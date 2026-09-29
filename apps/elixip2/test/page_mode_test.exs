@@ -310,6 +310,9 @@ defmodule SIP.Test.PageMode do
     assert SIP.Msg.Ops.body_string(req) == "hello bot"
     assert SIP.Msg.Ops.from_username(req) == "alice"
     assert SIP.Msg.Ops.message_kind(req) == :im
+    # the flow a conversation is keyed on (C3c) is stamped on the way in
+    assert {"UDP", ip, port} = SIP.Msg.Ops.source_flow(req)
+    assert is_tuple(ip) and is_integer(port)
     assert Enum.any?(req, fn {k, v} -> k == "Subject" and v == "greetings" end)
   end
 

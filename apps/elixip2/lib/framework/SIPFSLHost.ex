@@ -402,7 +402,9 @@ defmodule SIP.FSL.Host do
   def injected_clauses(ctx),
     do: [
       {:media_down, media_down_clause(ctx)},
-      {:conversation_idle, conversation_idle_clause(ctx)}
+      {:conversation_idle, conversation_clause(ctx, :idle, "conversation idle")},
+      {:conversation_transport_down,
+       conversation_clause(ctx, :transport_down, "conversation transport down")}
     ]
 
   defp media_down_clause(ctx) do
@@ -415,16 +417,17 @@ defmodule SIP.FSL.Host do
     clause
   end
 
-  # A conversation silent for its `idle_timeout` is over (chat-basic-plan, C3b):
-  # the node has already forgotten it, so the next MESSAGE starts another. A
-  # scenario that never considered the case ends there, successfully — going
-  # quiet is how a chat ends. One that wants to keep its context matches
-  # `{:conversation, :idle}` itself, and hibernates.
-  defp conversation_idle_clause(ctx) do
+  # Two ways a conversation ends under the scenario (chat-basic-plan, C3b, C3c):
+  # silent for its `idle_timeout`, or the connected transport it came in on gone.
+  # Either way the node has already forgotten it, so the next MESSAGE starts
+  # another. A scenario that never considered the case ends there, successfully —
+  # going quiet, or away, is how a chat ends. One that wants to keep its context
+  # matches `{:conversation, _}` itself, and hibernates.
+  defp conversation_clause(ctx, event, desc) do
     [clause] =
       quote do
-        {:conversation, :idle} ->
-          {:terminal, :success, "conversation idle", :sip, unquote(ctx)}
+        {:conversation, unquote(event)} ->
+          {:terminal, :success, unquote(desc), :sip, unquote(ctx)}
       end
 
     clause
@@ -444,7 +447,10 @@ defmodule SIP.FSL.Host do
   def clause_covers?(:media_down, pattern), do: pattern_handles_media_down?(pattern)
 
   def clause_covers?(:conversation_idle, pattern),
-    do: pattern_handles_conversation_idle?(pattern)
+    do: pattern_handles_conversation?(pattern, :idle)
+
+  def clause_covers?(:conversation_transport_down, pattern),
+    do: pattern_handles_conversation?(pattern, :transport_down)
 
   def clause_covers?(_name, _pattern), do: false
 
@@ -455,11 +461,11 @@ defmodule SIP.FSL.Host do
   # A bare variable or `_`: a catch-all, which catches this too.
   defp pattern_handles_media_down?(pattern), do: variable?(pattern)
 
-  # `{:conversation, :idle}` is a 2-tuple, a literal pair in quoted form.
-  defp pattern_handles_conversation_idle?({:conversation, event}),
-    do: event == :idle or variable?(event)
+  # `{:conversation, event}` is a 2-tuple, a literal pair in quoted form.
+  defp pattern_handles_conversation?({:conversation, event}, wanted),
+    do: event == wanted or variable?(event)
 
-  defp pattern_handles_conversation_idle?(pattern), do: variable?(pattern)
+  defp pattern_handles_conversation?(pattern, _wanted), do: variable?(pattern)
 
   defp variable?({name, _meta, ctx_arg}) when is_atom(name) and is_atom(ctx_arg), do: true
   defp variable?(_), do: false
