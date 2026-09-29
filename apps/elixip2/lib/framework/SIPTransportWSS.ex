@@ -101,7 +101,7 @@ defmodule SIP.Transport.WSS do
     try do
       Socket.Web.send!(state.socket, {:text, msgstr})
       destipstr = if is_tuple(state.destip), do: SIP.NetUtils.ip2string(state.destip), else: state.destip
-      Logger.debug("WSS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
+      Logger.debug(fn -> "WSS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> SIPMsg.loggable(msgstr) <> "\r\n-----------------" end)
       { :reply, :ok, state }
       rescue
         err in Socket.Error ->

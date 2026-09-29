@@ -499,7 +499,7 @@ defmodule SIP.Transport do
         e ->
           Logger.error([module: __MODULE__, message: "#{tp_name}: dropping an unparsable " <>
             "message from #{inspect(destip)}:#{destport} (#{Exception.message(e)})"])
-          Logger.debug([module: __MODULE__, message: "offending message: #{inspect(message)}"])
+          Logger.debug([module: __MODULE__, message: "offending message: #{inspect(SIPMsg.loggable(message))}"])
           { :noreply, state }
       end
     end
@@ -507,13 +507,17 @@ defmodule SIP.Transport do
     # Display incoming SIP message for debug purposes.
     # We check that the message is a valid string to avoid Logger crash
 
+    # Lazy, and through SIPMsg.loggable/1: a received MESSAGE's content never
+    # reaches the log (chat-basic-plan C1b), and nothing is re-read unless the
+    # line is written.
     defp log_incoming_message(message, tp_name, destip, destport) do
-      dump = if String.valid?(message), do: message, else: inspect(message)
+      Logger.debug(fn ->
+        shown = SIPMsg.loggable(message)
+        dump = if String.valid?(shown), do: shown, else: inspect(shown)
 
-      Logger.debug(
         "#{tp_name}: Message received from #{peer_str(destip, destport)} <----\r\n" <>
           dump <> "\r\n-----------------"
-      )
+      end)
     end
 
     defp do_process_incoming_message(state, message, tp_name, tp_mod, socket, destip, destport) do
@@ -761,9 +765,16 @@ defmodule SIP.Transport do
   catch
     :exit, reason ->
       Logger.debug(module: __MODULE__,
-        message: "transport #{inspect(tid)} is gone (#{inspect(reason)}): #{inspect(request)}")
+        message: "transport #{inspect(tid)} is gone (#{inspect(reason)}): #{inspect(loggable_request(request))}")
       :transporterror
   end
+
+  # A send carries the message's wire text: shown through SIPMsg.loggable/1 like
+  # every other dump of it.
+  defp loggable_request({:sendmsg, msgstr, destip, destport}) when is_binary(msgstr),
+    do: {:sendmsg, SIPMsg.loggable(msgstr), destip, destport}
+
+  defp loggable_request(request), do: request
 
   @spec send_msg( pid(), binary(), binary() | tuple(), integer() ) :: any()
   @doc "Send a SIP message through a transport instance designated by its process ID"

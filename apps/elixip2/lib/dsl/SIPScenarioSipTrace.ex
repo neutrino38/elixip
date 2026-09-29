@@ -39,8 +39,10 @@ defmodule SIP.Scenario.SipTrace do
   One SIP message, as an `FSL.Journal` `:message` event. The first block is what
   the renderers draw. `body` is the whole message as text, its body decoded
   (`SIPMsg.readable/1`, `decoded_from` naming the coding undone), cut at 8 KiB
-  (`clipped`): what a journal reader unfolds. `method`, `code`, `reason`, `cseq`
-  and `sdp` are the SIP reading of it, kept for whoever inspects the events.
+  (`clipped`): what a journal reader unfolds. `redacted` says the text a person
+  wrote was left out of it — a MESSAGE's content is never recorded (GDPR,
+  `SIPMsg.redacted/1`). `method`, `code`, `reason`, `cseq` and `sdp` are the SIP
+  reading of it, kept for whoever inspects the events.
   """
   @type event :: %{
           kind: :message,
@@ -54,6 +56,7 @@ defmodule SIP.Scenario.SipTrace do
           repeat: boolean(),
           body: String.t() | nil,
           clipped: boolean(),
+          redacted: boolean(),
           decoded_from: String.t() | nil,
           method: atom() | nil,
           code: non_neg_integer() | nil,
@@ -157,6 +160,7 @@ defmodule SIP.Scenario.SipTrace do
         Map.merge(fields, %{
           body: body,
           clipped: clipped,
+          redacted: SIP.Msg.Ops.user_content?(parsed),
           decoded_from: decoded_from,
           kind: :message,
           at: System.monotonic_time(:microsecond),

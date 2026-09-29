@@ -571,6 +571,21 @@ defmodule SIP.Msg.Ops do
   defp cpim_content_type(_no_body), do: nil
 
   @doc """
+  Does this message carry **user content** — text a person wrote to another?
+
+  A MESSAGE of kind `:im` with a body, in or out of a dialog. A typing indicator
+  and a disposition notification carry a state, not text; a response carries
+  nothing of the kind. This is the one reading of "what must never be recorded"
+  (GDPR): the journal and the debug logs go through `SIPMsg.redacted/1`, which
+  asks it (docs/design/chat-basic-plan.md, C1b).
+  """
+  @spec user_content?(map()) :: boolean()
+  def user_content?(%{method: :MESSAGE} = msg),
+    do: message_kind(msg) == :im and body_string(msg) != nil
+
+  def user_content?(_msg), do: false
+
+  @doc """
   The lifetime a MESSAGE's sender gives its **content**, in seconds, or `nil`
   when it says nothing.
 
