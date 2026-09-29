@@ -58,7 +58,7 @@ What exists today, as found on 2026-09-29.
 ```elixir
 SIP.Msg.Ops.message_kind(req)       #=> :im | :is_composing | :imdn
 SIP.Msg.Ops.content_expires(req)    #=> 3600 | nil        (Expires on a non-INVITE, §20.19)
-SIP.Msg.Ops.instance_id(contact)    #=> "<urn:uuid:…>" | nil   (+sip.instance, RFC 5626)
+SIP.Msg.Ops.instance_id(contact)    #=> "urn:uuid:…" | nil     (+sip.instance, RFC 5626)
 SIP.Msg.Ops.device_key(contact)     #=> instance_id, else the contact URI serialized
 ```
 

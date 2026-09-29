@@ -511,6 +511,125 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  # ── instant messaging (RFC 3428) ─────────────────────────────────────────────
+  #
+  # What the chat function asks of a MESSAGE: what its body is, how long its
+  # content is worth keeping, and which device a contact is. Read here, once, so
+  # the relay, the Silo and the scripts match on an answer rather than compare
+  # strings of their own (docs/design/chat-basic-plan.md, C1).
+
+  @doc """
+  What a page-mode MESSAGE carries: `:im` (a message for a person),
+  `:is_composing` (a typing indicator, RFC 3994) or `:imdn` (a disposition
+  notification, RFC 5438).
+
+  A `message/cpim` body (RFC 3862) is an envelope, and the kind is that of the
+  content it wraps: its MIME header block names the type. An envelope naming no
+  type, or no body at all, reads `:im` — the answer that stores and relays, which
+  is the safe side for a message nobody could classify.
+
+  The distinction exists for one decision: a typing indicator is worth nothing a
+  second later and is never stored.
+  """
+  @spec message_kind(map()) :: :im | :is_composing | :imdn
+  def message_kind(msg) when is_map(msg) do
+    type =
+      case body_content_type(msg) do
+        "message/cpim" -> cpim_content_type(body_string(msg))
+        type -> type
+      end
+
+    case type do
+      "application/im-iscomposing+xml" -> :is_composing
+      "message/imdn+xml" -> :imdn
+      _other -> :im
+    end
+  end
+
+  # The Content-Type of the content inside a CPIM envelope: the envelope's own
+  # headers come first, then the MIME headers of the content, then the content.
+  # Only the header blocks are searched — a Content-Type line in the text of the
+  # message itself is the user's, not the envelope's.
+  defp cpim_content_type(body) when is_binary(body) do
+    body
+    |> String.split(~r/\r?\n\r?\n/, parts: 3)
+    |> Enum.take(2)
+    |> Enum.flat_map(&String.split(&1, ~r/\r?\n/))
+    |> Enum.find_value(fn line ->
+      case String.split(line, ":", parts: 2) do
+        [name, value] ->
+          if String.downcase(String.trim(name)) == "content-type" do
+            value |> String.trim() |> split_params() |> elem(0) |> String.downcase() |> presence()
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp cpim_content_type(_no_body), do: nil
+
+  @doc """
+  The lifetime a MESSAGE's sender gives its **content**, in seconds, or `nil`
+  when it says nothing.
+
+  On a non-INVITE request the `Expires` header is the validity of the content
+  (RFC 3261 §20.19), not a registration lifetime: there is no Contact parameter
+  to prefer and no default to fall back on, so this is **not**
+  `requested_expires/2`. `nil` matters — the Silo's retention takes the script's
+  value, then the domain's, only when the sender said nothing.
+  """
+  @spec content_expires(map()) :: non_neg_integer() | nil
+  def content_expires(msg) when is_map(msg), do: expires_header(msg)
+
+  @doc """
+  The instance ID of a Contact (`+sip.instance`, RFC 5626 §4.1), as a bare URN —
+  `"urn:uuid:a11ce000-…"` — or `nil` when it carries none.
+
+  A Contact **header** parameter, read with `SIP.Uri.get_header_param/2`. The
+  value arrives quoted and in angle brackets, which are stripped; a `urn:uuid:`
+  is folded to lower case, since two spellings of one UUID are one device.
+  """
+  @spec instance_id(term()) :: binary() | nil
+  def instance_id(%SIP.Uri{} = contact) do
+    with {:ok, value} when is_binary(value) <- SIP.Uri.get_header_param(contact, "+sip.instance"),
+         urn when urn != "" <-
+           String.trim(value, "\"")
+           |> String.trim_leading("<")
+           |> String.trim_trailing(">")
+           |> String.trim() do
+      if String.match?(urn, ~r/^urn:uuid:/i), do: String.downcase(urn), else: urn
+    else
+      _ -> nil
+    end
+  end
+
+  def instance_id(_other), do: nil
+
+  @doc """
+  The identity a delivery to `contact` is recorded against: its instance ID when
+  it sends one, else its contact URI as a Request-URI.
+
+  The fallback drops the header parameters (`expires`, `q`…), which change from
+  one REGISTER to the next, and keeps the address — so a device re-registering
+  from a new address without an instance ID is a new device, the duplicate risk
+  the design accepts (DESIGN-CHAT.md, *Multi-device*).
+  """
+  @spec device_key(term()) :: binary() | nil
+  def device_key(%SIP.Uri{} = contact) do
+    case instance_id(contact) do
+      nil ->
+        {:ok, ruri} = SIP.Uri.serialize_ruri(contact)
+        ruri
+
+      urn ->
+        urn
+    end
+  end
+
+  def device_key(_other), do: nil
+
   @doc """
   The value of a `Subscription-State` header (RFC 6665 §8.2.3), built.
 
