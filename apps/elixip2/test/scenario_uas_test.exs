@@ -161,6 +161,20 @@ defmodule SIP.Test.ScenarioUASFactory do
     send(pid, {:scenario_ctl, :shutdown, :test})
   end
 
+  test "ConfigRegistry dispatches an out-of-dialog MESSAGE to ScenarioUAS.on_message" do
+    {:ok, _} = SIP.Session.ConfigRegistry.start()
+    start_factory(scenario_module: UASFactoryFixture.CatchAll, max_instances: 1)
+    :ok = SIP.Session.ConfigRegistry.set_chat_processing_module(Elixip.ScenarioUAS)
+
+    message = %{method: :MESSAGE, ruri: %SIP.Uri{domain: "x.test"}}
+
+    assert {:accept, pid} = SIP.Session.ConfigRegistry.dispatch(self(), message, self())
+    # The same quota as every other kind of instance.
+    assert {:reject, 503, _} = SIP.Session.ConfigRegistry.dispatch(self(), message, self())
+
+    send(pid, {:scenario_ctl, :shutdown, :test})
+  end
+
   test "Elixip.RegistrarUAS alias delegates to the ScenarioUAS server" do
     start_factory(scenario_module: UASFactoryFixture.Block, max_instances: 5)
 

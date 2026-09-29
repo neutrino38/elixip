@@ -250,7 +250,7 @@ defmodule Elixipp.CLI do
   # instances (REGISTER beyond it are rejected with 503). Never returns.
   @spec run_server_mode(module(), atom(), keyword(), pos_integer(), term()) :: no_return()
   defp run_server_mode(module, kind, opts, limit, ext_config)
-       when kind in [:uas_register, :uas_invite, :uas_presence],
+       when kind in [:uas_register, :uas_invite, :uas_presence, :uas_message],
        do: start_uas_server(module, kind, opts, limit, ext_config)
 
   defp run_server_mode(_module, type, _opts, _limit, _ext_config) do
@@ -263,7 +263,7 @@ defmodule Elixipp.CLI do
   # server loop. Never returns.
   @spec start_uas_server(
           module(),
-          :uas_register | :uas_invite | :uas_presence,
+          :uas_register | :uas_invite | :uas_presence | :uas_message,
           keyword(),
           pos_integer(),
           term()
@@ -306,6 +306,11 @@ defmodule Elixipp.CLI do
         # decided by the states it writes.
         :uas_presence ->
           SIP.Session.ConfigRegistry.set_presence_processing_module(Elixip.ScenarioUAS)
+
+        # An out-of-dialog MESSAGE (RFC 3428) has its own slot: a chat scenario
+        # does not pose as a presence server.
+        :uas_message ->
+          SIP.Session.ConfigRegistry.set_chat_processing_module(Elixip.ScenarioUAS)
       end
 
     started = start_listeners(listeners)
@@ -422,6 +427,7 @@ defmodule Elixipp.CLI do
   defp server_kind_label(:uas_register), do: "UAS Register"
   defp server_kind_label(:uas_invite), do: "UAS Invite (call server)"
   defp server_kind_label(:uas_presence), do: "UAS Presence (notifier)"
+  defp server_kind_label(:uas_message), do: "UAS Message (page mode)"
 
   # Live monitored server loop: bring up Owl + the monitor, render the call table
   # in a live block and react to the keyboard (q / Ctrl+D / arrows). On a
@@ -1635,6 +1641,7 @@ defmodule Elixipp.CLI do
       elixipp --listen wss:5065 --tls-cert cert.pem --tls-key key.pem uas_register.exs
       elixipp --listen udp:5060 uas_presence.exs  # notifieur de présence (SUBSCRIBE/NOTIFY)
       elixipp --listen udp:5060 uas_invite.exs    # serveur d'appels (répond aux INVITE)
+      elixipp --listen udp:5060 uas_message.exs   # messagerie page-mode (répond aux MESSAGE)
       elixipp -l 20 --listen udp:5060 uas_invite.exs         # 20 appels simultanés max
 
     OPTIONS

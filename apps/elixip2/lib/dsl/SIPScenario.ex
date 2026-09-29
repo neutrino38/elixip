@@ -14,10 +14,11 @@ defmodule SIP.Scenario do
         end
       end
 
-  Six `use` lines' worth of SIP verbs — `SIP.Session.CallUAC`,
+  Seven `use` lines' worth of SIP verbs — `SIP.Session.CallUAC`,
   `SIP.Session.Media`, `SIP.Session.B2bua`, the two halves of the subscription
   layer, `SIP.Session.SubscribeUAC` (watcher) and `SIP.Session.Notifier`
-  (notifier), and `SIP.Session.Publish` (RFC 3903) — plus `FSL.Machine`, told
+  (notifier), `SIP.Session.Publish` (RFC 3903) and `SIP.Session.Page` (RFC 3428
+  page mode) — plus `FSL.Machine`, told
   which embedding to call back into (`SIP.FSL.Host`) and what this binding calls
   its context variable (`sip_ctx`).
 
@@ -71,6 +72,7 @@ defmodule SIP.Scenario do
       use SIP.Session.SubscribeUAC
       use SIP.Session.Notifier
       use SIP.Session.Publish
+      use SIP.Session.Page
 
       use FSL.Machine,
         host: SIP.FSL.Host,

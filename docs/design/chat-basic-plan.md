@@ -1,6 +1,6 @@
 # chat-basic-plan.md — building basic instant messaging
 
-**Status (2026-09-29): C1, C1b and C2 implemented; C3 next, then the conversations (C3b–C3d).** The design is
+**Status (2026-09-29): C1, C1b, C2 and C3 implemented; the conversations (C3b–C3d) next.** The design is
 [DESIGN-CHAT.md](DESIGN-CHAT.md); this document is the order it gets built in,
 what each phase delivers, and what proves it.
 

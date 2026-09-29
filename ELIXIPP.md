@@ -126,6 +126,7 @@ same logic under a different module name (`UAC.InviteExample`,
 | `uas_invite.exs` | **call server**: answers inbound INVITEs |
 | `uac_subscribe.exs` | **watcher**: SUBSCRIBE for `presence`, displays each state, un-SUBSCRIBEs |
 | `uas_presence.exs` | **notifier**: accepts a subscription, NOTIFYs the state, answers a PUBLISH |
+| `uas_message.exs` | **page-mode server**: answers out-of-dialog MESSAGEs |
 | `uac_register_and_uas_invite.exs` | registers, then waits for an inbound call (uses `spawn_fsm`) |
 | `smoke.exs` | no SIP traffic; checks the tool itself end to end |
 | `http_get_example.exs` | an HTTP call from a scenario |
@@ -133,9 +134,10 @@ same logic under a different module name (`UAC.InviteExample`,
 Start from one of these to write your own, and combine either form with `--config`
 to inject real accounts.
 
-## Server (UAS) mode — registrar, call server and notifier
+## Server (UAS) mode — registrar, call server, notifier and messages
 
-A scenario declaring `uas :register`, `uas :invite` or `uas :presence` is a server:
+A scenario declaring `uas :register`, `uas :invite`, `uas :presence` or `uas :message`
+is a server:
 `elixipp` binds the `--listen` sockets and lets inbound requests drive it, one
 instance per dialog.
 
@@ -151,6 +153,9 @@ elixipp --listen udp:5060 uas_invite.exs
 
 # Notifier: answer SUBSCRIBE (and PUBLISH) for the `presence` package
 elixipp --listen udp:5060 uas_presence.exs
+
+# Page mode: answer out-of-dialog MESSAGE (RFC 3428)
+elixipp --listen udp:5060 uas_message.exs
 ```
 
 What to expect:

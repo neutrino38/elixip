@@ -586,6 +586,54 @@ automatically in the context by the `on_events` instrumentation, so the `reply_i
 macros serve it without the scenario re-passing it. Media resources are released on the
 `{:dialog_terminated, …}` contract exactly as for a UAC call.
 
+### Server (UAS) scenarios — page-mode messages
+
+A scenario declaring `uas :message` answers out-of-dialog `MESSAGE` requests (RFC 3428,
+page mode). One instance is spawned per inbound MESSAGE; the request is already in its
+mailbox when it starts.
+
+```elixir
+defmodule UAS.MessageExample do
+  use SIP.Scenario
+  uas :message
+
+  state initial_state do
+    goto next
+  end
+
+  state wait_message do
+    on_events do
+      {:MESSAGE, req, _trans_pid, _dialog_pid} ->
+        reply_message(200)
+        scenario_success("answered #{SIP.Msg.Ops.message_kind(req)}")
+    after
+      5_000 -> scenario_failure("no MESSAGE received")
+    end
+  end
+end
+```
+
+Any scenario, client or server, sends a page of its own with `send_page/4`. The answer
+arrives as an outcome, not as a SIP response:
+
+```elixir
+state notify_carol do
+  send_page("sip:carol@example.com", "The build is green", "text/plain")
+
+  on_events do
+    {:page, :answered, %{code: code}} when code in 200..299 -> scenario_success("delivered")
+    {:page, :answered, %{code: code}} -> scenario_failure("refused #{code}")
+    {:page, :failed, %{reason: reason}} -> scenario_failure("not sent: #{inspect(reason)}")
+  after
+    35_000 -> scenario_failure("no outcome")
+  end
+end
+```
+
+`send_page(target, last_uas_req())` carries on the MESSAGE this instance received: the
+request is rebuilt with the original sender, `To`, content and allowlisted headers, and
+`target` as its Request-URI. See `SIP.Session.Page` below.
+
 
 ## Sub-scenarios (sub-FSM)
 
@@ -985,6 +1033,27 @@ act on the request that got it there without the previous state having stashed i
 A scenario **never** replies the `487` after a CANCEL itself — it is automatic. A `100 Trying`
 is *not* automatic: send it with `reply_invite(100, "Trying")` if the scenario needs one (see the
 *incoming calls* section above).
+
+### SIP.Session.Page
+
+Page-mode messaging (RFC 3428), brought in by `SIP.Scenario`. Distinct from
+`send_MESSAGE`, which sends a MESSAGE **inside** an established dialog.
+
+- `reply_message(code, opts \\ [])` — answer the out-of-dialog MESSAGE this instance is
+  serving (the auto-stored one; `last_uas_req()` reads it back). `opts` is a reason phrase, or
+  `reason:` and `fields:` (extra response header fields).
+- `send_page(to, body, content_type \\ "text/plain", opts \\ [])` — send a new out-of-dialog
+  MESSAGE in a transaction of its own; the instance's own dialog is left untouched. `opts`:
+  `:from` (default: the context identity, else the address the served MESSAGE was sent to),
+  `:headers` (Subject, Conversation-ID, Contribution-ID, P-Asserted-Identity), `:date` (a `Date`
+  header, `%DateTime{}` or string), `:timeout` (dialog lifetime, 60 s). `body` may be a received
+  MESSAGE, which is then rebuilt and sent to `to`.
+- Outcomes: `{:page, :answered, %{code, reason, to, response}}` for any final response (a
+  transaction timeout is a `408`), `{:page, :failed, %{reason, to}}` when the request never left.
+
+The outbound request is built by `SIP.MsgTemplate.page_request/2`: never the source request
+replayed, no Via, Route, Call-ID, CSeq or tag carried over. When the scenario is traced, the page
+and its answer appear in its journal under the leg `page`, the content redacted.
 
 ### Connecting calls (B2BUA)
 
