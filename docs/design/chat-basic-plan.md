@@ -1,6 +1,6 @@
 # chat-basic-plan.md — building basic instant messaging
 
-**Status (2026-09-29): C1, C1b and C2 implemented; C3 next.** The design is
+**Status (2026-09-29): C1, C1b and C2 implemented; C3 next, then the conversations (C3b–C3d).** The design is
 [DESIGN-CHAT.md](DESIGN-CHAT.md); this document is the order it gets built in,
 what each phase delivers, and what proves it.
 
@@ -18,6 +18,7 @@ are not**.
 |---|---|
 | the `chat` function: `[[domain.chat]]` blocks, first-match on the R-URI user part | MESSAGE is answered 405 today; nothing else in this list is reachable without it |
 | the message-layer readings MESSAGE needs (content lifetime, kind of body, device identity) | the rule of one reading in one place ([CLAUDE.md](../../CLAUDE.md), *Message Layer*) |
+| conversations: one scenario per conversation, not per MESSAGE; idle end, hibernation, wake-up | page mode has no dialog to follow, and a relay or a bot needs a context that outlives one transaction (C3b–C3d) |
 | the page relay: one MESSAGE fanned out to the AOR's live contacts, one answer back | peer-to-peer chat with every device online |
 | the Silo module: store, flush on REGISTER, retention, quotas, shared SQL storage | the recipient offline — the half of objective 1 that needs a module |
 | `Kelix.DB.Pool`, extracted from `auth_db` | the Silo is the second SQL client; the design forbids a second copy of the opening logic |
@@ -233,6 +234,167 @@ it sent and both answers, in one journal — redacted (C1b).
 Via, Route or CSeq of the one it was built from; and a traced instance's journal
 holds both transactions.
 
+### C3b — conversations: one scenario, many MESSAGEs
+
+**The problem.** kelixip's contract is *one scenario instance per dialog*. Page
+mode breaks it from below: every MESSAGE opens a dialog of its own, with a new
+Call-ID, closed 60 s later (`SIP.Dialog.start_new_dialog_for/3`). A chat scenario
+built on that contract is born and dies with each message — it cannot remember
+that it authenticated Alice a minute ago, and a bot cannot hold a conversation.
+This is how clients use SIP (Trix, Linphone), and it is not ours to change.
+
+**The answer: a conversation is the unit, and a dialog is one of its messages.**
+The dialog layer already hands a request to whatever pid the router answers
+(`{:accept, pid}` → `send(pid, {:MESSAGE, req, trans, dialog})`,
+`SIPDialogImpl.ex`). So the router looks a conversation up **before** spawning:
+a live instance for the key gets the MESSAGE; none spawns one, registered under
+the key.
+
+**The key**, declared per `[[domain.chat]]` block, because a bot, a relay and a
+room are three different conversations:
+
+```toml
+[[domain.chat]]
+pattern      = "mybot"
+script       = "mybot.exs"
+conversation = "pair"     # (From AOR, To AOR), ordered — one per user and bot
+
+[[domain.chat]]
+pattern      = "room-."
+script       = "chatroom.exs"
+conversation = "to"       # the To AOR — one per room, not one per member
+
+[[domain.chat]]
+default      = true
+script       = "p2p-chat.exs"
+conversation = "peers"    # {From AOR, To AOR}, unordered — Bob's answer
+                          # reaches the instance Alice's message started
+```
+
+Absent, `conversation` is `"peers"`. The AORs are `user@domain`, read through
+`SIP.Msg.Ops` — tags change with every message, and a display name is not an
+identity. **Neither the source address nor the transport is in the key**: Trix
+reconnects its WebSocket at every wake-up, a NAT moves a UDP port, and Alice
+writing from her phone then from her desk is one conversation. The source has a
+role, and it is C3c's.
+
+**Delivers**
+
+- `Kelix.Conversations`, in the core: a `Registry` with unique keys
+  `{domain, block, key}` → instance pid. The lookup-or-spawn is atomic — two
+  MESSAGEs of one conversation arriving together start one instance, not two;
+- `Kelix.Router.dispatch/3` for `:chat`: resolve the block as today, compute the
+  key, then `{:accept, live_pid}` or `InstancePool.accept/4` + register. A
+  conversation holds **one** quota slot, whatever the number of its messages;
+- the chat mixin (`SIP.Session.Page`, C3) absorbs the `{:dialog_terminated, …}`
+  of each MESSAGE dialog closing — one per message, meaningless to a script —
+  and replies on the transaction of the MESSAGE being handled (`last_uas_req()`
+  is per message, as it is per REGISTER in a registrar);
+- **the idle end**: no MESSAGE in or out for `idle_timeout` seconds (a
+  `[[domain.chat]]` key, default 300) and the instance is told
+  `{:conversation, :idle}`. A script that does nothing ends there; one that
+  wants to keep its context hibernates (C3d);
+- the monitor row shows a conversation as one instance, with its message count;
+  the journal of a traced conversation spans all its messages, redacted (C1b).
+
+**Files** `apps/kelixip/lib/kelix/conversations.ex`, `router.ex`, `domains.ex`
+(`conversation`, `idle_timeout`), `framework/SIPSessionPage.ex`,
+`apps/kelixip/test/conversations_test.exs`.
+
+**Done when** three MESSAGEs from Alice to `mybot` reach one instance; Bob's
+answer to Alice reaches the `p2p-chat.exs` instance her message started; two
+MESSAGEs sent in the same millisecond start one instance; a conversation silent
+for `idle_timeout` ends and frees its slot.
+
+### C3c — trust: not challenging every message
+
+Routing by `(From, To)` must not become authentication by `(From, To)`: a `From`
+is forged in one line, and "the conversation exists" would let anyone write as
+Alice — to Bob, or to a bot acting on Alice's behalf — while it lives. So the
+two are separate:
+
+- **routing** is the key of C3b;
+- **trust** — skipping the challenge — needs proof the sender is the one who
+  authenticated. Two proofs, either sufficient:
+  - **the same flow**: the MESSAGE arrives over the transport instance that
+    carried the authenticated one (TCP, TLS, WSS), or from the same IP:port
+    (UDP), within `trust_window` seconds of the last authenticated request.
+    What the flow proves is what an established dialog proves, which is why an
+    in-dialog request is not re-challenged either (decision 7);
+  - **a reused nonce**: `Authorization` carrying a nonce still inside its
+    `max_age` with a `nc` that advances, checked by the digest verification
+    `auth_db` already runs and by `Kelix.NonceCache`'s anti-replay. Linphone
+    does this; JsSIP, as far as we know, does not.
+
+A reconnection — Trix waking — is a new flow, and is challenged once. That is
+the correct answer, not a regression.
+
+**Delivers** `Kelix.Mod.AuthDb.trusted?(sip_ctx, req)`: `true` when either proof
+holds for the AOR in `From`, with the conversation's last authenticated flow
+kept in the instance's context by `authenticate/2` itself. The script asks one
+question and matches one answer; it compares no address (CLAUDE.md, *Writing a
+scenario*).
+
+**Files** `apps/kelix_modules/lib/kelix/mod/auth_db.ex`, its SBB,
+`apps/kelix_modules/test/auth_db_trust_test.exs`.
+
+**Done when** a second MESSAGE on the same WSS connection is relayed with no
+401; the same MESSAGE with the same `From` from another address is challenged;
+a MESSAGE carrying a reused nonce with `nc` advanced is accepted from anywhere,
+and one replaying the same `nc` is refused.
+
+### C3d — hibernation
+
+```elixir
+hibernate(resume: :awaiting_answer, keep: [:step, :cart], ttl: 86_400)
+```
+
+**Delivers** a conversation that outlives its process. On `hibernate/1` the
+instance writes what it names — the state to resume in, the appdata keys in
+`keep` — under its conversation key, and stops; its quota slot is freed. The
+next MESSAGE with the same key finds no live instance, finds the hibernated one,
+and spawns the script **at `resume:`** with the kept data and the waking
+MESSAGE queued, as a UAS instance is spawned with the request that created it.
+
+- **What survives is what the script names.** The FSL context holds pids —
+  dialogs, transactions, a media session — that mean nothing after a restart.
+  `keep` values must be plain data (checked at `hibernate/1`, which refuses a
+  pid, a ref or a function rather than storing a value that will not wake).
+- **The module owns the lifetime.** A kelixip module, `conversation`, holds the
+  store and the sweep:
+
+  ```toml
+  [module.conversation]
+  default_ttl = 86400      # when the script names none
+  max_ttl     = 604800     # the cap, whoever asks
+  ```
+
+  The granted TTL is the script's bounded by `max_ttl` — the Silo's demand-and-
+  bounds shape. An expired conversation is deleted by the sweep; the next
+  MESSAGE with its key starts a fresh one.
+- **The store is SQL, through `Kelix.DB.Pool` (C5)**, so a conversation
+  hibernated on one node wakes on another and survives a restart — the reason
+  hibernation is a serialized state and not a sleeping process. Until C5 lands,
+  an ETS store behind the same behaviour lets C3d be built and tested; it is
+  not shipped as a production backend.
+- **Waking runs the current script version.** A process does not survive a
+  restart, so a version cannot be pinned the way a subscription pins one. If
+  `resume:` names a state the current script no longer has, the instance starts
+  at `initial_state` with the kept data, and a warning names the conversation
+  and the missing state.
+
+**Files** `apps/elixip2/lib/dsl/` (the `hibernate/1` verb and the resume entry
+point, in the SIP binding: FSL spawns at a named state through
+`c:FSL.Host.spawn_child/2`'s options, which is checked first and is an FSL
+change if it is not there), `apps/kelix_modules/lib/kelix/mod/conversation.ex`,
+`packaging/sql/conversation/{mysql,postgres}.sql`, tests in both apps.
+
+**Done when** a bot hibernates after its question, its process is gone, the
+user's answer an hour later wakes it at `awaiting_answer` with `step` intact; a
+hibernated conversation past its TTL is gone and the next message starts over;
+`hibernate/1` handed a pid in `keep` refuses; a node restarted between the two
+messages wakes the conversation all the same (SQL gate).
+
 ### C4 — the page relay
 
 ```elixir
@@ -438,7 +600,9 @@ MESSAGE on one machine, and the same pair drives C8's recipe against a node.
   already covers MESSAGE), 404 for an AOR that does not exist, relay (C4), store
   on `:undelivered` and answer **202**, answer 480 for an undelivered
   `:is_composing`, 503 when the Silo is down. A MESSAGE sent **inside an
-  established dialog** is never re-challenged (see *Decisions*);
+  established dialog**, or one its conversation trusts (`AuthDb.trusted?/2`,
+  C3c), is not re-challenged (see *Decisions*). One instance per conversation
+  (`conversation = "peers"`), ending idle;
 - `scripts/registrar-chat.exs`: `registrar-presence.exs` plus `Silo.flush` after
   each 200 that leaves the AOR registered. A variant, as `registrar-presence.exs`
   is one of `registrar.exs` — see *Decisions*;
@@ -499,7 +663,15 @@ gains the kelixip configuration beside the Kamailio one.
    `Kelix.Mod.AuthDb.challengeable?/1`'s, which already excludes in-dialog
    requests; the script asks it and does not re-derive it, and C8 carries a test
    in which a second MESSAGE in the same dialog is relayed with no 401/407.
-8. **A message's content is never recorded outside the Silo, and this is not
+   Page mode rarely reuses a dialog, so the same rule is extended to a
+   **conversation** (C3c): not re-challenged when the MESSAGE comes over the flow
+   that authenticated, or carries a reused nonce — never on `(From, To)` alone.
+8. **One scenario per conversation, not per dialog.** The key is declared per
+   block (`pair`, `peers`, `to`) and never includes the source address; the
+   source decides trust (C3c), not routing (C3b). A conversation ends idle,
+   hibernates on request into a serialized state (not a sleeping process), and
+   expires on the `conversation` module's TTL (C3d).
+9. **A message's content is never recorded outside the Silo, and this is not
    configurable.** Not a filter in kelescope, not a flag an operator can turn
    off while debugging: a switch that reveals the content is a switch someone
    leaves on, and the journal it filled is kept for an hour and exported as JSON.
@@ -507,13 +679,15 @@ gains the kelixip configuration beside the Kamailio one.
    retention is bounded, and nothing reads it but the delivery. Redaction lives
    in the message layer for the reason every reading does: one place decides what
    a MESSAGE's content is (C1b).
-9. **The storage is SQL from the first commit.** No in-memory Silo is shipped:
+10. **The storage is SQL from the first commit.** No in-memory Silo is shipped:
    the in-memory store exists for the test suite only. A node that loses its
    messages on restart has already answered 202 to their senders.
 
 ## 5. Order, and what runs in parallel
 
-C1 → C3 → C4 is the spine of peer-to-peer chat with everyone online. **C1b
+C1 → C3 → C3b → C4 is the spine of peer-to-peer chat with everyone online. C3c
+follows C3b (it needs the conversation to remember a flow). C3d needs C3b, and
+C5 for its production store; it can be built on its ETS store before. **C1b
 comes before C3**: the first phase that makes a node carry MESSAGEs is the last
 moment their content can be kept out of a journal by construction rather than
 cleaned out of one afterwards. C2 depends
@@ -523,11 +697,12 @@ C8 depends on everything.
 
 **Two release points.**
 
-- **1.7.0** — C1 to C4, C7, and C8 without the Silo: page-mode chat between
+- **1.7.0** — C1 to C4 (C3d on its ETS store, or held back), C7, and C8 without the Silo: page-mode chat between
   registered devices, 480 when nobody is there. Useful on its own, and it
   exercises the dispatch and the relay on real clients before the store is built
   behind them.
-- **1.8.0** — C5, C6 and the rest of C8: offline delivery.
+- **1.8.0** — C5, C6, C3d's SQL store, and the rest of C8: offline delivery, and
+  conversations that survive a restart.
 
 1.7.0 is not enough for a client that unregisters while asleep: Trix's
 correspondents get 480 for as long as its tab sleeps (§6). A Trix deployment on
@@ -555,7 +730,7 @@ what it requires of one. Cross-checked against its code (`src/sip/message.ts`,
 | files a deferred message at its `Date` header when present and not in the future, otherwise at reception (D8); asks msilo for `add_date = 0` | the Silo sets `Date` to the arrival time and never touches the body | C3, C6 |
 | classifies the sender by the `From` URI, never the display name (D4) | the rebuilt request keeps the sender's `From` | C3 |
 | has no de-duplication at all, and no automatic retry (D3) | every duplicate the node produces is shown twice to the user | below |
-| sends every message out of dialog (`ua.sendMessage`), each with a new Call-ID | each Trix MESSAGE is an initial request and is challenged; decision 7 never applies to it — it applies to clients that reuse a page-mode dialog | decision 7 |
+| sends every message out of dialog (`ua.sendMessage`), each with a new Call-ID, over one WebSocket | each Trix MESSAGE is an initial request; with conversations it reaches the live instance, and on the same WebSocket it is not re-challenged. At every wake-up Trix reconnects, and is challenged once | C3b, C3c |
 | answers **501** to a MESSAGE inside a call dialog (D10) | a call script relaying MESSAGE in-dialog towards a Trix leg gets 501: expected, not a bug | — |
 | reads 405 or 501 on a sent MESSAGE as "this server does not route messages" and closes the writing field (D13) | a domain without `[[domain.chat]]` answers 405 — exactly the signal Trix expects | C2, decision 3 |
 | caps a body at 1000 UTF-8 bytes (D2) | nothing: well under the Silo's quotas | — |
@@ -619,6 +794,17 @@ the second device).
   too, and the journal shows it today. The constraint as stated is about
   messages; extending C1b's rule to presence notes is one clause in the same
   function, and a decision for the presence side.
+- **a conversation is local to its node while alive.** A MESSAGE landing on
+  another node starts a second instance for the same key; only a hibernated
+  conversation, in SQL, is reachable from every node. Routing a conversation to
+  the node holding it is the scale-out track's (DESIGN-CHAT.md,
+  *Horizontal scale*).
+- **a conversation's journal grows with it.** One journal per instance, and an
+  instance now spans many messages: `max_trace_bytes` is reached sooner, and
+  the `:cut` event says so.
+- **`resume:` across script versions.** A renamed state wakes at
+  `initial_state`, with its kept data: a bot author renaming states must expect
+  it. The warning is the only signal.
 - **the SQL tests are gated.** A suite that is green without a database proves
   the logic, not the dialects. The release checklist for 1.8.0 runs both gates
   against real engines once.

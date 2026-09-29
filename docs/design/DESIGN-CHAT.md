@@ -288,6 +288,17 @@ follows it: the domain is a column, never a pool.
 > [DESIGN-KELIXIP.md](DESIGN-KELIXIP.md) before it gets decided three times
 > incompatibly.
 
+## Conversations
+
+Page mode follows no dialog: every MESSAGE opens one of its own and closes it
+60 s later. A chat scenario is therefore bound to a **conversation**, not to a
+dialog — a key declared per `[[domain.chat]]` block (`pair`, `peers`, `to`)
+built from the `From` and `To` AORs, never from the source address. The source
+decides **trust** (whether a message is re-challenged), not routing. A
+conversation ends when idle, can hibernate on request into a serialized state,
+and expires on the `conversation` module's TTL. The phases are C3b–C3d of
+[chat-basic-plan.md](chat-basic-plan.md).
+
 ## Peer-to-peer chat
 
 A chat B2BUA — to be specified. A MESSAGE is not a session, so "B2BUA" here
