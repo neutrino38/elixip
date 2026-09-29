@@ -5,7 +5,8 @@
 defmodule SIP.Session.Presence do
   @moduledoc """
   What a presence server implements, so the dialog layer knows where to send an
-  inbound SUBSCRIBE, PUBLISH, MESSAGE or INFO.
+  inbound SUBSCRIBE, PUBLISH or INFO. An out-of-dialog MESSAGE is not presence:
+  it goes to `SIP.Session.Chat`.
 
   The exact counterpart of `SIP.Session.Registrar`, and deliberately shaped like
   it: the callback receives the **dialog pid**, the parsed request and the pid of
@@ -44,10 +45,6 @@ defmodule SIP.Session.Presence do
   @callback on_new_publish(dialog_id :: pid, pub_req :: map, transaction_id :: pid) ::
               {:accept, pid} | {:reject, integer, binary}
 
-  @doc "A page-mode MESSAGE (RFC 3428). Its dispatch is chat's — see DESIGN-CHAT.md."
-  @callback on_message(dialog_id :: pid, msg_req :: map, transaction_id :: pid) ::
-              {:accept, pid} | {:reject, integer, binary}
-
   @doc "An out-of-dialog INFO. Same contract."
   @callback on_info(dialog_id :: pid, msg_req :: map, transaction_id :: pid) ::
               {:accept, pid} | {:reject, integer, binary}
@@ -62,5 +59,5 @@ defmodule SIP.Session.Presence do
   """
   @callback on_subscription_expired(dialog_id :: pid, app_pid :: pid) :: any()
 
-  @optional_callbacks on_message: 3, on_info: 3, on_subscription_expired: 2
+  @optional_callbacks on_info: 3, on_subscription_expired: 2
 end

@@ -13,6 +13,11 @@ defmodule Kelix.Domain do
   the package is what a watcher asks for, and what the domain answers **489** on
   when it serves another (DESIGN-PRESENCE.md, *the Router reads `Event`*); the
   list is also what `Allow-Events` is composed from.
+
+  `chat` is the ordered `[[domain.chat]]` rule list — the dial plan's shape, a
+  pattern on the R-URI user part and a catch-all last — routing an out-of-dialog
+  MESSAGE to its script (DESIGN-CHAT.md, *chat is a function of its own*). Empty
+  if chat is not enabled.
   """
 
   @type fn_config :: %{optional(atom) => term}
@@ -23,7 +28,8 @@ defmodule Kelix.Domain do
           max_calls: pos_integer | nil,
           registrar: fn_config | nil,
           presence: [Kelix.PresenceBlock.t()],
-          dial_plan: [Kelix.DialRule.t()]
+          dial_plan: [Kelix.DialRule.t()],
+          chat: [Kelix.DialRule.t()]
         }
 
   defstruct name: nil,
@@ -31,7 +37,8 @@ defmodule Kelix.Domain do
             max_calls: nil,
             registrar: nil,
             presence: [],
-            dial_plan: []
+            dial_plan: [],
+            chat: []
 end
 
 defmodule Kelix.PresenceBlock do

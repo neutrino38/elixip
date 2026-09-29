@@ -212,6 +212,50 @@ defmodule Kelix.DomainsTest do
       assert msg =~ "must be the last call rule"
     end
 
+    test "chat rules: the dial plan's rules, and its refusals under their own name" do
+      toml =
+        ~s([[domain]]\nname = "a"\n[[domain.chat]]\ndefault = true\nscript = "c"\n[[domain.chat]]\npattern = "X"\nscript = "s")
+
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "must be the last chat rule"
+
+      assert {:error, msg} =
+               Domains.parse(~s([[domain]]\nname = "a"\n[[domain.chat]]\nscript = "s"))
+
+      assert msg =~ "each [[domain.chat]] needs"
+
+      assert {:error, msg} =
+               Domains.parse(~s([[domain]]\nname = "a"\n[domain.chat]\nscript = "s"))
+
+      assert msg =~ "`chat` must be an array of tables"
+    end
+
+    test "chat rules parsed in order, with a working matcher" do
+      toml = """
+      [[domain]]
+      name = "a"
+
+      [[domain.chat]]
+      pattern = "room-."
+      script = "chatroom.exs"
+
+      [[domain.chat]]
+      default = true
+      script = "p2p-chat.exs"
+      """
+
+      assert {:ok, snap} = Domains.parse(toml)
+      %Kelix.Domain{chat: [room, default], dial_plan: []} = Domains.lookup(snap, "a")
+      assert room.script == "chatroom.exs" and Kelix.DialRule.matches?(room, "room-42")
+      refute Kelix.DialRule.matches?(room, "room-")
+      assert default.default? and default.script == "p2p-chat.exs"
+
+      assert Domains.script_refs(snap) == [
+               {"chatroom.exs", ~s(domain a chat rule "room-.")},
+               {"p2p-chat.exs", "domain a chat rule default = true"}
+             ]
+    end
+
     test "duplicate name/alias across domains" do
       toml = ~s([[domain]]\nname = "a.com"\naliases = ["dup.com"]\n[[domain]]\nname = "dup.com")
       assert {:error, msg} = Domains.parse(toml)

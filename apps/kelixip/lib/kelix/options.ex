@@ -32,7 +32,10 @@ defmodule Kelix.Options do
   # What kelixip implements today. SUBSCRIBE, PUBLISH and NOTIFY join the list with
   # the subscription layer: NOTIFY because a notifier answers the 200 to the one it
   # sent, and a UA reading this list decides from it whether to subscribe at all.
-  @allow "OPTIONS, REGISTER, INVITE, ACK, CANCEL, BYE, SUBSCRIBE, PUBLISH, NOTIFY"
+  # MESSAGE joins with the chat function. `Allow` describes the node, a 405 the
+  # domain: a domain with no `[[domain.chat]]` refuses MESSAGE as one without
+  # presence refuses SUBSCRIBE (chat-basic-plan.md, decision 3).
+  @allow "OPTIONS, REGISTER, INVITE, ACK, CANCEL, BYE, SUBSCRIBE, PUBLISH, NOTIFY, MESSAGE"
 
   @impl SIP.Session.Options
   def on_options(_req, _transaction_id) do

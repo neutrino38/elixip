@@ -40,7 +40,7 @@ pattern = "mybot"
 script = "mybot.exs"
 
 [[domain.chat]]
-pattern="room-.*"
+pattern = "room-."            # dial-plan syntax: `.` is one or more of anything
 script="chatroom.exs"
 
 [[domain.chat]]

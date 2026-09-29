@@ -3,9 +3,10 @@ defmodule Kelix.Router do
   Declarative dispatch of an out-of-dialog request (design §2.1, §4).
 
   Three steps: **domain** (R-URI host, else To host → `name`/`aliases`) →
-  **function** (method → registrar/calls/presence, must be enabled) → **script**
-  (the function's script, the dial-plan first-match for `calls`, or the
-  `[[domain.presence]]` block naming the request's event package). No global
+  **function** (method → registrar/calls/presence/chat, must be enabled) →
+  **script** (the function's script, the first-match of the dial-plan for `calls`
+  or of the `[[domain.chat]]` rules for `chat`, or the `[[domain.presence]]` block
+  naming the request's event package). No global
   routing script — runtime-data routing lives inside the selected script.
 
   Step 3 is where the **489 Bad Event** is raised, before any script runs: a
@@ -22,11 +23,12 @@ defmodule Kelix.Router do
   @behaviour SIP.Session.Registrar
   @behaviour SIP.Session.Call
   @behaviour SIP.Session.Presence
+  @behaviour SIP.Session.Chat
   require Logger
 
   alias Kelix.{Domains, Domain, DialRule, PresenceBlock, InstancePool}
 
-  @type function_kind :: :registrar | :calls | :presence
+  @type function_kind :: :registrar | :calls | :presence | :chat
   @type route :: %{
           domain: Domain.t(),
           function: function_kind,
@@ -38,17 +40,16 @@ defmodule Kelix.Router do
 
   # method → SIP function (spec §2.1 table)
   #
-  # MESSAGE is deliberately absent: it carries no `Event`, so it cannot name one of
-  # the `[[domain.presence]]` blocks, and page-mode chat is a function of its own
-  # with its own dispatch (DESIGN-CHAT.md, *chat is a function of its own*). Until
-  # those blocks exist an out-of-dialog MESSAGE is answered 405 — which is what a
-  # node serving no chat should say, rather than handing it to a subscription
-  # script that has no clause for it.
+  # MESSAGE is chat, a function of its own (DESIGN-CHAT.md, *chat is a function of
+  # its own*): it carries no `Event`, so it could never have named one of the
+  # `[[domain.presence]]` blocks. A domain with no `[[domain.chat]]` block answers
+  # it 405 — what a domain serving no chat should say.
   @method_function %{
     REGISTER: :registrar,
     INVITE: :calls,
     SUBSCRIBE: :presence,
-    PUBLISH: :presence
+    PUBLISH: :presence,
+    MESSAGE: :chat
   }
 
   # ── supervision-tree entry (§2.1) ────────────────────────────────────────────
@@ -83,6 +84,9 @@ defmodule Kelix.Router do
     # differs is the step-3 reading of `Event`. Without this registration the
     # framework answers 500 to a SUBSCRIBE, whatever the domain declares.
     :ok = SIP.Session.ConfigRegistry.set_presence_processing_module(__MODULE__)
+    # An out-of-dialog MESSAGE has a slot of its own; the same resolve → quota →
+    # spawn path, with the `[[domain.chat]]` rules for step 3.
+    :ok = SIP.Session.ConfigRegistry.set_chat_processing_module(__MODULE__)
     :ignore
   end
 
@@ -116,16 +120,15 @@ defmodule Kelix.Router do
   def on_subscription_expired(_dialog_id, _app_pid), do: :ok
 
   # An out-of-dialog MESSAGE goes through the same resolution as every other
-  # request, and `@method_function` maps it to nothing: the answer is 405 with the
-  # `Allow` this node advertises. It is routed here, not answered here, so the day
-  # `[[domain.chat]]` lands the block decides and this callback does not change.
+  # request: its domain's `[[domain.chat]]` rules pick the script, and a domain
+  # with none answers 405 with the `Allow` this node advertises.
   #
-  # Not having it at all was a crash, not a refusal: `SIP.Session.ConfigRegistry`
-  # called an `@optional_callbacks` function that did not exist, `SIP.DialogImpl.init/1`
-  # died on the `:undef`, and the sender got nothing to read. Linphone's typing
-  # indicator is an out-of-dialog MESSAGE, so it happened on the first chat window
-  # anyone opened.
-  @impl SIP.Session.Presence
+  # Not having this callback at all was a crash, not a refusal:
+  # `SIP.Session.ConfigRegistry` called a function that did not exist,
+  # `SIP.DialogImpl.init/1` died on the `:undef`, and the sender got nothing to
+  # read. Linphone's typing indicator is an out-of-dialog MESSAGE, so it happened on
+  # the first chat window anyone opened.
+  @impl SIP.Session.Chat
   def on_message(dialog_id, msgreq, _transaction_id), do: dispatch(dialog_id, msgreq)
 
   @doc """
@@ -389,13 +392,17 @@ defmodule Kelix.Router do
   defp not_configured(:calls, %Domain{name: name}),
     do: "no call rule declared in domains.toml for domain #{name} (no [[domain.call]] block)"
 
+  defp not_configured(:chat, %Domain{name: name}),
+    do: "chat not configured in domains.toml for domain #{name} (no [[domain.chat]] block)"
+
   @doc "Is `function` enabled on `domain`? (a function block present = enabled)"
   @spec function_enabled?(Domain.t(), function_kind) :: boolean
   def function_enabled?(%Domain{registrar: r}, :registrar), do: not is_nil(r)
   def function_enabled?(%Domain{presence: p}, :presence), do: p != []
   def function_enabled?(%Domain{dial_plan: dp}, :calls), do: dp != []
+  def function_enabled?(%Domain{chat: rules}, :chat), do: rules != []
 
-  # ── 3. script (function script, dial-plan first-match, or presence block) ────
+  # ── 3. script (function script, dial-plan or chat first-match, presence block) ─
 
   defp pick_script(%Domain{registrar: %{script: s}}, :registrar, _req), do: {:ok, s}
 
@@ -430,7 +437,15 @@ defmodule Kelix.Router do
     end
   end
 
-  defp pick_script(%Domain{dial_plan: rules, name: name}, :calls, req) do
+  defp pick_script(%Domain{dial_plan: rules} = domain, :calls, req),
+    do: first_match(rules, domain, "call", req)
+
+  # The dial plan's reading, on the chat rules: `mybot@domain` reaches the bot's
+  # script, anything else the catch-all's.
+  defp pick_script(%Domain{chat: rules} = domain, :chat, req),
+    do: first_match(rules, domain, "chat", req)
+
+  defp first_match(rules, %Domain{name: name}, key, req) do
     user = ruri_user(req)
 
     case Enum.find(rules, &DialRule.matches?(&1, user || "")) do
@@ -440,8 +455,8 @@ defmodule Kelix.Router do
       nil ->
         log_reject(
           req,
-          "destination #{req_uri_str(req)} does not match any call rule declared " <>
-            "in domain #{name} (#{length(rules)} [[domain.call]] rule(s) tried)"
+          "destination #{req_uri_str(req)} does not match any #{key} rule declared " <>
+            "in domain #{name} (#{length(rules)} [[domain.#{key}]] rule(s) tried)"
         )
 
         {:reject, 404, "Not Found"}

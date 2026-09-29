@@ -179,7 +179,7 @@ defmodule Kelix.Domains do
 
   @doc """
   Every script a snapshot refers to — the `registrar`/`presence` block's `script`
-  and each dial-plan rule's — as `[{name, context}]`, deduped by name (first
+  and each dial-plan and chat rule's — as `[{name, context}]`, deduped by name (first
   reference wins). `context` says *where* the reference comes from, so an error
   message can name the domain and the rule an operator has to go and fix.
   """
@@ -211,7 +211,11 @@ defmodule Kelix.Domains do
       for rule <- d.dial_plan,
           do: {rule.script, "domain #{d.name} call rule #{rule_label(rule)}"}
 
-    registrar_refs ++ presence_refs ++ call_refs
+    chat_refs =
+      for rule <- d.chat,
+          do: {rule.script, "domain #{d.name} chat rule #{rule_label(rule)}"}
+
+    registrar_refs ++ presence_refs ++ call_refs ++ chat_refs
   end
 
   defp rule_label(%DialRule{default?: true}), do: "default = true"
@@ -310,6 +314,7 @@ defmodule Kelix.Domains do
          {:ok, registrar} <- opt_fn_block(dm, "registrar", @registrar_keys, name),
          {:ok, presence} <- parse_presence(Map.get(dm, "presence", []), name),
          {:ok, dial_plan} <- parse_dial_plan(Map.get(dm, "call", []), name),
+         {:ok, chat} <- parse_dial_plan(Map.get(dm, "chat", []), name, "chat"),
          :ok <- check_domain_keys(dm, name) do
       {:ok,
        %Domain{
@@ -318,14 +323,15 @@ defmodule Kelix.Domains do
          max_calls: max_calls,
          registrar: registrar,
          presence: presence,
-         dial_plan: dial_plan
+         dial_plan: dial_plan,
+         chat: chat
        }}
     end
   end
 
   defp parse_domain(_), do: {:error, "each [[domain]] must be a table"}
 
-  @domain_keys ~w(name aliases max_calls registrar presence call)
+  @domain_keys ~w(name aliases max_calls registrar presence call chat)
   defp check_domain_keys(dm, name) do
     case Map.keys(dm) -- @domain_keys do
       [] -> :ok
@@ -334,36 +340,42 @@ defmodule Kelix.Domains do
   end
 
   # ── dial-plan (ordered; first-match-wins; one catch-all, last) ───────────────
+  #
+  # `[[domain.call]]` and `[[domain.chat]]` are the same list — a pattern on the
+  # R-URI user part, first match wins, `default = true` last — so they are one
+  # parser, and `key` is only what the messages call the block.
 
-  defp parse_dial_plan(rules, domain) when is_list(rules) do
-    with {:ok, parsed} <- reduce_while_ok(rules, fn r -> parse_rule(r, domain) end),
-         :ok <- validate_catch_all(parsed, domain) do
+  defp parse_dial_plan(rules, domain, key \\ "call")
+
+  defp parse_dial_plan(rules, domain, key) when is_list(rules) do
+    with {:ok, parsed} <- reduce_while_ok(rules, fn r -> parse_rule(r, domain, key) end),
+         :ok <- validate_catch_all(parsed, domain, key) do
       {:ok, parsed}
     end
   end
 
-  defp parse_dial_plan(_, domain),
-    do: {:error, "domain #{inspect(domain)}: `call` must be an array of tables"}
+  defp parse_dial_plan(_, domain, key),
+    do: {:error, "domain #{inspect(domain)}: `#{key}` must be an array of tables"}
 
-  defp parse_rule(%{"default" => true} = r, domain) do
-    with {:ok, script} <- req_string(r, "script", "call rule (domain #{domain})"),
-         :ok <- reject_keys(r, ~w(default script), "default call rule (domain #{domain})") do
+  defp parse_rule(%{"default" => true} = r, domain, key) do
+    with {:ok, script} <- req_string(r, "script", "#{key} rule (domain #{domain})"),
+         :ok <- reject_keys(r, ~w(default script), "default #{key} rule (domain #{domain})") do
       {:ok, %DialRule{default?: true, script: script}}
     end
   end
 
-  defp parse_rule(%{"pattern" => pattern} = r, domain) when is_binary(pattern) do
-    with {:ok, script} <- req_string(r, "script", "call rule (domain #{domain})"),
-         :ok <- reject_keys(r, ~w(pattern script), "call rule (domain #{domain})"),
+  defp parse_rule(%{"pattern" => pattern} = r, domain, key) when is_binary(pattern) do
+    with {:ok, script} <- req_string(r, "script", "#{key} rule (domain #{domain})"),
+         :ok <- reject_keys(r, ~w(pattern script), "#{key} rule (domain #{domain})"),
          {:ok, matcher} <- compile_pattern(pattern, domain) do
       {:ok, %DialRule{matcher: matcher, raw: pattern, script: script}}
     end
   end
 
-  defp parse_rule(_, domain),
+  defp parse_rule(_, domain, key),
     do:
       {:error,
-       "domain #{inspect(domain)}: each [[domain.call]] needs `pattern = \"...\"` or `default = true`"}
+       "domain #{inspect(domain)}: each [[domain.#{key}]] needs `pattern = \"...\"` or `default = true`"}
 
   defp compile_pattern(pattern, domain) do
     case DialPlan.compile(pattern) do
@@ -376,7 +388,7 @@ defmodule Kelix.Domains do
     end
   end
 
-  defp validate_catch_all(rules, domain) do
+  defp validate_catch_all(rules, domain, key) do
     case Enum.split_while(rules, &(not &1.default?)) do
       {_before, []} ->
         :ok
@@ -386,7 +398,7 @@ defmodule Kelix.Domains do
 
       {_before, [_default | _after]} ->
         {:error,
-         "domain #{inspect(domain)}: the catch-all (default = true) must be the last call rule"}
+         "domain #{inspect(domain)}: the catch-all (default = true) must be the last #{key} rule"}
     end
   end
 

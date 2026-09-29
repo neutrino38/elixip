@@ -425,10 +425,15 @@ defmodule Kelix.Control do
       aliases: d.aliases,
       max_calls: d.max_calls,
       functions:
-        for(f <- [:registrar, :calls, :presence], Kelix.Router.function_enabled?(d, f), do: f),
+        for(
+          f <- [:registrar, :calls, :presence, :chat],
+          Kelix.Router.function_enabled?(d, f),
+          do: f
+        ),
       registrar: with_module(d.registrar, loaded),
       presence: Enum.map(d.presence, &render_presence_block(&1, loaded)),
       dial_plan: Enum.map(d.dial_plan, &render_rule(&1, loaded)),
+      chat: Enum.map(d.chat, &render_rule(&1, loaded)),
       active_calls: Map.get(active, d.name, 0),
       registrations: map_size(registrations_for(d.name))
     }

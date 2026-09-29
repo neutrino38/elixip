@@ -615,6 +615,7 @@ defmodule Kelix.Control.CLI do
   end
 
   defp render(:domain, {:ok, d}) do
+    # a node older than the chat function sends no `chat` key
     lines =
       [
         "domain:        #{d.name}",
@@ -627,7 +628,9 @@ defmodule Kelix.Control.CLI do
       ] ++
         format_presence(d.presence) ++
         [if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")] ++
-        format_dial_plan(d.dial_plan)
+        format_dial_plan(d.dial_plan) ++
+        [if(Map.get(d, :chat, []) == [], do: "chat:          (disabled)", else: "chat:")] ++
+        format_dial_plan(Map.get(d, :chat, []))
 
     {0, Enum.join(lines, "\n")}
   end
@@ -742,7 +745,17 @@ defmodule Kelix.Control.CLI do
 
     {0,
      table(
-       ["id", "scenario", "domain", "script", "written (UTC)", "instance", "SIP", "size", "kept for"],
+       [
+         "id",
+         "scenario",
+         "domain",
+         "script",
+         "written (UTC)",
+         "instance",
+         "SIP",
+         "size",
+         "kept for"
+       ],
        rows,
        &[
          to_string(&1.id),

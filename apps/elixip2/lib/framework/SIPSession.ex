@@ -128,8 +128,11 @@ defmodule SIP.Session do
 
           # `{:error, reason}` for a dialog that refused to start, and the bare
           # `:error` start_dialog/5 answers when its own creation raised.
-          {:error, err} -> unsent_request(sip_ctx, req, err)
-          err -> unsent_request(sip_ctx, req, err)
+          {:error, err} ->
+            unsent_request(sip_ctx, req, err)
+
+          err ->
+            unsent_request(sip_ctx, req, err)
         end
 
       true ->
@@ -250,6 +253,7 @@ defmodule SIP.Session do
               mainapppid: nil,
               registration: nil,
               presence: nil,
+              chat: nil,
               options: nil
 
     use Agent
@@ -309,6 +313,21 @@ defmodule SIP.Session do
     @doc "Return the configured presence processing module (nil when none)."
     def get_presence_processing_module() do
       Agent.get(__MODULE__, fn reg -> reg.presence end)
+    end
+
+    @spec set_chat_processing_module(module()) :: :ok
+    @doc """
+    Specify which module serves inbound out-of-dialog MESSAGE (see
+    `SIP.Session.Chat`). With none registered, such a request is answered 500.
+    """
+    def set_chat_processing_module(module) do
+      Agent.update(__MODULE__, fn reg -> %ConfigRegistry{reg | chat: module} end)
+    end
+
+    @spec get_chat_processing_module() :: module() | nil
+    @doc "Return the configured chat processing module (nil when none)."
+    def get_chat_processing_module() do
+      Agent.get(__MODULE__, fn reg -> reg.chat end)
     end
 
     @spec set_options_processing_module(module()) :: :ok
@@ -414,12 +433,14 @@ defmodule SIP.Session do
       )
     end
 
+    # Page-mode messaging (RFC 3428) has a slot of its own: it used to share the
+    # presence host's, so a MESSAGE landed on whatever served SUBSCRIBE.
     def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :MESSAGE do
       internal_dispatch(
-        :presence,
+        :chat,
         :on_message,
         [dialog_id, req, transaction_id],
-        "No presence server defined"
+        "No chat server defined"
       )
     end
 
