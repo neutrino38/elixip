@@ -634,6 +634,26 @@ end
 request is rebuilt with the original sender, `To`, content and allowlisted headers, and
 `target` as its Request-URI. See `SIP.Session.Page` below.
 
+On kelixip, a chat scenario serves a **conversation**, not a single MESSAGE: the next
+MESSAGE between the same parties reaches the running instance, as another
+`{:MESSAGE, req, trans, dialog}` event, and `reply_message/2` answers the one being
+handled. The end of each MESSAGE's own dialog is not reported. After `idle_timeout`
+seconds with no MESSAGE in or out, the instance receives `{:conversation, :idle}`; a
+scenario with no clause for it ends there, successfully.
+
+```elixir
+state talking do
+  on_events do
+    {:MESSAGE, _req, _trans, _dlg} ->
+      reply_message(200)
+      stay("message")
+
+    {:conversation, :idle} ->
+      scenario_success("conversation over")
+  end
+end
+```
+
 
 ## Sub-scenarios (sub-FSM)
 

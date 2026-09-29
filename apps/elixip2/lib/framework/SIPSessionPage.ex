@@ -159,7 +159,48 @@ defmodule SIP.Session.Page do
     timeout = Keyword.get(opts, :timeout, 60)
 
     {:ok, _relay} = SIP.Session.Page.Relay.start(req, target_label(to), timeout, sip_ctx.debug)
+    note_activity(sip_ctx)
     SIP.Context.set(sip_ctx, :lasterr, :ok)
+  end
+
+  # ── Conversations ───────────────────────────────────────────────────────────
+
+  @doc """
+  What an instance serving a **conversation** does with an event, before the
+  scenario's clause runs (called by `SIP.FSL.Host.on_event/2`).
+
+  A conversation is one instance for many MESSAGEs (chat-basic-plan, C3b): each
+  arrives on a dialog and a transaction of its own, which crossed the node
+  before this instance was told. The first is written in the journal when the
+  journal starts, like any UAS instance's inbound request; the next ones are
+  written here, as they arrive, so a traced conversation shows every message it
+  received — redacted like every SIP message the journal holds.
+  """
+  @spec note_event(%SIP.Context{}, term()) :: %SIP.Context{}
+  def note_event(sip_ctx = %SIP.Context{}, {:MESSAGE, req, _trans, _dlg}) when is_map(req) do
+    if SIP.Scenario.SequenceJournal.enabled?() and not SIP.Msg.Ops.in_dialog?(req) and
+         req != SIP.Context.appdata_get(sip_ctx, :inbound_request) do
+      with %{} = event <- SIP.Scenario.SipTrace.event(:in, req),
+           do: SIP.Scenario.SequenceJournal.record(event)
+    end
+
+    sip_ctx
+  end
+
+  def note_event(sip_ctx, _event), do: sip_ctx
+
+  # A conversation ends after `idle_timeout` seconds with no MESSAGE in or out.
+  # The node sees every one that comes in — it routes them — but not the pages
+  # the instance sends, so the instance says so to whoever spawned it. Only a
+  # conversation instance does: the key is in its context because the node put
+  # it there, and an instance nobody keyed has nobody listening.
+  defp note_activity(sip_ctx) do
+    parent = Map.get(sip_ctx, :parent_pid)
+
+    if is_pid(parent) and SIP.Context.appdata_get(sip_ctx, :conversation) != nil,
+      do: send(parent, {:conversation, :activity, self()})
+
+    :ok
   end
 
   # A MESSAGE that arrived is sent on as it came — its sender, its content, its

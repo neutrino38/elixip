@@ -563,7 +563,11 @@ defmodule Kelix.Control.CLI do
          # ● : the instance's journal is on (kelictl debug <id> on)
          if(Map.get(&1, :traced), do: "#{&1.id} ●", else: to_string(&1.id)),
          &1.domain,
-         to_string(&1.function),
+         # A conversation is one instance for many MESSAGEs: it says how many.
+         case Map.get(&1, :messages) do
+           nil -> to_string(&1.function)
+           n -> "#{&1.function} (#{n} msg)"
+         end,
          # WHICH scenario runs here — the file domains.toml routed to, the way
          # elixipp's --monitor names the scenario module. The pool knows it even
          # when the FSM view does not, so it is never empty for a live instance.

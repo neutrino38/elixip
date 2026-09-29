@@ -11,6 +11,18 @@ defmodule Kelix.InstancePool do
   (`SIP.Scenario.Runner.spawn_uas_instance/2`) and reply `{:accept, pid}`. When an
   instance ends (`:DOWN`) its slot is freed and the script version checked back in.
 
+  A chat route may carry a **conversation** (chat-basic-plan, C3b): the MESSAGE
+  then goes to the live instance registered under its key, if there is one, and
+  spawns and registers one otherwise. Both happen inside one call of this
+  process, which is what makes the lookup-or-spawn atomic — two MESSAGEs of one
+  conversation arriving together start one instance, not two. A conversation
+  holds one quota slot whatever the number of its messages, counts them for the
+  monitor row, and ends after `idle_timeout` seconds with no MESSAGE in (routed
+  here) or out (`{:conversation, :activity, pid}`, sent by the instance's
+  `send_page`): its key is forgotten **first**, then the instance is told
+  `{:conversation, :idle}` — so a MESSAGE arriving meanwhile starts a new
+  conversation rather than reaching one on its way out.
+
   Also the live half of `Kelix.Control.subscribe_monitor/1`: subscribes to
   `FSL.Monitor` once at boot and re-joins its pushes with its own rows
   (`join_row/2`, the same join `Kelix.Control.monitor/0` runs on every read),
@@ -30,13 +42,18 @@ defmodule Kelix.InstancePool do
   alias Kelix.{ScriptRegistry, Config}
 
   @type route :: %{
-          domain: String.t(),
-          function: atom,
-          script: String.t(),
-          max_calls: pos_integer | nil
+          required(:domain) => String.t(),
+          required(:function) => atom,
+          required(:script) => String.t(),
+          required(:max_calls) => pos_integer | nil,
+          optional(:conversation) =>
+            %{key: Kelix.Conversations.key(), idle_timeout: pos_integer} | nil
         }
 
-  # instances:    ref => %{id, pid, dialog_id, domain, function, script, version}
+  # instances:    ref => %{id, pid, dialog_id, domain, function, script, version,
+  #                        conversation}, plus messages / idle_ms / last_activity
+  #               for a conversation
+  # conversations: conversation key => instance ref, while the conversation lives
   # per_domain:   domain => active count
   # next_id:      monotonic id handed to each instance (stable handle for `shutdown/1`)
   # monitor_subs: MapSet(pid) subscribed via `subscribe_monitor/1`
@@ -44,6 +61,7 @@ defmodule Kelix.InstancePool do
   #               is dropped without an explicit `unsubscribe_monitor/1`
   # counter_subs / counter_mons: same bookkeeping, for `subscribe_domain_counters/1`
   defstruct instances: %{},
+            conversations: %{},
             per_domain: %{},
             total_active: 0,
             next_id: 1,
@@ -172,24 +190,9 @@ defmodule Kelix.InstancePool do
 
   @impl true
   def handle_call({:accept, route, dialog_id, req, overrides}, _from, state) do
-    %{domain: domain, function: function, script: script, max_calls: dmax} = route
-    server_max = server_max_calls()
-
-    cond do
-      is_integer(server_max) and state.total_active >= server_max ->
-        Logger.warning(module: __MODULE__, message: "server max_calls #{server_max} reached; 503")
-        {:reply, {:reject, 503, "Service Unavailable"}, bump(state, :rejected_quota)}
-
-      is_integer(dmax) and Map.get(state.per_domain, domain, 0) >= dmax ->
-        Logger.warning(
-          module: __MODULE__,
-          message: "domain #{domain} max_calls #{dmax} reached; 503"
-        )
-
-        {:reply, {:reject, 503, "Service Unavailable"}, bump(state, :rejected_quota)}
-
-      true ->
-        spawn_instance(state, route, function, domain, script, dialog_id, req, overrides)
+    case live_conversation(state, Map.get(route, :conversation)) do
+      {ref, inst} -> join_conversation(state, ref, inst)
+      nil -> reserve_and_spawn(state, route, dialog_id, req, overrides)
     end
   end
 
@@ -290,6 +293,7 @@ defmodule Kelix.InstancePool do
         )
 
         per_domain = dec(state.per_domain, inst.domain)
+        state = forget_conversation(state, ref, inst)
 
         state = %{
           state
@@ -334,6 +338,47 @@ defmodule Kelix.InstancePool do
     {:noreply, bump(state, key)}
   end
 
+  # A conversation's idle deadline. Activity since the timer was armed pushes it
+  # back — re-armed for what is left, rather than cancelled and re-armed on every
+  # message. Past it, the key is forgotten before the instance is told, so the
+  # next MESSAGE starts a new conversation instead of reaching one that is ending.
+  def handle_info({:conversation_idle, ref}, state) do
+    case Map.get(state.instances, ref) do
+      %{conversation: key, idle_ms: idle_ms, last_activity: last} = inst when key != nil ->
+        case idle_ms - (now_ms() - last) do
+          left when left > 0 ->
+            Process.send_after(self(), {:conversation_idle, ref}, left)
+            {:noreply, state}
+
+          _elapsed ->
+            Logger.info(
+              module: __MODULE__,
+              message:
+                "instance #{inst.id}: conversation #{Kelix.Conversations.label(key)} idle " <>
+                  "after #{inst.messages} message(s)"
+            )
+
+            send(inst.pid, {:conversation, :idle})
+            {:noreply, forget_conversation(state, ref, inst)}
+        end
+
+      _gone ->
+        {:noreply, state}
+    end
+  end
+
+  # A page the instance sent: activity, as much as a MESSAGE it received.
+  def handle_info({:conversation, :activity, pid}, state) do
+    case Enum.find(state.instances, fn {_ref, i} -> i.pid == pid and i.conversation != nil end) do
+      {ref, inst} ->
+        instances = Map.put(state.instances, ref, %{inst | last_activity: now_ms()})
+        {:noreply, %{state | instances: instances}}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
@@ -344,7 +389,97 @@ defmodule Kelix.InstancePool do
 
   # ── internals ────────────────────────────────────────────────────────────────
 
-  defp spawn_instance(state, _route, function, domain, script, dialog_id, req, overrides) do
+  defp reserve_and_spawn(state, route, dialog_id, req, overrides) do
+    %{domain: domain, function: function, script: script, max_calls: dmax} = route
+    server_max = server_max_calls()
+
+    cond do
+      is_integer(server_max) and state.total_active >= server_max ->
+        Logger.warning(module: __MODULE__, message: "server max_calls #{server_max} reached; 503")
+        {:reply, {:reject, 503, "Service Unavailable"}, bump(state, :rejected_quota)}
+
+      is_integer(dmax) and Map.get(state.per_domain, domain, 0) >= dmax ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "domain #{domain} max_calls #{dmax} reached; 503"
+        )
+
+        {:reply, {:reject, 503, "Service Unavailable"}, bump(state, :rejected_quota)}
+
+      true ->
+        spawn_instance(state, route, function, domain, script, dialog_id, req, overrides)
+    end
+  end
+
+  # ── conversations (chat-basic-plan, C3b) ─────────────────────────────────────
+
+  # The instance holding this conversation, if it is still there to take a
+  # MESSAGE. `alive?` covers the instance whose `:DOWN` is still in our mailbox.
+  defp live_conversation(_state, nil), do: nil
+
+  defp live_conversation(state, %{key: key}) do
+    with ref when is_reference(ref) <- Map.get(state.conversations, key),
+         %{pid: pid} = inst <- Map.get(state.instances, ref),
+         true <- Process.alive?(pid) do
+      {ref, inst}
+    else
+      _ -> nil
+    end
+  end
+
+  # Another MESSAGE of a live conversation: no quota, no spawn — the dialog layer
+  # hands it to the instance as it would to a new one.
+  defp join_conversation(state, ref, inst) do
+    inst = %{inst | messages: inst.messages + 1, last_activity: now_ms()}
+    state = %{state | instances: Map.put(state.instances, ref, inst)}
+
+    Logger.debug(
+      module: __MODULE__,
+      message:
+        "instance #{inst.id}: message #{inst.messages} of conversation " <>
+          Kelix.Conversations.label(inst.conversation)
+    )
+
+    broadcast_monitor(state, {:upsert, join_row(to_list_row(inst), fsm_entry(inst.id))})
+    {:reply, {:accept, inst.pid}, state}
+  end
+
+  # What a spawned instance carries when it serves a conversation, and the
+  # registration that makes the next MESSAGE find it.
+  defp register_conversation(state, inst, _ref, nil), do: {state, inst}
+
+  defp register_conversation(state, inst, ref, %{key: key, idle_timeout: idle}) do
+    idle_ms = idle * 1_000
+    Process.send_after(self(), {:conversation_idle, ref}, idle_ms)
+
+    inst =
+      Map.merge(inst, %{conversation: key, messages: 1, idle_ms: idle_ms, last_activity: now_ms()})
+
+    {%{state | conversations: Map.put(state.conversations, key, ref)}, inst}
+  end
+
+  defp forget_conversation(state, ref, %{conversation: key}) when key != nil do
+    case Map.get(state.conversations, key) do
+      ^ref -> %{state | conversations: Map.delete(state.conversations, key)}
+      _other -> state
+    end
+  end
+
+  defp forget_conversation(state, _ref, _inst), do: state
+
+  defp now_ms(), do: System.monotonic_time(:millisecond)
+
+  # The FSM half of one row, for a push that is not the FSM's own.
+  defp fsm_entry(slot) do
+    case FSL.Monitor.calls() do
+      rows when is_list(rows) -> Enum.find(rows, &(&1.slot == slot))
+      _other -> nil
+    end
+  catch
+    :exit, _ -> nil
+  end
+
+  defp spawn_instance(state, route, function, domain, script, dialog_id, req, overrides) do
     case ScriptRegistry.checkout(script) do
       {:error, reason} ->
         Logger.error(
@@ -376,8 +511,11 @@ defmodule Kelix.InstancePool do
           domain: domain,
           function: function,
           script: script,
-          version: version
+          version: version,
+          conversation: nil
         }
+
+        {state, inst} = register_conversation(state, inst, ref, Map.get(route, :conversation))
 
         state2 = %{
           state
@@ -423,7 +561,13 @@ defmodule Kelix.InstancePool do
     end
   end
 
-  defp to_list_row(i),
+  # A conversation shows as one instance, with the number of its messages.
+  defp to_list_row(%{conversation: key} = i) when key != nil,
+    do: Map.put(base_row(i), :messages, i.messages)
+
+  defp to_list_row(i), do: base_row(i)
+
+  defp base_row(i),
     do: %{id: i.id, pid: i.pid, domain: i.domain, function: i.function, script: i.script}
 
   defp find_instance(state, id), do: Enum.find(Map.values(state.instances), &(&1.id == id))

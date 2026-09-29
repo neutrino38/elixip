@@ -68,18 +68,33 @@ end
 
 defmodule Kelix.DialRule do
   @moduledoc """
-  One `[[domain.call]]` dial-plan rule (design §3.3). Either a compiled Asterisk
-  `pattern` (matching the R-URI user-part) or the `default = true` catch-all.
+  One `[[domain.call]]` dial-plan rule (design §3.3), or one `[[domain.chat]]`
+  rule — the same list. Either a compiled Asterisk `pattern` (matching the R-URI
+  user-part) or the `default = true` catch-all.
+
+  A chat rule also says what one **conversation** is (chat-basic-plan, C3b):
+  `conversation` — `:pair` (From AOR, To AOR, ordered), `:peers` (the two,
+  unordered) or `:to` (the To AOR) — and `idle_timeout`, the seconds of silence
+  that end it. Both are `nil` on a call rule.
   """
+
+  @type conversation :: :pair | :peers | :to
 
   @type t :: %__MODULE__{
           matcher: (String.t() -> boolean) | nil,
           raw: String.t() | nil,
           script: String.t(),
-          default?: boolean
+          default?: boolean,
+          conversation: conversation | nil,
+          idle_timeout: pos_integer | nil
         }
 
-  defstruct matcher: nil, raw: nil, script: nil, default?: false
+  defstruct matcher: nil,
+            raw: nil,
+            script: nil,
+            default?: false,
+            conversation: nil,
+            idle_timeout: nil
 
   @doc "Does this rule match `user_part`? The catch-all matches anything."
   @spec matches?(t, String.t()) :: boolean

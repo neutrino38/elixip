@@ -26,14 +26,14 @@ defmodule Kelix.Router do
   @behaviour SIP.Session.Chat
   require Logger
 
-  alias Kelix.{Domains, Domain, DialRule, PresenceBlock, InstancePool}
+  alias Kelix.{Domains, Domain, DialRule, PresenceBlock, InstancePool, Conversations}
 
   @type function_kind :: :registrar | :calls | :presence | :chat
   @type route :: %{
           domain: Domain.t(),
           function: function_kind,
           script: String.t(),
-          event_package: String.t() | nil
+          rule: DialRule.t() | nil
         }
   @type reject ::
           {:reject, 404 | 405 | 489, String.t()} | {:reject, 405 | 489, String.t(), list}
@@ -151,7 +151,7 @@ defmodule Kelix.Router do
         reject_metric(req, code)
         {:reject, code, reason, fields}
 
-      {:route, %{domain: domain, function: function, script: script}} ->
+      {:route, %{domain: domain, function: function, script: script} = resolved} ->
         # The routing decision itself, before the quota and the spawn: without it
         # the only script name in the log is the one the operator *believes* is
         # served, and a dial-plan mismatch is invisible until someone reads the
@@ -163,15 +163,18 @@ defmodule Kelix.Router do
               "-> #{function} script #{script}"
         )
 
+        conversation = conversation_for(domain, resolved, req)
+
         route = %{
           domain: domain.name,
           function: function,
           script: script,
-          max_calls: domain.max_calls
+          max_calls: domain.max_calls,
+          conversation: conversation
         }
 
         emit_accept(
-          InstancePool.accept(route, dialog_id, req, overrides_for(domain, req)),
+          InstancePool.accept(route, dialog_id, req, overrides_for(domain, req, conversation)),
           domain.name,
           function
         )
@@ -208,11 +211,21 @@ defmodule Kelix.Router do
   # A presence instance also gets the **event package** its block declares, for the
   # same reason it gets the domain: the script is the domain's, the package is the
   # block's, and a script hardcoding either serves one deployment.
-  defp overrides_for(%Domain{name: name} = domain, req) do
+  #
+  # A chat instance gets its **conversation key**: it is what marks it as serving a
+  # conversation (`SIP.Session.Page` then reports the pages it sends as activity),
+  # and what it hibernates under (C3d).
+  defp overrides_for(%Domain{name: name} = domain, req, conversation) do
     base =
       case media_override() do
         nil -> [domain: name]
         cfg -> [domain: name, mediaserver_instance: cfg]
+      end
+
+    base =
+      case conversation do
+        %{key: key} -> [{:conversation, key} | base]
+        nil -> base
       end
 
     case presence_block(domain, req) do
@@ -220,6 +233,19 @@ defmodule Kelix.Router do
       _ -> base
     end
   end
+
+  # One scenario per conversation, not per MESSAGE (chat-basic-plan, C3b): the
+  # chat rule says what a conversation is, `Kelix.Conversations` computes which one
+  # this request belongs to, and `Kelix.InstancePool` finds or starts its instance.
+  # An in-dialog MESSAGE never gets here — it reaches its dialog's instance.
+  defp conversation_for(%Domain{name: name}, %{function: :chat, rule: %DialRule{} = rule}, req) do
+    case Conversations.key(name, rule, req) do
+      nil -> nil
+      key -> %{key: key, idle_timeout: rule.idle_timeout}
+    end
+  end
+
+  defp conversation_for(_domain, _resolved, _req), do: nil
 
   # Ask the pool for an MCU. Three outcomes, and the middle one used to be lost in
   # the other two:
@@ -311,7 +337,8 @@ defmodule Kelix.Router do
   @doc """
   Resolve a request against a domains snapshot.
 
-  Returns `{:route, %{domain, function, script}}`, or a `{:reject, code, reason}`:
+  Returns `{:route, %{domain, function, script, rule}}` — `rule` the dial-plan or
+  chat rule that matched, `nil` for the other functions — or a `{:reject, code, reason}`:
   `404` (no domain / no dial-plan match), `405` (method's function not enabled, or
   no script declared for it on the package asked for). An event package the domain
   does not serve is `{:reject, 489, reason, [{"Allow-Events", …}]}` — the one
@@ -321,8 +348,8 @@ defmodule Kelix.Router do
   def resolve(%Domains{} = domains, req) when is_map(req) do
     with {:ok, domain} <- match_domain(domains, req),
          {:ok, function} <- function_for(req, domain),
-         {:ok, script} <- pick_script(domain, function, req) do
-      {:route, %{domain: domain, function: function, script: script}}
+         {:ok, script, rule} <- pick_script(domain, function, req) do
+      {:route, %{domain: domain, function: function, script: script, rule: rule}}
     end
   end
 
@@ -404,7 +431,7 @@ defmodule Kelix.Router do
 
   # ── 3. script (function script, dial-plan or chat first-match, presence block) ─
 
-  defp pick_script(%Domain{registrar: %{script: s}}, :registrar, _req), do: {:ok, s}
+  defp pick_script(%Domain{registrar: %{script: s}}, :registrar, _req), do: {:ok, s, nil}
 
   # The event package decides, not the method: one domain serves as many packages
   # as it declares blocks, and which of them this request is about is written in
@@ -418,7 +445,7 @@ defmodule Kelix.Router do
       %PresenceBlock{} = block ->
         case PresenceBlock.script_for(block, method) do
           script when is_binary(script) ->
-            {:ok, script}
+            {:ok, script, nil}
 
           nil ->
             # The package is served, this method on it is not: a `dialog` block
@@ -449,8 +476,8 @@ defmodule Kelix.Router do
     user = ruri_user(req)
 
     case Enum.find(rules, &DialRule.matches?(&1, user || "")) do
-      %DialRule{script: s} ->
-        {:ok, s}
+      %DialRule{script: s} = rule ->
+        {:ok, s, rule}
 
       nil ->
         log_reject(

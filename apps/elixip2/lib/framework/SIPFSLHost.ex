@@ -324,6 +324,9 @@ defmodule SIP.FSL.Host do
        (`docs/design/DESIGN-SIPSTACK.md#57-resilience`, R6).
     3. **the inbound request, stashed last**, along with the dialog pid, in the
        slot `reply_invite*` and `last_uas_req/0` serve.
+    4. **a conversation's next MESSAGE**, which reached this instance on a
+       dialog of its own after its transaction had crossed untraced, is written
+       in a running journal (`SIP.Session.Page.note_event/2`).
 
   Spread over three calls injected into every `on_events` clause, that order
   lived in the expansion of a macro. Here it can be read.
@@ -335,6 +338,7 @@ defmodule SIP.FSL.Host do
     sip_ctx
     |> SIP.Session.B2bua.note_leg_event(event)
     |> SIP.Session.CallUAS.auto_store(event)
+    |> SIP.Session.Page.note_event(event)
   end
 
   @doc """
@@ -395,13 +399,32 @@ defmodule SIP.FSL.Host do
   finds no `on_events` to match against.
   """
   @impl true
-  def injected_clauses(ctx), do: [{:media_down, media_down_clause(ctx)}]
+  def injected_clauses(ctx),
+    do: [
+      {:media_down, media_down_clause(ctx)},
+      {:conversation_idle, conversation_idle_clause(ctx)}
+    ]
 
   defp media_down_clause(ctx) do
     [clause] =
       quote do
         {:ms_event, _ref, :server_disconnected} ->
           {:goto, :__shutdown__, "media server down", :media, unquote(ctx)}
+      end
+
+    clause
+  end
+
+  # A conversation silent for its `idle_timeout` is over (chat-basic-plan, C3b):
+  # the node has already forgotten it, so the next MESSAGE starts another. A
+  # scenario that never considered the case ends there, successfully — going
+  # quiet is how a chat ends. One that wants to keep its context matches
+  # `{:conversation, :idle}` itself, and hibernates.
+  defp conversation_idle_clause(ctx) do
+    [clause] =
+      quote do
+        {:conversation, :idle} ->
+          {:terminal, :success, "conversation idle", :sip, unquote(ctx)}
       end
 
     clause
@@ -419,6 +442,10 @@ defmodule SIP.FSL.Host do
   """
   @impl true
   def clause_covers?(:media_down, pattern), do: pattern_handles_media_down?(pattern)
+
+  def clause_covers?(:conversation_idle, pattern),
+    do: pattern_handles_conversation_idle?(pattern)
+
   def clause_covers?(_name, _pattern), do: false
 
   # `{:ms_event, ref, evt}` is a 3-tuple, i.e. `{:{}, _, elems}` in quoted form.
@@ -427,6 +454,12 @@ defmodule SIP.FSL.Host do
 
   # A bare variable or `_`: a catch-all, which catches this too.
   defp pattern_handles_media_down?(pattern), do: variable?(pattern)
+
+  # `{:conversation, :idle}` is a 2-tuple, a literal pair in quoted form.
+  defp pattern_handles_conversation_idle?({:conversation, event}),
+    do: event == :idle or variable?(event)
+
+  defp pattern_handles_conversation_idle?(pattern), do: variable?(pattern)
 
   defp variable?({name, _meta, ctx_arg}) when is_atom(name) and is_atom(ctx_arg), do: true
   defp variable?(_), do: false

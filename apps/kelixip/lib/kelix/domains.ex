@@ -358,17 +358,25 @@ defmodule Kelix.Domains do
     do: {:error, "domain #{inspect(domain)}: `#{key}` must be an array of tables"}
 
   defp parse_rule(%{"default" => true} = r, domain, key) do
+    what = "default #{key} rule (domain #{domain})"
+
     with {:ok, script} <- req_string(r, "script", "#{key} rule (domain #{domain})"),
-         :ok <- reject_keys(r, ~w(default script), "default #{key} rule (domain #{domain})") do
-      {:ok, %DialRule{default?: true, script: script}}
+         :ok <- reject_keys(r, ~w(default script) ++ rule_keys(key), what),
+         {:ok, rule} <-
+           parse_conversation(%DialRule{default?: true, script: script}, r, key, what) do
+      {:ok, rule}
     end
   end
 
   defp parse_rule(%{"pattern" => pattern} = r, domain, key) when is_binary(pattern) do
-    with {:ok, script} <- req_string(r, "script", "#{key} rule (domain #{domain})"),
-         :ok <- reject_keys(r, ~w(pattern script), "#{key} rule (domain #{domain})"),
-         {:ok, matcher} <- compile_pattern(pattern, domain) do
-      {:ok, %DialRule{matcher: matcher, raw: pattern, script: script}}
+    what = "#{key} rule (domain #{domain})"
+
+    with {:ok, script} <- req_string(r, "script", what),
+         :ok <- reject_keys(r, ~w(pattern script) ++ rule_keys(key), what),
+         {:ok, matcher} <- compile_pattern(pattern, domain),
+         rule = %DialRule{matcher: matcher, raw: pattern, script: script},
+         {:ok, rule} <- parse_conversation(rule, r, key, what) do
+      {:ok, rule}
     end
   end
 
@@ -376,6 +384,43 @@ defmodule Kelix.Domains do
     do:
       {:error,
        "domain #{inspect(domain)}: each [[domain.#{key}]] needs `pattern = \"...\"` or `default = true`"}
+
+  # A chat rule says what one conversation is, and how long one lasts silent
+  # (chat-basic-plan, C3b). A call rule has neither: a call is its dialog.
+  defp rule_keys("chat"), do: ~w(conversation idle_timeout)
+  defp rule_keys(_key), do: []
+
+  @conversations %{"pair" => :pair, "peers" => :peers, "to" => :to}
+  @default_idle_timeout 300
+
+  defp parse_conversation(rule, r, "chat", what) do
+    with {:ok, conversation} <- conversation_kind(Map.get(r, "conversation", "peers"), what),
+         {:ok, idle} <- idle_timeout(Map.get(r, "idle_timeout", @default_idle_timeout), what) do
+      {:ok, %DialRule{rule | conversation: conversation, idle_timeout: idle}}
+    end
+  end
+
+  defp parse_conversation(rule, _r, _key, _what), do: {:ok, rule}
+
+  defp conversation_kind(value, what) do
+    case Map.fetch(@conversations, value) do
+      {:ok, kind} ->
+        {:ok, kind}
+
+      :error ->
+        {:error,
+         "#{what}: `conversation` must be one of " <>
+           "#{@conversations |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)}, " <>
+           "got #{inspect(value)}"}
+    end
+  end
+
+  defp idle_timeout(value, _what) when is_integer(value) and value > 0, do: {:ok, value}
+
+  defp idle_timeout(value, what),
+    do:
+      {:error,
+       "#{what}: `idle_timeout` must be a positive integer (seconds), got #{inspect(value)}"}
 
   defp compile_pattern(pattern, domain) do
     case DialPlan.compile(pattern) do

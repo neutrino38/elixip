@@ -419,8 +419,8 @@ defmodule SIP.Test.FSL.HostTest do
       assert FSL.Host.hook(FSL.Host.Default, :clause_covers?, [:whatever, nil], false) == false
     end
 
-    test "SIP's clause is the media server going away, generously suppressed" do
-      assert [{:media_down, clause}] =
+    test "SIP's first clause is the media server going away, generously suppressed" do
+      assert [{:media_down, clause}, {:conversation_idle, _}] =
                SIP.FSL.Host.injected_clauses(Macro.var(:sip_ctx, nil))
 
       assert Macro.to_string(clause) =~ ":server_disconnected"
@@ -436,6 +436,24 @@ defmodule SIP.Test.FSL.HostTest do
       refute covers?.({:{}, [], [:ms_event, {:_, [], nil}, :ice_connected]})
       # …and it says nothing about a clause it was not asked about.
       refute SIP.FSL.Host.clause_covers?(:something_else, {:event, [], nil})
+    end
+
+    # chat-basic-plan, C3b: a conversation the node has let go of ends the
+    # scenario serving it, successfully, unless the scenario takes the event.
+    test "SIP's second clause is a conversation going idle, generously suppressed" do
+      assert [_media_down, {:conversation_idle, clause}] =
+               SIP.FSL.Host.injected_clauses(Macro.var(:sip_ctx, nil))
+
+      assert Macro.to_string(clause) =~ "{:conversation, :idle}"
+      assert Macro.to_string(clause) =~ ":terminal, :success"
+
+      covers? = &SIP.FSL.Host.clause_covers?(:conversation_idle, &1)
+
+      assert covers?.({:conversation, :idle})
+      assert covers?.({:conversation, {:what, [], nil}})
+      assert covers?.({:event, [], nil})
+      refute covers?.({:conversation, :other})
+      refute covers?.({:{}, [], [:page, :failed, {:_, [], nil}]})
     end
   end
 end

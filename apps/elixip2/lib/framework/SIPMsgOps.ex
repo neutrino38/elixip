@@ -1006,6 +1006,27 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  @doc """
+  The address-of-record an address header names, as one comparable string,
+  `"user@host"` — `nil` when the header is absent, unparsable, or names no user.
+
+  What a page-mode conversation is keyed on: the `From` and the `To` of every
+  MESSAGE of one conversation name the same two AORs, while their tags, their
+  display names and the Call-ID change with each message. The host is folded to
+  lower case (RFC 3261 §19.1.4 compares it case-insensitively); the user part is
+  kept verbatim, as `target_aor/1` keeps it.
+  """
+  @spec address_of_record(map(), :from | :to) :: String.t() | nil
+  def address_of_record(msg, header) when is_map(msg) and header in [:from, :to] do
+    case header_aor(msg, header) do
+      {user, host} when is_binary(user) and is_binary(host) ->
+        user <> "@" <> String.downcase(host)
+
+      _ ->
+        nil
+    end
+  end
+
   # A host may have been parsed as an IP tuple; a row column holds text.
   defp host_string(domain) when is_binary(domain), do: presence(domain)
 

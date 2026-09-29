@@ -320,14 +320,15 @@ defmodule SIP.Test.FSL.OnEventOrder do
     test "injected clauses are instrumented too", %{src: src} do
       for clause <- [
             "{:ms_event, _ref, :server_disconnected}",
+            "{:conversation, :idle}",
             "{:scenario_ctl, :shutdown, _reason}"
           ] do
         assert src =~ clause
       end
 
-      # Three clauses in this wait — two injected, one the scenario's own — and
+      # Four clauses in this wait — three injected, one the scenario's own — and
       # one hook each.
-      assert length(String.split(src, ":on_event")) - 1 == 3
+      assert length(String.split(src, ":on_event")) - 1 == 4
     end
   end
 

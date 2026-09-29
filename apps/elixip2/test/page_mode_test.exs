@@ -166,6 +166,68 @@ defmodule SIP.Test.PageMode do
     end
   end
 
+  defmodule ConversationUAS do
+    @moduledoc """
+    What kelixip's `Kelix.InstancePool` does for a conversation, reduced to one:
+    every MESSAGE goes to the live instance, the first one starts it.
+    """
+    @behaviour SIP.Session.Chat
+
+    def serve(module) do
+      :persistent_term.put({__MODULE__, :scenario}, module)
+      :persistent_term.put({__MODULE__, :live}, nil)
+      :ok = SIP.Session.ConfigRegistry.set_chat_processing_module(__MODULE__)
+    end
+
+    @impl true
+    def on_message(dialog_pid, req, _transaction_id) do
+      case :persistent_term.get({__MODULE__, :live}) do
+        pid when is_pid(pid) ->
+          {:accept, pid}
+
+        nil ->
+          {pid, _ref} =
+            SIP.Scenario.Runner.spawn_uas_instance(
+              :persistent_term.get({__MODULE__, :scenario}),
+              dialog_pid: dialog_pid,
+              inbound_request: req
+            )
+
+          :persistent_term.put({__MODULE__, :live}, pid)
+          send(:page_mode_test, {:instance, inspect(pid)})
+          {:accept, pid}
+      end
+    end
+  end
+
+  # One instance for a conversation: answers every MESSAGE, and ends only when
+  # it is told the conversation went idle — on the clause the SIP host injects.
+  defmodule Talker do
+    @moduledoc false
+    use SIP.Scenario
+    uas(:message)
+    config(domain: "unit.test", debug: true)
+
+    state initial_state do
+      goto(talking)
+    end
+
+    state talking do
+      on_events do
+        {:MESSAGE, req, _trans, dlg} ->
+          reply_message(200)
+          send(:page_mode_test, {:talker_got, req.callid, dlg})
+          stay("message")
+
+        {:dialog_terminated, _dlg, _reason} ->
+          send(:page_mode_test, :talker_saw_dialog_end)
+          stay("dialog end")
+      after
+        10_000 -> scenario_failure("never went idle")
+      end
+    end
+  end
+
   setup_all do
     SIP.Test.AppEnv.preserve_proxy()
     SIP.Test.AppEnv.preserve([:sequence_output])
@@ -326,6 +388,38 @@ defmodule SIP.Test.PageMode do
     after
       1_000 -> flunk("no outcome reported")
     end
+  end
+
+  # ── Conversations (C3b) ─────────────────────────────────────────────────────
+
+  test "one instance serves a conversation: each MESSAGE answered on its own dialog" do
+    ConversationUAS.serve(Talker)
+
+    first = inject_message("talk")
+    assert await_response(first).response == 200
+    assert_receive {:instance, instance}, 1_000
+    assert_receive {:talker_got, ^first, dlg1}, 1_000
+
+    second = inject_message("talk")
+    assert await_response(second).response == 200
+    assert_receive {:talker_got, ^second, dlg2}, 1_000
+    refute dlg1 == dlg2
+
+    # The page's dialog ending says nothing to the conversation.
+    GenServer.stop(dlg1)
+    refute_receive :talker_saw_dialog_end, 300
+
+    # Idle: the injected clause ends the conversation, successfully — and its
+    # journal holds both MESSAGEs and both answers, the text in none.
+    path = SequenceDiagram.filename(%{scenario: inspect(Talker), pid: instance})
+    on_exit(fn -> File.rm(path) end)
+    send(:persistent_term.get({ConversationUAS, :live}), {:conversation, :idle})
+    assert eventually(fn -> File.exists?(path) end)
+    content = File.read!(path)
+
+    assert length(Regex.scan(~r/-> local : \+\d+ms MESSAGE #77/, content)) == 2
+    assert length(Regex.scan(~r/local --> \w+ : \+\d+ms 200 [^\/]*\/ 77 MESSAGE/, content)) == 2
+    refute content =~ "Rendez-vous"
   end
 
   # ── Helpers ─────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # chat-basic-plan.md — building basic instant messaging
 
-**Status (2026-09-29): C1, C1b, C2 and C3 implemented; the conversations (C3b–C3d) next.** The design is
+**Status (2026-09-29): C1, C1b, C2, C3 and C3b implemented; trust (C3c) and hibernation (C3d) next.** The design is
 [DESIGN-CHAT.md](DESIGN-CHAT.md); this document is the order it gets built in,
 what each phase delivers, and what proves it.
 
@@ -305,6 +305,34 @@ role, and it is C3c's.
 answer to Alice reaches the `p2p-chat.exs` instance her message started; two
 MESSAGEs sent in the same millisecond start one instance; a conversation silent
 for `idle_timeout` ends and frees its slot.
+
+**As built.** Three points differ from the text above, each for a mechanism
+the text did not have:
+
+- **the registry is the pool's own map, not a `Registry`.** A `Registry` only
+  registers the calling process, and the instance does not exist yet when the
+  MESSAGE is routed. `Kelix.Conversations` computes the key (AORs read by
+  `SIP.Msg.Ops.address_of_record/2`); `Kelix.InstancePool` keeps
+  `key → instance` and does the lookup-or-spawn inside one call, which is what
+  makes it atomic;
+- **the dialog layer, not the mixin, drops a page's `{:dialog_terminated, …}`.**
+  FSL gives a host no way to swallow an event: an injected clause must leave the
+  state. An inbound dialog opened by an out-of-dialog MESSAGE therefore does not
+  report its end to its application (`SIP.DialogImpl.page_dialog?/1`); an
+  outbound page's dialog still does, its relay reads it as a failure;
+- **the idle deadline is the pool's.** The pool routes every MESSAGE in and is
+  told of every page out (`{:conversation, :activity, pid}`, sent by `send_page`
+  in an instance that carries a conversation key). At the deadline it forgets
+  the key **first**, then sends `{:conversation, :idle}` — so a MESSAGE arriving
+  meanwhile starts a new conversation instead of reaching one on its way out. The
+  SIP host injects a clause for that event into every wait, ending the scenario
+  with success; a scenario matching `{:conversation, _}` (or a catch-all) keeps
+  control, as with the media-down clause.
+
+A MESSAGE whose `From` or `To` names no user gets no key and an instance of its
+own. The monitor row carries `messages`, shown by `kelictl monitor` as
+`chat (N msg)`. Tests: `apps/kelixip/test/conversations_test.exs`, the
+conversation case of `apps/elixip2/test/page_mode_test.exs`.
 
 ### C3c — trust: not challenging every message
 

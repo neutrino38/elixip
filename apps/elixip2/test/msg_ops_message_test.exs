@@ -163,4 +163,26 @@ defmodule SIP.Test.MsgOpsMessage do
       assert Ops.device_key(:*) == nil
     end
   end
+
+  describe "address_of_record/2" do
+    test "user@host of From and To, whatever the tags and display names" do
+      req = parsed([], "")
+      assert Ops.address_of_record(req, :from) == "alice@example.com"
+      assert Ops.address_of_record(req, :to) == "bob@example.com"
+
+      hand = %{from: ~s("Alice" <sip:alice@Example.COM>;tag=x9), to: "<sip:bob@example.com>"}
+      assert Ops.address_of_record(hand, :from) == "alice@example.com"
+    end
+
+    test "the host is folded, the user part is not" do
+      req = %{from: %SIP.Uri{userpart: "Alice", domain: "EXAMPLE.com"}}
+      assert Ops.address_of_record(req, :from) == "Alice@example.com"
+    end
+
+    test "absent, junk or user-less is nil" do
+      assert Ops.address_of_record(%{}, :from) == nil
+      assert Ops.address_of_record(%{to: "not a uri <<"}, :to) == nil
+      assert Ops.address_of_record(%{to: %SIP.Uri{domain: "example.com"}}, :to) == nil
+    end
+  end
 end
