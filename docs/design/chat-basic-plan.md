@@ -279,15 +279,29 @@ Kelix.Mod.Silo.flush(sip_ctx, req)        # after the 200 to a REGISTER
    maximum. Per-AOR count and size quotas; exceeding one is `{:error, :quota}`
    and the script picks the code. The body is stored **verbatim**, CPIM wrapper
    included, so an IMDN request survives storage untouched;
-3. **flush**: read the AOR's pending messages, claim each with the conditional
-   `UPDATE … WHERE claimed_by IS NULL` and an expiring lease, rebuild with
+3. **flush**: read the AOR's pending messages, claim them with the conditional
+   `UPDATE … WHERE claimed_by IS NULL` and an expiring lease — **the AOR's
+   backlog as one batch, not message by message**, so one node delivers all of it
+   and in order — rebuild with
    `SIP.MsgTemplate.page_request/2` — `Date` set to the arrival time, body
    untouched, no "offline message" prefix — and send to each present contact
    whose device key is not in the served set. The answer is read with the
    classes of C4: `:delivered` and `:refused` both add the device to the served
    set (a device that said 603 or 415 once will say it again), `:unreachable`
    leaves it out for the next flush. Release the lease. Flushing is local to the
-   node that received the REGISTER; nodes meet through the rows;
+   node that received the REGISTER; nodes meet through the rows.
+
+   **Delivery is in arrival order, one message at a time per device.** Page mode
+   carries nothing a client could reorder by: every MESSAGE is a transaction of
+   its own, with a new Call-ID, so CSeq says nothing across two of them, and a
+   client that uses neither CPIM `DateTime` nor `Date` — Trix sends `text/plain`
+   and files by reception time when `Date` is absent — shows messages in the
+   order they reach it. So, per device, message *n+1* leaves only once *n* has
+   its final answer, and an `:unreachable` answer stops that device's queue for
+   this flush: sending *n+1* after a lost *n* would deliver them out of order at
+   the next one. Devices are served in parallel with each other; order is a
+   property of one device's view, not of the AOR. The `Date` the Silo sets is
+   the second line of defence, for the clients that read it;
 4. **the index**: a positive-only ETS cache of "this AOR has pending messages",
    so a REGISTER for an AOR with nothing stored costs no SQL round trip;
 5. **the sweep**: expired messages deleted on a timer; each one never delivered
@@ -326,7 +340,10 @@ default suite covers it with no database.
 **Done when** a message stored while Alice has no binding reaches her phone on its
 REGISTER, reaches her desk client registering the next day, is not served again
 to the phone re-registering from a new IP with the same `+sip.instance`, and two
-nodes flushing the same AOR at once deliver it once per device.
+nodes flushing the same AOR at once deliver it once per device. Ten messages
+stored in order reach each device in that order, even when the Mockup peer
+answers the third one slowly; a device answering 480 to the fourth receives the
+fourth to the tenth at the next flush, still in order.
 
 ### C7 — elixipp, end to end with no node
 
@@ -500,6 +517,12 @@ the second device).
   Linphone → Trix message fails with a 415 relayed back, and v1 does not unwrap
   CPIM on the way — that is a format conversion, and it belongs to the CPIM/IMDN
   phase on both sides.
+- **a live message can overtake the backlog.** A MESSAGE arriving while a flush
+  is still running is relayed to the device at once (C4), and may reach it before
+  the older stored ones. The window is the length of one flush. Queueing live
+  traffic behind the Silo would close it at the cost of making every message
+  to a just-registered AOR wait for SQL; v1 accepts the window, and the stored
+  messages carry their `Date` for the clients that read it.
 - **the lease is the one concurrent path.** A node dying mid-delivery leaves
   messages claimed until the lease expires; a lease too short delivers twice to
   a slow device. The default is set from C8's measurements, and the served set
