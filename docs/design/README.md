@@ -42,6 +42,7 @@ The user-facing counterparts live at the repository root —
 | [presence-basic-plan.md](presence-basic-plan.md) | the build order of the above, phase by phase: what basic presence is, and what each step proves |
 | [presence-rls-plan.md](presence-rls-plan.md) | the buddy list on top of it: one SUBSCRIBE covering N resources (RFC 4662 / 5367), lot by lot |
 | [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
+| [chat-basic-plan.md](chat-basic-plan.md) | the build order of basic chat: the `chat` function, the page relay, the Silo, phase by phase |
 | [debug-improvments.md](debug-improvments.md) | scenario debugging: the sequence diagram drawn from the real SIP messages — what is built, its limits, what comes next (in French) |
 | [debug-fsl-port-plan.md](debug-fsl-port-plan.md) | carrying the step above across the FSL extraction: what goes into the `finite_state_language` package, what stays in the SIP binding, in which order |
 | [kelescope-debug-scenario.md](kelescope-debug-scenario.md) | a live scenario's journal in kelescope — what the node must add (FSL 0.4.1, `Kelix.Traces`, the pushes, `kelictl debug show` as a text ladder) and the kelescope side, against a frozen contract |

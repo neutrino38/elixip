@@ -3,6 +3,8 @@
 What kelixip does with MESSAGE: peer-to-peer chat, chatrooms, attachments,
 offline delivery, and scenarios acting as chatbots.
 
+The build order of objective 1 is [chat-basic-plan.md](chat-basic-plan.md).
+
 Presence is its neighbour, not its subject: the subscription layer, the event
 packages, the buddy list and the consent flow are
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md). The two meet at the Silo, which holds a
