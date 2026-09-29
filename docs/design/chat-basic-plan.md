@@ -606,8 +606,11 @@ Kelix.Mod.Silo.flush(sip_ctx, req)        # after the 200 to a REGISTER
    maximum. Per-AOR count and size quotas; exceeding one is `{:error, :quota}`
    and the script picks the code. The body is stored **verbatim**, CPIM wrapper
    included, so an IMDN request survives storage untouched;
-3. **flush**: read the AOR's pending messages, claim them with the conditional
-   `UPDATE … WHERE claimed_by IS NULL` and an expiring lease — **the AOR's
+3. **flush**: read the AOR's pending messages and claim them in one short
+   transaction — `SELECT … FOR UPDATE` on the unclaimed (or lease-expired) rows,
+   set `claimed_by` and an expiring lease, commit before delivering, so two
+   nodes never take the same message
+   ([DESIGN-CHAT.md](DESIGN-CHAT.md#horizontal-scale)) — **the AOR's
    backlog as one batch, not message by message**, so one node delivers all of it
    and in order — rebuild with
    `SIP.MsgTemplate.page_request/2` — `Date` set to the arrival time, body
@@ -629,8 +632,9 @@ Kelix.Mod.Silo.flush(sip_ctx, req)        # after the 200 to a REGISTER
    the next one. Devices are served in parallel with each other; order is a
    property of one device's view, not of the AOR. The `Date` the Silo sets is
    the second line of defence, for the clients that read it;
-4. **the index**: a positive-only ETS cache of "this AOR has pending messages",
-   so a REGISTER for an AOR with nothing stored costs no SQL round trip;
+4. **no cache in front of the database**: every flush asks it, one indexed
+   query on `(domain, aor)`. A per-node copy of what the shared store holds is a
+   replica, wrong across nodes ([DESIGN-CHAT.md](DESIGN-CHAT.md#horizontal-scale));
 5. **the sweep**: expired messages deleted on a timer; each one never delivered
    to any device increments `kelix_silo_expired_undelivered_total{domain}` — the
    metric that betrays a registrar script which forgot to call `flush`;

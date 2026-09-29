@@ -211,11 +211,15 @@ redundancy), which settles the storage:
   > registrar's data is rebuildable by its own owners: a binding lost in a restart
   > is recreated by the handset within the minute. A stored message is not — it is
   > gone, and the sender already got its 202. That is what makes persistence a
-  > requirement here and a convenience there. ETS keeps one legitimate role: a
-  > local index in front of the database ("does this AOR have anything pending?"),
-  > to spare an SQL round trip on every REGISTER. Positive entries only — a
-  > negative cache would be wrong across nodes, since a message stored by A
-  > invalidates nothing on B;
+  > requirement here and a convenience there.
+  >
+  > **The database is the only copy, down to "is anything pending?"** (ruled
+  > 2026-09-29). No ETS index in front of it: a per-node cache of what the shared
+  > store holds is a replica, and it cannot be right across nodes — an entry
+  > missing on B says nothing of what A stored, and one present may be stale once
+  > another node has delivered. A REGISTER costs one indexed query on
+  > `(domain, aor)`, which answers in well under a millisecond on an empty
+  > result;
 - **waking stays local**: the REGISTER reaches node B, B reads the shared store
   and delivers over the contact it has just registered itself. No inter-node
   message — the junction is made through the data;
@@ -227,11 +231,18 @@ redundancy), which settles the storage:
 Supporting both engines costs more here than it does in `auth_db`, which only
 reads. Three rules keep the cost flat:
 
-- **the claim is a conditional UPDATE, not `SKIP LOCKED`.**
-  `UPDATE … SET claimed_by = ?, claimed_until = ? WHERE id = ? AND claimed_by IS
-  NULL`, then read the affected-row count. It is portable to every version of
-  both engines, where `SELECT … FOR UPDATE SKIP LOCKED` would impose PostgreSQL
-  ≥ 9.5 and MariaDB ≥ 10.6 for no gain at this volume;
+- **the claim is a short transaction with `SELECT … FOR UPDATE`, not
+  `SKIP LOCKED`** (revised 2026-09-29). `BEGIN`; select the AOR's pending rows
+  that are unclaimed or whose lease has expired, `FOR UPDATE`; set `claimed_by`
+  and `claimed_until` on them; `COMMIT`. A second node flushing the same AOR
+  blocks on the row locks, then finds them claimed and takes nothing — no two
+  nodes take the same message. Plain `FOR UPDATE` is portable to every version
+  of both engines, where `SKIP LOCKED` would impose PostgreSQL ≥ 9.5 and
+  MariaDB ≥ 10.6 for no gain at this volume. The transaction holds the claim
+  only: it commits **before** delivery, since a lock held across a SIP
+  transaction would stall every other node flushing that AOR for up to 32 s.
+  Delivery then runs under the lease, which is what frees a batch whose node
+  died mid-delivery;
 - **the dialect differences are known and few**: `BLOB` / `BYTEA` for the body,
   `DATETIME` / `TIMESTAMPTZ` for the dates, `BIGINT AUTO_INCREMENT` / `BIGSERIAL`
   for the key, `ON DUPLICATE KEY UPDATE` / `ON CONFLICT DO UPDATE` for an upsert,
