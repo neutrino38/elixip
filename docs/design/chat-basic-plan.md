@@ -1,6 +1,6 @@
 # chat-basic-plan.md — building basic instant messaging
 
-**Status: planned, nothing implemented** (2026-09-29). The design is
+**Status (2026-09-29): C1 and C2 implemented; C1b next.** The design is
 [DESIGN-CHAT.md](DESIGN-CHAT.md); this document is the order it gets built in,
 what each phase delivers, and what proves it.
 
@@ -22,6 +22,7 @@ are not**.
 | the Silo module: store, flush on REGISTER, retention, quotas, shared SQL storage | the recipient offline — the half of objective 1 that needs a module |
 | `Kelix.DB.Pool`, extracted from `auth_db` | the Silo is the second SQL client; the design forbids a second copy of the opening logic |
 | elixipp page-mode verbs, UAC and UAS | the condition for testing any of this without a node |
+| the journal, kelescope and the debug logs show a chat **without its content** | the GDPR constraint: debugging a node must not mean reading its users' messages (C1b) |
 | reference scripts, module doc, packaging | a function nobody can install is not shipped |
 
 | Out of v1 | Where it re-enters |
@@ -88,6 +89,57 @@ whose `+sip.instance` sits inside the angle brackets.
 
 **Done when** each reading answers identically for a parsed and for a hand-built
 message.
+
+### C1b — the content stays out of the journal and the logs
+
+**The constraint.** A message's content is personal data (GDPR). Whoever debugs a
+node — `kelictl debug`, kelescope's journal popup, a `[log] level = "debug"` —
+sees that a MESSAGE went from Alice to Bob, when, over which transport, with which
+answer; never what it said. This is not a display option: the content is **never
+recorded**, so nothing downstream — the kept journal, its JSON over
+`GET /traces/:id`, a PlantUML export, a log file shipped to syslog — can leak it,
+and no renderer has to remember to hide it.
+
+```elixir
+SIPMsg.redacted(msg)
+#=> the same message, the user content of a MESSAGE replaced by
+#   "<content not recorded: text/plain, 42 octets>"
+```
+
+**Delivers** one function in the message layer, and its two callers:
+
+- **what is redacted**: the body of a MESSAGE of kind `:im` (C1), in or out of a
+  dialog — the in-call MESSAGE a B2BUA relays is a message too. Inside a
+  `message/cpim` envelope only the **content** goes: the envelope's headers
+  (From, To, DateTime, `imdn.Message-ID`) are addressing and timing, the same
+  traffic data the SIP headers already show, and exactly what debugging a lost
+  or duplicated message needs. The `Subject` header goes with the content: it is
+  written by the user. `:is_composing` and `:imdn` bodies are kept — a state and
+  a disposition, no text;
+- **the journal**: `SIPMsg.readable/1` — what `SIP.Scenario.SipTrace` stores as
+  the event's `body` — applies it, so every traced message passes through it
+  once, whichever leg or process sent it. The event gains `redacted: true`;
+- **the debug logs**: the transports' "Message sent to …" dumps (UDP, TCP, TLS,
+  WSS) log `SIPMsg.redacted/1`'s text instead of the raw bytes.
+
+Nothing else in the tree prints a message's body; a grep for the transports'
+dump pattern is part of the phase, and a test pins each caller.
+
+**kelescope.** The contract (`kelescope-debug-scenario.md` §4.3) gains
+`redacted: boolean` on a `:message` event. A field kelescope does not know is
+ignored, so nothing breaks before Part B follows; once it does, the unfolded
+message says "content not recorded (GDPR)" instead of showing a placeholder
+that reads like a bug. `kelictl debug show --full` prints the same line.
+
+**Files** `framework/SIPMsg.ex`, `framework/SIPTransport{UDP,TCP,TLS,WSS}.ex`,
+`dsl/SIPScenarioSipTrace.ex`, `test/message_redaction_test.exs`,
+`docs/design/kelescope-debug-scenario.md` (§4.3).
+
+**Done when** a traced call carrying an in-dialog MESSAGE, and a traced chat
+instance relaying one, keep journals in which the text appears nowhere — asserted
+by searching the stored events for it — while the typing indicator and the IMDN
+of the same exchange are shown whole; and a node at `debug` level writes no
+message text to its log.
 
 ### C2 — the `chat` function
 
@@ -172,9 +224,14 @@ operation hours later.
 `SIP.Scenario`), `framework/SIPMsgTemplate.ex`, `dsl/SIPScenario.ex`,
 `test/page_mode_test.exs`.
 
+The outbound transactions are bound to the scenario in `SIP.Scenario.SipTrace`
+as a dialog's are: a traced chat instance shows the MESSAGE it received, the one
+it sent and both answers, in one journal — redacted (C1b).
+
 **Done when** a UAC scenario pages a UAS scenario through
 `SIP.Test.Transport.Mockup`, both ways, and the request that went out carries no
-Via, Route or CSeq of the one it was built from.
+Via, Route or CSeq of the one it was built from; and a traced instance's journal
+holds both transactions.
 
 ### C4 — the page relay
 
@@ -225,6 +282,10 @@ transaction, N outbound transactions, one answer**:
 The contacts the relay reached are handed back in the outcome as device keys (C1):
 the script passes them to the Silo when it stores, so the devices that already
 have the message are never served it a second time by a flush.
+
+In the journal, each device's transaction is a lane of its own (its own
+Call-ID) labelled with the device, so kelescope draws the fan-out as it happened:
+which device answered what, and which one never did.
 
 **Files** `dsl/sbb/page.ex`, `test/sbb_page_test.exs` — one Mockup peer per
 device (`;unittest=alice-phone`, `;unittest=alice-desk`).
@@ -308,7 +369,14 @@ Kelix.Mod.Silo.flush(sip_ctx, req)        # after the 200 to a REGISTER
    to any device increments `kelix_silo_expired_undelivered_total{domain}` — the
    metric that betrays a registrar script which forgot to call `flush`;
 6. **the control surface**: `kelictl silo list <aor>`, `kelictl silo purge
-   <aor>`, the counters in `kelictl status`.
+   <aor>`, the counters in `kelictl status`. The list shows **metadata only** —
+   sender, arrival, expiry, size, content type, devices served — never a body
+   (C1b): the operator purging a queue does not need to read it;
+7. **what a flush leaves for debugging**: a delivery runs in the module, not in a
+   scenario, so it has no journal. It leaves one `info` line per attempt — AOR,
+   device key, stored message id, answer — and the counters. The flush is
+   *started* from the registrar script, whose journal shows the `flush` call;
+   linking that to the delivery lines is the stored message id.
 
 **Configuration**
 
@@ -389,7 +457,10 @@ MESSAGE on one machine, and the same pair drives C8's recipe against a node.
    arrives once, not at every wake-up (§6, the `+sip.instance` point);
 4. Bob has blocked Alice in Trix: her page gets 603 and nothing is stored;
 5. an unknown sender pages Trix: 202 relayed back, nothing stored;
-6. Linphone's typing indicator reaches Trix (415 back) and is never stored.
+6. Linphone's typing indicator reaches Trix (415 back) and is never stored;
+7. the `p2p-chat.exs` instance of step 1 is journalled from kelescope: the
+   fan-out is readable lane by lane, and no message text appears in the popup,
+   in `kelictl debug show --full`, nor in the node's log at `debug` level.
 
 The Kamailio `msilo` recipe of Trix's ADR 0008 §5 is the same list; kelixip
 replaces its proxy, and `docs/utilisation/deploiement.md` in trix-web-client
@@ -428,13 +499,24 @@ gains the kelixip configuration beside the Kamailio one.
    `Kelix.Mod.AuthDb.challengeable?/1`'s, which already excludes in-dialog
    requests; the script asks it and does not re-derive it, and C8 carries a test
    in which a second MESSAGE in the same dialog is relayed with no 401/407.
-8. **The storage is SQL from the first commit.** No in-memory Silo is shipped:
+8. **A message's content is never recorded outside the Silo, and this is not
+   configurable.** Not a filter in kelescope, not a flag an operator can turn
+   off while debugging: a switch that reveals the content is a switch someone
+   leaves on, and the journal it filled is kept for an hour and exported as JSON.
+   The Silo holds content because delivery needs it — that is its purpose, its
+   retention is bounded, and nothing reads it but the delivery. Redaction lives
+   in the message layer for the reason every reading does: one place decides what
+   a MESSAGE's content is (C1b).
+9. **The storage is SQL from the first commit.** No in-memory Silo is shipped:
    the in-memory store exists for the test suite only. A node that loses its
    messages on restart has already answered 202 to their senders.
 
 ## 5. Order, and what runs in parallel
 
-C1 → C3 → C4 is the spine of peer-to-peer chat with everyone online. C2 depends
+C1 → C3 → C4 is the spine of peer-to-peer chat with everyone online. **C1b
+comes before C3**: the first phase that makes a node carry MESSAGEs is the last
+moment their content can be kept out of a journal by construction rather than
+cleaned out of one afterwards. C2 depends
 on nothing and can start first. C5 depends on nothing either, and is best merged
 early, while `auth_db` is quiet. C6 depends on C1, C3 and C5. C7 depends on C3.
 C8 depends on everything.
@@ -527,6 +609,16 @@ the second device).
   messages claimed until the lease expires; a lease too short delivers twice to
   a slow device. The default is set from C8's measurements, and the served set
   bounds the damage to one duplicate per device.
+- **content can leak by another path than the two C1b covers.** A script that
+  logs `last_uas_req()`, a scenario printing a body in a failure reason, an
+  `inspect/1` of a request in an error log. The reference scripts are written not
+  to; the module doc says why a customer's script should not either. A crash
+  report carrying a request in its state is the hard case: the Logger formatter
+  is where a last-line redaction would go, and it is not v1.
+- **other personal data in the journal.** A PIDF `<note>` is written by the user
+  too, and the journal shows it today. The constraint as stated is about
+  messages; extending C1b's rule to presence notes is one clause in the same
+  function, and a decision for the presence side.
 - **the SQL tests are gated.** A suite that is green without a database proves
   the logic, not the dialects. The release checklist for 1.8.0 runs both gates
   against real engines once.
