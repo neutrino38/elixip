@@ -27,6 +27,15 @@ defmodule Kelix.InstancePool do
   the instance is told `{:conversation, :transport_down}` — the next MESSAGE
   comes over a new flow, and is a new conversation.
 
+  A conversation can also **hibernate** (C3d): its instance asks, through
+  `hibernate/1`, to be set aside — `{:conversation, :hibernate, pid, snapshot}`,
+  a call — and this process hands the snapshot to the `conversation` module
+  under `(domain, rule, From, To)`, the key without its flow, then forgets the
+  live key. When a MESSAGE finds no live instance, the module is asked for a
+  hibernated one on those four; if there is one, the script is spawned **at the
+  state it named**, with the data it kept — the router wakes it, whatever flow
+  the waking MESSAGE came over.
+
   Also the live half of `Kelix.Control.subscribe_monitor/1`: subscribes to
   `FSL.Monitor` once at boot and re-joins its pushes with its own rows
   (`join_row/2`, the same join `Kelix.Control.monitor/0` runs on every read),
@@ -208,6 +217,42 @@ defmodule Kelix.InstancePool do
   end
 
   def handle_call(:stats, _from, state), do: {:reply, stats_map(state), state}
+
+  # `hibernate/1`, from the instance itself: keep the snapshot in the
+  # `conversation` module, then forget the live key so nothing more is routed
+  # to an instance about to end. The module answers the TTL it granted.
+  def handle_call({:conversation, :hibernate, pid, snapshot}, _from, state) do
+    case Enum.find(state.instances, fn {_r, i} -> i.pid == pid and i.conversation != nil end) do
+      nil ->
+        {:reply, {:error, :not_a_conversation}, state}
+
+      {ref, inst} ->
+        key = Kelix.Conversations.hibernation_key(inst.conversation)
+
+        reply =
+          Kelix.ModuleRegistry.facade(
+            "conversation",
+            :hibernate,
+            [key, Map.put(snapshot, :script, inst.script)],
+            {:error, :no_conversation_module}
+          )
+
+        case reply do
+          {:ok, ttl} ->
+            Logger.info(
+              module: __MODULE__,
+              message:
+                "instance #{inst.id}: conversation #{Kelix.Conversations.label(inst.conversation)} " <>
+                  "hibernated at #{inspect(snapshot.resume)} for #{ttl} s"
+            )
+
+            {:reply, reply, forget_conversation(state, ref, inst)}
+
+          _refused ->
+            {:reply, reply, state}
+        end
+    end
+  end
 
   def handle_call(:list, _from, state) do
     rows = for {_ref, i} <- state.instances, do: to_list_row(i)
@@ -458,6 +503,34 @@ defmodule Kelix.InstancePool do
     {:reply, {:accept, inst.pid}, state}
   end
 
+  # A new instance for a conversation: is there one set aside on its parties? If
+  # so, it is taken — the module forgets it — and the script starts where it
+  # stopped, with what it kept. Asked only once a slot and the script are secured,
+  # so a refusal (503, 500) does not lose it.
+  defp wake_conversation(%{conversation: %{key: key}}, id) do
+    case Kelix.ModuleRegistry.facade(
+           "conversation",
+           :wake,
+           [Kelix.Conversations.hibernation_key(key)],
+           :none
+         ) do
+      {:ok, %{resume: resume, data: data}} ->
+        Logger.info(
+          module: __MODULE__,
+          message:
+            "instance #{id}: conversation #{Kelix.Conversations.label(key)} woken " <>
+              "at #{inspect(resume)}"
+        )
+
+        [start_state: resume, appdata: data]
+
+      _none ->
+        []
+    end
+  end
+
+  defp wake_conversation(_route, _id), do: []
+
   # What a spawned instance carries when it serves a conversation, and the
   # registration that makes the next MESSAGE find it.
   defp register_conversation(state, inst, _ref, nil), do: {state, inst}
@@ -558,15 +631,18 @@ defmodule Kelix.InstancePool do
         id = state.next_id
 
         {pid, ref} =
-          SIP.Scenario.Runner.spawn_uas_instance(module,
-            dialog_pid: dialog_id,
-            parent_pid: self(),
-            inbound_request: req,
-            config_overrides: overrides,
-            # Key the FSM monitor row on OUR id rather than the instance pid, so
-            # `Kelix.Control.monitor/0` can join the two views — and so a `spawn_fsm`
-            # child sorts right under its parent ({id, name}).
-            slot_id: id
+          SIP.Scenario.Runner.spawn_uas_instance(
+            module,
+            [
+              dialog_pid: dialog_id,
+              parent_pid: self(),
+              inbound_request: req,
+              config_overrides: overrides,
+              # Key the FSM monitor row on OUR id rather than the instance pid, so
+              # `Kelix.Control.monitor/0` can join the two views — and so a
+              # `spawn_fsm` child sorts right under its parent ({id, name}).
+              slot_id: id
+            ] ++ wake_conversation(route, id)
           )
 
         inst = %{

@@ -659,6 +659,24 @@ state talking do
 end
 ```
 
+A long-lived conversation — a bot waiting for its user's answer — can instead be set
+aside with `hibernate/1`, a transition: the node keeps the state to resume in and the
+appdata keys named in `keep` (plain data only), and the instance ends. The next
+MESSAGE from the same `From` to the same `To`, over whatever flow, starts the script
+again **at `resume:`** with that appdata. It needs the `conversation` module.
+
+```elixir
+state serving do
+  on_events do
+    {:conversation, :transport_down} -> goto(set_aside)
+  end
+end
+
+state set_aside do
+  hibernate(resume: :awaiting_answer, keep: [:step, :cart], ttl: 86_400)
+end
+```
+
 
 ## Sub-scenarios (sub-FSM)
 

@@ -101,6 +101,30 @@ defmodule SIP.Session.Page do
         * `:timeout` — the lifetime of the dialog carrying the page, in seconds
           (60 by default).
       """
+      @doc """
+      Set this conversation aside and end the instance: what `opts` names is
+      kept, and the next MESSAGE between the same two parties — over whatever
+      flow — resumes the script at `:resume` with it (chat-basic-plan, C3d).
+
+        * `:resume` — the state to resume in (required);
+        * `:keep` — the appdata keys to keep; their values must be plain data,
+          a pid, a reference, a port or a function is refused;
+        * `:ttl` — how long to keep it, in seconds, bounded by the node.
+
+      A transition: the instance ends successfully once the node has kept the
+      conversation, as a failure when it could not (not a conversation, no
+      `conversation` module, a value that is not plain data).
+      """
+      defmacro hibernate(opts) do
+        quote do
+          SIP.Session.Page.do_hibernate(
+            var!(sip_ctx),
+            unquote(opts),
+            Process.get(:scenario_event_type)
+          )
+        end
+      end
+
       defmacro send_page(to, body, content_type \\ "text/plain", opts \\ []) do
         quote do
           var!(sip_ctx) =
@@ -188,6 +212,56 @@ defmodule SIP.Session.Page do
   end
 
   def note_event(sip_ctx, _event), do: sip_ctx
+
+  @doc false
+  # Backs `hibernate/1`. The node keeps the conversation — the instance's parent,
+  # which keyed it, asked the `conversation` module to store it and answers how
+  # long it granted — and the instance ends. Nothing is kept by the instance
+  # itself: it is about to be gone.
+  @spec do_hibernate(%SIP.Context{}, keyword(), atom() | nil) :: tuple()
+  def do_hibernate(sip_ctx = %SIP.Context{}, opts, event_type) when is_list(opts) do
+    resume = Keyword.fetch!(opts, :resume)
+    keep = Keyword.get(opts, :keep, [])
+    data = Map.new(keep, &{&1, SIP.Context.appdata_get(sip_ctx, &1)})
+
+    with :ok <- conversation?(sip_ctx),
+         :ok <- plain_data(data),
+         {:ok, ttl} <- set_aside(sip_ctx, %{resume: resume, data: data, ttl: opts[:ttl]}) do
+      {:terminal, :success, "hibernated for #{ttl} s", event_type, sip_ctx}
+    else
+      {:error, reason} ->
+        Logger.warning(module: __MODULE__, message: "hibernate refused: #{inspect(reason)}")
+        {:terminal, :failure, {:hibernate, reason}, event_type, sip_ctx}
+    end
+  end
+
+  defp conversation?(sip_ctx) do
+    if SIP.Context.appdata_get(sip_ctx, :conversation) != nil and
+         is_pid(Map.get(sip_ctx, :parent_pid)),
+       do: :ok,
+       else: {:error, :not_a_conversation}
+  end
+
+  # What wakes must be what was kept: a pid, a reference, a port or a function
+  # means nothing to the process that resumes — let alone after a restart.
+  defp plain_data(data) do
+    case Enum.find(data, fn {_key, value} -> not plain?(value) end) do
+      nil -> :ok
+      {key, _value} -> {:error, {:not_plain_data, key}}
+    end
+  end
+
+  defp plain?(v) when is_pid(v) or is_reference(v) or is_port(v) or is_function(v), do: false
+  defp plain?(%{} = map), do: Enum.all?(map, fn {k, v} -> plain?(k) and plain?(v) end)
+  defp plain?(list) when is_list(list), do: Enum.all?(list, &plain?/1)
+  defp plain?(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> plain?()
+  defp plain?(_scalar), do: true
+
+  defp set_aside(sip_ctx, snapshot) do
+    GenServer.call(sip_ctx.parent_pid, {:conversation, :hibernate, self(), snapshot})
+  catch
+    :exit, _ -> {:error, :no_parent}
+  end
 
   # A conversation ends after `idle_timeout` seconds with no MESSAGE in or out.
   # The node sees every one that comes in — it routes them — but not the pages

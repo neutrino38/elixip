@@ -425,6 +425,48 @@ defmodule SIP.Test.PageMode do
     refute content =~ "Rendez-vous"
   end
 
+  describe "hibernate/1 (C3d)" do
+    test "outside a conversation it refuses, as a failure" do
+      ctx = %SIP.Context{}
+
+      assert {:terminal, :failure, {:hibernate, :not_a_conversation}, :sip, ^ctx} =
+               SIP.Session.Page.do_hibernate(ctx, [resume: :later], :sip)
+    end
+
+    test "a value that would not wake is refused before anything is asked" do
+      ctx =
+        %SIP.Context{parent_pid: self()}
+        |> SIP.Context.appdata_set(:conversation, {:a, :key})
+        |> SIP.Context.appdata_set(:step, [1, %{deep: {self()}}])
+
+      assert {:terminal, :failure, {:hibernate, {:not_plain_data, :step}}, nil, _} =
+               SIP.Session.Page.do_hibernate(ctx, [resume: :later, keep: [:step]], nil)
+
+      refute_received {:"$gen_call", _, _}
+    end
+
+    test "kept plain data goes to the parent, which answers the TTL" do
+      parent =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", from, {:conversation, :hibernate, _pid, snapshot}} ->
+              GenServer.reply(from, {:ok, 42})
+              send(:page_mode_test, {:snapshot, snapshot})
+          end
+        end)
+
+      ctx =
+        %SIP.Context{parent_pid: parent}
+        |> SIP.Context.appdata_set(:conversation, {:a, :key})
+        |> SIP.Context.appdata_set(:step, %{n: 3})
+
+      assert {:terminal, :success, "hibernated for 42 s", nil, _} =
+               SIP.Session.Page.do_hibernate(ctx, [resume: :later, keep: [:step], ttl: 99], nil)
+
+      assert_receive {:snapshot, %{resume: :later, data: %{step: %{n: 3}}, ttl: 99}}
+    end
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
   defp inbound_wire(user \\ "bob") do

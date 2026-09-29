@@ -1,6 +1,6 @@
 # chat-basic-plan.md — building basic instant messaging
 
-**Status (2026-09-29): C1, C1b, C2, C3, C3b and C3c implemented; hibernation (C3d) next.** The design is
+**Status (2026-09-29): C1 to C3d implemented — C3d on its in-memory store, the SQL one waits for C5; the page relay (C4) next.** The design is
 [DESIGN-CHAT.md](DESIGN-CHAT.md); this document is the order it gets built in,
 what each phase delivers, and what proves it.
 
@@ -421,6 +421,45 @@ user's answer an hour later wakes it at `awaiting_answer` with `step` intact; a
 hibernated conversation past its TTL is gone and the next message starts over;
 `hibernate/1` handed a pid in `keep` refuses; a node restarted between the two
 messages wakes the conversation all the same (SQL gate).
+
+**As built** (2026-09-29), everything but the SQL gate:
+
+- **FSL 0.5.0** adds `:start_state` to `FSL.Runner.run_instance/2` (hence to
+  `spawn_uas_instance/2`): a machine runs from the named state, its appdata
+  seeded through `:appdata`; a state the module no longer declares starts at
+  `initial_state` with a warning. A feature of the Elixir implementation alone,
+  so a minor. `apps/elixip2/mix.exs` points at the local checkout
+  (`path:`) until it is published — and that path dependency brings FSL's own
+  lock with it: `req` 0.7.4 (and `finch`, `mint`, `hpax`) instead of 0.6.3,
+  suite green. Back to the hex dependency, and the previous lock, once 0.5.0
+  is out;
+- **`hibernate/1`** is a transition of `SIP.Session.Page`. It checks the kept
+  values are plain data (no pid, reference, port or function, however deep),
+  then asks the instance's parent — `Kelix.InstancePool`, which keyed it —
+  with a call, `{:conversation, :hibernate, pid, snapshot}`. The pool hands the
+  snapshot and the script name to the `conversation` module under
+  `Kelix.Conversations.hibernation_key/1` (the key without its flow), forgets
+  the live key, and answers the granted TTL; the instance ends in success. Not
+  a conversation, no `conversation` module, a value that would not wake: it
+  ends in failure and nothing is kept;
+- **the wake** is the pool's: a MESSAGE with no live instance on its full key
+  asks the module (`wake/1`, which takes the snapshot) — once the quota slot and
+  the script are secured, so a 503 or a 500 loses nothing — and spawns the
+  current version of the script at `resume:` with the kept appdata, registered
+  under the new flow's key. The waking MESSAGE arrives as it does for any new
+  instance;
+- **`Kelix.Mod.Conversation`**: `[module.conversation]` `default_ttl` (86400),
+  `max_ttl` (604800); the facades `hibernate/2` and `wake/1`; a sweep every
+  minute; `kelictl conversation list` — parties, script, resume state, time
+  left, never the data kept. The store is **ETS**, owned by the module's
+  process: a restart loses what was hibernated. Not packaged: no
+  `kelixip-mod-conversation` until its SQL store (C5) makes it a production
+  backend, and no `packaging/sql/conversation/` either.
+
+Tests: `apps/kelix_modules/test/conversation_test.exs` (the module, and with
+the core: hibernate on a MESSAGE, on a dropped connection, a pid refused, no
+module), `apps/elixip2/test/page_mode_test.exs` (the verb), FSL's
+`engine_test.exs` (`:start_state`).
 
 ### C4 — the page relay
 

@@ -29,7 +29,8 @@ defmodule Kelix.Conversations do
   device — is a new conversation, challenged once.
 
   A connected flow can end under a conversation; `Kelix.InstancePool` watches
-  it and tells the instance `{:conversation, :transport_down}`.
+  it and tells the instance `{:conversation, :transport_down}`. A conversation
+  that hibernates is kept under `hibernation_key/1`, without the flow.
   """
 
   alias Kelix.DialRule
@@ -59,6 +60,15 @@ defmodule Kelix.Conversations do
   # catch-all is single by construction (`Kelix.Domains`).
   defp rule_id(%DialRule{default?: true}), do: :default
   defp rule_id(%DialRule{raw: raw}), do: raw
+
+  @doc """
+  The key a conversation hibernates under (chat-basic-plan, C3d): the live key
+  without its flow. A conversation set aside outlives the flow it came in on —
+  the user closed the tab, the connection dropped — and wakes on the next
+  MESSAGE between the same two parties, over whatever flow.
+  """
+  @spec hibernation_key(key) :: {String.t(), String.t() | :default, String.t(), String.t()}
+  def hibernation_key({domain, rule, from, to, _flow}), do: {domain, rule, from, to}
 
   @doc "A key as an operator reads it, for the log and the monitor."
   @spec label(key) :: String.t()
