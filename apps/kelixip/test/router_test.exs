@@ -332,4 +332,79 @@ defmodule Kelix.RouterTest do
                "destination sip:1234@d.com does not match any call rule declared in domain d.com"
     end
   end
+
+  # An OPTIONS is decided before any dialog exists, and most of them are the core's:
+  # a script serves one only when a [[domain.options]] rule claims it.
+  describe "resolve_options/2" do
+    @options_toml """
+    [[domain]]
+    name = "opt.com"
+
+    [[domain.options]]
+    keepalive = true
+    script    = "options-keepalive.exs"
+
+    [[domain.options]]
+    pattern = "conf-."
+    script  = "options-mcu.exs"
+
+    [[domain.options]]
+    default = true
+    script  = "options-probe-ua.exs"
+
+    [[domain]]
+    name = "probe.com"
+
+    [[domain.options]]
+    pattern = "XXXX"
+    script  = "options-probe-ua.exs"
+
+    [[domain]]
+    name = "bare.com"
+    """
+
+    setup do
+      {:ok, snap} = Domains.parse(@options_toml)
+      %{opts: snap}
+    end
+
+    test "sip:domain goes to the keepalive rule", %{opts: snap} do
+      assert {:route, %{function: :options, script: "options-keepalive.exs"}} =
+               Router.resolve_options(snap, req(:OPTIONS, nil, "opt.com"))
+    end
+
+    test "a user-part goes through the rules in order", %{opts: snap} do
+      assert {:route, %{script: "options-mcu.exs"}} =
+               Router.resolve_options(snap, req(:OPTIONS, "conf-42", "opt.com"))
+
+      assert {:route, %{script: "options-probe-ua.exs"}} =
+               Router.resolve_options(snap, req(:OPTIONS, "alice", "opt.com"))
+    end
+
+    # Otherwise options-probe-ua.exs would answer the load balancer's ping 480.
+    test "without a keepalive rule, sip:domain is the core's — never the default", %{opts: snap} do
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, nil, "probe.com"))
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, "", "probe.com"))
+    end
+
+    test "an unknown host is the core's, not a 404", %{opts: snap} do
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, nil, "10.0.0.1"))
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, "alice", "nope.net"))
+    end
+
+    test "a domain declaring no rule leaves every OPTIONS to the core", %{opts: snap} do
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, "alice", "bare.com"))
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, nil, "bare.com"))
+    end
+
+    test "a user-part no rule matches is a 404, as for a call", %{opts: snap} do
+      log =
+        capture_log(fn ->
+          assert {:reject, 404, _} =
+                   Router.resolve_options(snap, req(:OPTIONS, "alice", "probe.com"))
+        end)
+
+      assert log =~ "does not match any options rule declared in domain probe.com"
+    end
+  end
 end
