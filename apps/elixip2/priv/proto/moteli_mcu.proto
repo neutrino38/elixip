@@ -608,6 +608,7 @@ message McuParticipantRequestDocSharing {
   string conf_tag = 2;
   uint32 part_id = 3;
   string status = 4; // ACTIVE | WAITING_ACCEPT | NONE | FAILED
+  uint32 source_id = 5; // the participant's slides source, 0 if none
 }
 
 message McuParticipantMediaTimeout {
