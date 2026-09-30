@@ -802,4 +802,42 @@ defmodule Kelix.ConfigTest do
       assert Application.get_env(:elixip2, :sequence_output) == {Kelix.Traces, :store}
     end
   end
+
+  describe "parse/1 — [database] (chat-basic-plan C5)" do
+    test "absent → no defaults" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.database == %{}
+    end
+
+    test "where and how are kept as the block's own string keys" do
+      assert {:ok, cfg} =
+               Config.parse(
+                 "[database]\ndriver = \"postgres\"\nhost = \"db.example.net\"\n" <>
+                   "port = 6432\nssl_ca_cert_file = \"/ca.pem\"\n"
+               )
+
+      assert cfg.database == %{
+               "driver" => "postgres",
+               "host" => "db.example.net",
+               "port" => 6432,
+               "ssl_ca_cert_file" => "/ca.pem"
+             }
+    end
+
+    test "an account is refused by name: every module connects with its own" do
+      for key <- ~w(database username password) do
+        assert {:error, msg} = Config.parse("[database]\n#{key} = \"x\"\n")
+        assert msg =~ key
+        assert msg =~ "own block"
+      end
+    end
+
+    test "a bad value or a stray key is refused" do
+      assert {:error, msg} = Config.parse("[database]\ndriver = \"oracle\"\n")
+      assert msg =~ "driver"
+      assert {:error, msg} = Config.parse("[database]\npool_size = 8\n")
+      assert msg =~ "pool_size"
+      assert {:error, _} = Config.parse("[database]\nssl = \"yes\"\n")
+    end
+  end
 end

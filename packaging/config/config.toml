@@ -103,6 +103,18 @@ port = 9095
 #max_traces      = 100
 #max_trace_bytes = 1048576
 
+# Where the SQL server is and how to reach it, shared by every module that keeps
+# data in SQL (auth_db, silo): each of their blocks inherits these keys, and a key
+# set in the module's own block wins. Never the account — database, username and
+# password stay in each module's block, since every module connects with its own.
+#[database]
+#driver           = "mysql"        # mysql | postgres
+#host             = "db.example.net"
+#port             = 3306
+#ssl_ca_cert_file = "/etc/pki/tls/certs/db-ca.pem"
+#allow_insecure_db_connection = false
+#connect_timeout_ms = 5000
+
 # Loadable modules — one block per module to load, from module_dir. Nothing is
 # loaded by default: install the matching kelixip-mod-* package first, or the
 # block is logged and skipped.

@@ -584,6 +584,15 @@ passes unchanged, and `kelictl` shows the same descriptor.
 function), `apps/kelix_modules/lib/kelix/mod/auth_db/pool.ex` reduced to its
 configuration, the tests moved with the code.
 
+**As built** (2026-09-30): `Kelix.DB.Pool.child_spec/2` takes, beside `:name`,
+the `:label` its log lines and error messages name (`[module.<label>]`),
+`:publish_as` (the key `describe/3` reads the descriptor back from) and
+`:descriptor` (a module's own fields over the common ones — `auth_db` adds its
+`table`). `[database]` refuses `database`, `username` and `password` by name,
+and `pool_size` as unknown: the account and the load are each module's. The
+negotiation tests stayed in `auth_db_pool_test.exs`, which runs them through the
+thin `Kelix.Mod.AuthDb.Pool`; `db_pool_test.exs` covers what the extraction added.
+
 ### C6 — the Silo module
 
 ```elixir

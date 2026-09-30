@@ -122,9 +122,13 @@ defmodule Kelix.Mod.AuthDb do
   `Kelix.Mod.AuthDb.Pool` (which negotiates the transport — TLS first).
   `child_spec/2` also stashes the facade config (table/columns/hash) into app env,
   so the stateless facades resolve it without the pid.
+
+  The block is read over the `[database]` defaults (`Kelix.DB.Pool.with_defaults/1`),
+  here and in `validate_config/1` alike.
   """
   @impl Kelix.Module
   def child_spec(_name, config) do
+    config = Kelix.DB.Pool.with_defaults(config)
     configure(config)
 
     %{id: __MODULE__, start: {Pool, :start_link, [config]}}
@@ -132,6 +136,8 @@ defmodule Kelix.Mod.AuthDb do
 
   @impl Kelix.Module
   def validate_config(config) when is_map(config) do
+    config = Kelix.DB.Pool.with_defaults(config)
+
     with :ok <- reject_unknown_keys(config),
          {:ok, _} <- req_string(config, "database"),
          {:ok, _} <- req_string(config, "username"),

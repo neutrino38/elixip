@@ -147,6 +147,31 @@ defmodule Kelix.Mod.AuthDbPoolTest do
     end
   end
 
+  describe "[database] defaults (Kelix.DB.Pool, chat-basic-plan C5)" do
+    # The running Kelix.Config, given a [database] block for the test.
+    setup do
+      previous = :sys.get_state(Kelix.Config)
+      database = %{"driver" => "postgres", "host" => "db.shared", "ssl" => false}
+      :sys.replace_state(Kelix.Config, &%{&1 | database: database})
+      on_exit(fn -> :sys.replace_state(Kelix.Config, fn _ -> previous end) end)
+      :ok
+    end
+
+    test "a block is validated over them: ssl = false from [database] needs the confirmation" do
+      assert {:error, reason} = AuthDb.validate_config(Map.delete(@block, "host"))
+      assert reason =~ "CLEARTEXT"
+
+      assert AuthDb.validate_config(allowing_insecure()) == :ok
+    end
+
+    test "the block's own keys win" do
+      block = Map.put(@block, "ssl", true)
+      assert AuthDb.validate_config(block) == :ok
+      assert Kelix.DB.Pool.with_defaults(block)["host"] == "db.example.com"
+      assert Kelix.DB.Pool.with_defaults(block)["driver"] == "postgres"
+    end
+  end
+
   describe "descriptor/2 — what show reports, and what it must never carry" do
     test "the connection identity, and the transport in both machine and human form" do
       d = Pool.descriptor(@block, :tls_verified)

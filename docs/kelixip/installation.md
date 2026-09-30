@@ -291,6 +291,27 @@ ssl_ca_cert_file   = ""             # with a CA the server cert is verified; wit
 
 `[module.registrar]` lives in **`domains.toml`**, not here (see below).
 
+#### `[database]` — defaults for the SQL modules
+
+Where the SQL server is and how to reach it, inherited key by key by every
+module that keeps data in SQL (`auth_db`, `silo`). A key set in the module's own
+block wins. Optional; absent, each module block says everything itself.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `driver` | `mysql` \| `postgres` | SQL engine |
+| `host` | string | Database host |
+| `port` | 1..65535 | Database port |
+| `ssl` | bool | `false` asks for cleartext outright |
+| `ssl_ca_cert_file` | path | CA that must sign the server certificate |
+| `allow_insecure_db_connection` | bool | Accept a cleartext link when the server refuses TLS |
+| `connect_timeout_ms` | integer, > 0 | Upper bound on establishing one connection |
+
+`database`, `username` and `password` are refused here: every module connects
+with an account of its own. `pool_size` is refused too — it sizes one module's
+load. See [auth_db.md](modules/auth_db.md#parameters) for how the transport is
+negotiated.
+
 #### `[mediaserver]` — the node's media settings
 
 | Key | Type | Default | Meaning |
