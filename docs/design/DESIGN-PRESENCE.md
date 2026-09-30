@@ -511,6 +511,33 @@ while its media server is lost. Its plan is
 The registrar keeps its own path (`registration_changed/1`); moving it onto
 `report/4` is possible, and not done.
 
+### One publication per publisher
+
+PUBLISH names no device: no Contact, no `+sip.instance`, and a From every device
+of the user shares. The publisher is therefore the **flow** the PUBLISH arrives
+on — the connection over TCP, TLS or WSS, the source address and port over UDP
+(`SIP.Publication.same_publisher?/2`). Three rules follow:
+
+- **One publication per publisher and resource.** An initial PUBLISH from a
+  publisher that already holds one replaces it. A client that lost its
+  entity-tag across a reconnection starts over; it does not leave its old state
+  beside the new one, to resurface when the new one is removed.
+- **A publication does not outlive its connection.** Over a connection-oriented
+  transport the connection is monitored; when it drops, what was published over
+  it is removed and the watchers are told. A WebRTC client closed without an
+  unPUBLISH leaves nothing behind — the registrar applies the same rule to
+  bindings.
+- **An un-REGISTER is the device's unPUBLISH**, and so is the end of its
+  registration. `registration_changed/1` and `registration_ended/1` remove what
+  the device published, on every package of the AOR — the latter unless the
+  device still holds a binding over the same flow, through another dialog.
+
+Between publishers, what is notified is the publication whose state **changed**
+last. A refresh carries no state and moves nothing: a device that only refreshes
+does not take over from one that changed its state since. A proxy that relays
+several devices of one user over one connection makes them one publisher; the
+composite state is where that is answered.
+
 ### Call occupancy
 
 Whether a user is on the phone is one fact read through three doors: a BLF key

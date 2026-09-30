@@ -26,7 +26,8 @@ defmodule Kelix.Mod.PresenceTest do
       content_type: "application/pidf+xml",
       body: Keyword.get(opts, :body, "<presence/>"),
       doc: Keyword.get(opts, :doc, doc(user, :open)),
-      sender: "sip:#{user}@#{@domain}"
+      sender: "sip:#{user}@#{@domain}",
+      flow: Keyword.get(opts, :flow)
     }
     |> SIP.Publication.grant(Keyword.get(opts, :expires, 3600))
   end
@@ -147,6 +148,153 @@ defmodule Kelix.Mod.PresenceTest do
 
       assert {:ok, _, _} =
                Presence.publish(@domain, publication("bob", operation: :refresh, etag: desk))
+    end
+  end
+
+  # The flow a PUBLISH came in on, as `SIP.Msg.Ops.arrival_flow/1` reads it: over
+  # a connection, the transport instance is the connection — a process standing
+  # in for it here, which the test kills to drop it.
+  defp connection() do
+    pid = spawn(fn -> receive do: (:drop -> :ok) end)
+    %{received: {:wss, {10, 0, 0, 7}, 40_000}, tp_pid: pid, tp_module: SIP.Transport.WSS}
+  end
+
+  defp udp(port),
+    do: %{received: {:udp, {10, 0, 0, 7}, port}, tp_pid: self(), tp_module: SIP.Transport.UDP}
+
+  defp drop(%{tp_pid: pid}) do
+    ref = Process.monitor(pid)
+    send(pid, :drop)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}
+  end
+
+  describe "one publication per publisher" do
+    # A client that lost its entity-tag across a reconnection starts over with an
+    # initial PUBLISH: it replaces what it published, it does not add a state.
+    test "an initial PUBLISH replaces the publisher's previous one" do
+      flow = udp(5070)
+      {:ok, first, _} = Presence.publish(@domain, publication("bob", flow: flow))
+
+      {:ok, _second, _} =
+        Presence.publish(@domain, publication("bob", flow: flow, doc: doc("bob", :closed)))
+
+      assert [%{status: "closed"}] = Presence.presentities(@domain)
+
+      assert {:error, 412} =
+               Presence.publish(@domain, publication("bob", operation: :refresh, etag: first))
+    end
+
+    test "over a connection, the connection is the publisher" do
+      flow = connection()
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: flow))
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: flow))
+
+      assert [_one] = Presence.presentities(@domain)
+    end
+
+    test "two publishers keep a state each" do
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: udp(5070)))
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: udp(5080)))
+
+      assert [_, _] = Presence.presentities(@domain)
+    end
+
+    # The removal of the most recent state brings back the other publisher's,
+    # which is live — not a stale copy of the same publisher's.
+    test "removing the latest state brings back the other publisher's" do
+      {:ok, _, _} =
+        Presence.publish(@domain, publication("bob", flow: udp(5070), doc: doc("bob", :closed)))
+
+      {:ok, etag, _} = Presence.publish(@domain, publication("bob", flow: udp(5080)))
+
+      {:ok, nil, 0} =
+        Presence.publish(@domain, publication("bob", operation: :remove, etag: etag, expires: 0))
+
+      assert status(Presence.state_of(@domain, {"bob", @package})) == :closed
+    end
+
+    # A refresh carries no state: the publisher that refreshes does not take over
+    # from the one that changed its state since.
+    test "a refresh does not make its publication the current state" do
+      {:ok, phone, _} =
+        Presence.publish(@domain, publication("bob", flow: udp(5070), doc: doc("bob", :open)))
+
+      {:ok, _, _} =
+        Presence.publish(@domain, publication("bob", flow: udp(5080), doc: doc("bob", :closed)))
+
+      {:ok, _, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", flow: udp(5070), operation: :refresh, etag: phone, doc: nil)
+        )
+
+      assert status(Presence.state_of(@domain, {"bob", @package})) == :closed
+    end
+
+    # Two PUBLISHes in the same second: the second is the state.
+    test "the latest state change wins, within the same second too" do
+      for status <- [:open, :closed, :open, :closed] do
+        {:ok, _, _} =
+          Presence.publish(@domain, publication("bob", flow: udp(5070), doc: doc("bob", status)))
+
+        {:ok, _, _} =
+          Presence.publish(@domain, publication("bob", flow: udp(5080), doc: doc("bob", status)))
+
+        assert status(Presence.state_of(@domain, {"bob", @package})) == status
+      end
+    end
+  end
+
+  describe "a publication does not outlive its connection" do
+    test "the connection drops: its publication goes, and the watchers are told" do
+      flow = connection()
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: flow))
+      assert_receive {:presence, :state, _resource, %SIP.Presence.Doc{}}
+
+      drop(flow)
+
+      assert_receive {:presence, :state, {"bob", @domain, @package}, nil}
+      assert Presence.presentities(@domain) == []
+    end
+
+    test "the other publishers' states stay" do
+      flow = connection()
+
+      {:ok, _, _} =
+        Presence.publish(@domain, publication("bob", flow: udp(5070), doc: doc("bob", :closed)))
+
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: flow))
+      {:ok, _, _} = Presence.publish(@domain, publication("carol", flow: flow))
+
+      drop(flow)
+
+      assert eventually(fn -> match?([%{status: "closed"}], Presence.presentities(@domain)) end)
+    end
+
+    # A client that reconnected and refreshed with the tag it kept: the
+    # publication moved to the new connection, the old one's end is not its end.
+    test "a refresh over a new connection moves the publication to it" do
+      old = connection()
+      new = connection()
+      {:ok, etag, _} = Presence.publish(@domain, publication("bob", flow: old))
+
+      {:ok, _, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", flow: new, operation: :refresh, etag: etag, doc: nil)
+        )
+
+      drop(old)
+      assert [_still] = Presence.presentities(@domain)
+
+      drop(new)
+      assert eventually(fn -> Presence.presentities(@domain) == [] end)
+    end
+
+    test "over UDP, only the lifetime ends a publication" do
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: udp(5070)))
+      assert [_one] = Presence.presentities(@domain)
     end
   end
 
@@ -505,6 +653,72 @@ defmodule Kelix.Mod.PresenceTest do
       do: :ok = Presence.registration_ended(ctx(device, register_req(device, 3600)))
 
     defp status(%SIP.Presence.Doc{tuples: [%{status: status}]}), do: status
+
+    # An un-REGISTER is also the unPUBLISH of the device that sends it: told by
+    # the flow, as a publisher is. Another device's publication stays.
+    test "an un-REGISTER withdraws what the device published, and only that" do
+      phone = device("10.0.0.9")
+      :registered = register(phone)
+      over_phone = SIP.Msg.Ops.arrival_flow(register_req(phone, 3600))
+
+      published = fn flow, doc ->
+        pub = %{publication("magali.buu", flow: flow, doc: doc) | domain: "weshwesh.eu"}
+        {:ok, _, _} = Presence.publish("weshwesh.eu", pub)
+      end
+
+      published.(udp(5080), doc("magali.buu", :closed, "desk"))
+      published.(over_phone, doc("magali.buu", :open, "phone"))
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      :unregistered = register(phone, 0)
+
+      assert_receive {:presence, :state, @magali, %SIP.Presence.Doc{note: "desk"}}
+
+      assert [%{activity: _}] =
+               Enum.filter(Presence.presentities("weshwesh.eu"), &(&1.source == "publish"))
+    end
+
+    # A UDP registration that was not refreshed: the device is gone, and so is
+    # what it published.
+    test "a registration that ends withdraws what the device published" do
+      phone = device("10.0.0.9")
+      :registered = register(phone)
+      over_phone = SIP.Msg.Ops.arrival_flow(register_req(phone, 3600))
+      pub = %{publication("magali.buu", flow: over_phone) | domain: "weshwesh.eu"}
+      {:ok, _, _} = Presence.publish("weshwesh.eu", pub)
+
+      registration_ended(phone)
+
+      assert Presence.state_of("weshwesh.eu", {"magali.buu", "presence"}) == nil
+    end
+
+    # The same device (same flow) registered again through another dialog: the
+    # first dialog's end is not the device's.
+    test "unless the device still holds a binding over the same flow" do
+      phone = device("10.0.0.9")
+      again = device("10.0.0.10")
+      :registered = register(phone)
+      :registered = register(again)
+      over_phone = SIP.Msg.Ops.arrival_flow(register_req(phone, 3600))
+      pub = %{publication("magali.buu", flow: over_phone) | domain: "weshwesh.eu"}
+      {:ok, _, _} = Presence.publish("weshwesh.eu", pub)
+
+      registration_ended(phone)
+
+      assert %SIP.Presence.Doc{} = Presence.state_of("weshwesh.eu", {"magali.buu", "presence"})
+    end
+
+    test "a refreshing REGISTER withdraws nothing" do
+      phone = device("10.0.0.9")
+      :registered = register(phone)
+      over_phone = SIP.Msg.Ops.arrival_flow(register_req(phone, 3600))
+      pub = %{publication("magali.buu", flow: over_phone) | domain: "weshwesh.eu"}
+      {:ok, _, _} = Presence.publish("weshwesh.eu", pub)
+
+      :registered = register(phone)
+
+      assert %SIP.Presence.Doc{} = Presence.state_of("weshwesh.eu", {"magali.buu", "presence"})
+    end
 
     test "a registered subscriber is open, the others have no state" do
       :registered = register(device("10.0.0.9"))

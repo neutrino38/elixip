@@ -212,6 +212,16 @@ resource. The publication is the one `check_publish/1` handed the script.
 A refresh keeps the document it refreshes and moves only its lifetime; a
 modification replaces it.
 
+A publisher is identified by the flow its PUBLISH arrives on: the connection over
+TCP, TLS or WSS, the source address and port over UDP. Each publisher holds one
+publication per resource: an initial PUBLISH from a publisher that already holds
+one replaces it.
+
+Over TCP, TLS or WSS a publication is bound to its connection. When the
+connection drops, the publications that arrived over it are removed and their
+watchers notified, as for a removal. A refresh that arrives over a new connection
+moves the publication to it.
+
 ### `watch/2`
 
 ```elixir
@@ -273,6 +283,13 @@ call it when the presence module is loaded.
 None states open or closed: the module asks the registrar whether any device of
 the AOR still holds a registration, leaving out the ending dialog's own bindings
 (`Kelix.Mod.Registrar.registered?/3`).
+
+An un-REGISTER reported by `registration_changed/1` also removes, on every event
+package of the AOR, the publications of the device that sent it — the publisher
+on the same flow. Publications of the AOR's other devices are kept.
+`registration_ended/1` does the same — the registration was not refreshed, or its
+connection dropped — unless the device still holds a binding over the same flow
+through another REGISTER dialog.
 
 ### `exists?/2`
 
@@ -489,8 +506,13 @@ end
 - **Full state only.** Partial state (`application/pidf-diff+xml`, RFC 5262) is
   not emitted.
 - **No composition.** Several publishers may hold state for one presentity at the
-  same time, each with its own entity-tag; what is notified is the most recent
-  publication, not a composite of them.
+  same time, each with its own entity-tag; what is notified is the state of the
+  publication that changed last, not a composite of them. A refresh does not
+  count as a change.
+- **Devices behind a proxy.** A publisher is identified by the flow its PUBLISH
+  arrives on. When a proxy relays several devices of one user over a single
+  connection, they are one publisher: each initial PUBLISH replaces the other
+  devices' publication, and the connection's end removes them all.
 - **In memory.** The collection does not survive a restart, and is local to one
   node.
 
