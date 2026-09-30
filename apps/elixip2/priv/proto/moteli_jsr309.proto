@@ -134,8 +134,27 @@ message EndpointCreateReq {
   bool audio_supported = 3;
   bool video_supported = 4;
   bool text_supported = 5;
+  // One shared transport for all the legs (BUNDLE, RFC 8843), the audio
+  // leg's; that leg then exists even without audio.
+  bool bundle = 6;
 }
 // -> CreatedResp (endpoint_id)
+
+// A video stream of role >= 2 on the endpoint.
+message EndpointCreateVideoStreamReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+}
+
+message EndpointCreateVideoStreamResp {
+  int32 role = 1;
+}
+
+message EndpointDeleteVideoStreamReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  int32 role = 3; // >= 2
+}
 
 message EndpointDeleteReq {
   uint32 session_id = 1;
@@ -160,6 +179,7 @@ message EndpointAttachToEndpointReq {
   uint32 endpoint_id = 2;
   uint32 source_id = 3; // source endpoint whose `media` is routed to endpoint_id
   MediaType media = 4;
+  int32 role = 5; // video stream index; 0 by default
 }
 
 message EndpointAttachToAudioMixerPortReq {
@@ -174,6 +194,7 @@ message EndpointAttachToVideoMixerPortReq {
   uint32 endpoint_id = 2;
   uint32 mixer_id = 3;
   uint32 port_id = 4;
+  int32 role = 5; // video stream index; 0 by default
 }
 
 message EndpointAttachToAudioTranscoderReq {
@@ -192,6 +213,7 @@ message EndpointDettachReq {
   uint32 session_id = 1;
   uint32 endpoint_id = 2;
   MediaType media = 3;
+  int32 role = 4; // video stream index; 0 by default
 }
 
 // --- Endpoints: security (SRTP / DTLS / ICE-STUN) -----------------------------------
@@ -204,6 +226,7 @@ message EndpointSetLocalCryptoSdesReq {
   MediaType media = 3;
   string suite = 4; // e.g. AES_CM_128_HMAC_SHA1_80
   string key = 5;   // base64 key from the SDP
+  int32 role = 6; // video stream index; 0 by default
 }
 
 message EndpointSetRemoteCryptoSdesReq {
@@ -212,6 +235,7 @@ message EndpointSetRemoteCryptoSdesReq {
   MediaType media = 3;
   string suite = 4;
   string key = 5;
+  int32 role = 6; // video stream index; 0 by default
 }
 
 // setup = the PEER's role from the remote SDP; the server derives the
@@ -223,6 +247,7 @@ message EndpointSetRemoteCryptoDtlsReq {
   string setup = 4; // active | passive | actpass
   string hash = 5;
   string fingerprint = 6;
+  int32 role = 7; // video stream index; 0 by default
 }
 
 // Global DTLS certificate service — no session scope.
@@ -237,6 +262,7 @@ message EndpointSetLocalStunCredentialsReq {
   MediaType media = 3;
   string username = 4;
   string pwd = 5;
+  int32 role = 6; // video stream index; 0 by default
 }
 
 // Once remote credentials are set AND a send destination is known, the
@@ -247,6 +273,7 @@ message EndpointSetRemoteStunCredentialsReq {
   MediaType media = 3;
   string username = 4;
   string pwd = 5;
+  int32 role = 6; // video stream index; 0 by default
 }
 
 // --- Endpoints: RTP media -------------------------------------------------------------
@@ -260,6 +287,7 @@ message EndpointSetRtpPropertiesReq {
   uint32 endpoint_id = 2;
   MediaType media = 3;
   map<string, string> properties = 4;
+  int32 role = 5; // video stream index; 0 by default
 }
 
 // Addressing profile of the leg (§6.7 bis): "publicv4", "publicv6",
@@ -280,12 +308,14 @@ message EndpointStartSendingReq {
   uint32 send_port = 5;
   map<string, int32> rtp_map = 6;
   optional string profile = 7;
+  int32 role = 8; // video stream index; 0 by default
 }
 
 message EndpointStopSendingReq {
   uint32 session_id = 1;
   uint32 endpoint_id = 2;
   MediaType media = 3;
+  int32 role = 4; // video stream index; 0 by default
 }
 
 message EndpointStartReceivingReq {
@@ -296,6 +326,7 @@ message EndpointStartReceivingReq {
   optional SdpOffer offer = 5;
   // Same profile as this leg's EndpointStartSending (see above).
   optional string profile = 6;
+  int32 role = 7; // video stream index; 0 by default
 }
 
 message EndpointStartReceivingResp {
@@ -311,6 +342,7 @@ message EndpointStopReceivingReq {
   uint32 session_id = 1;
   uint32 endpoint_id = 2;
   MediaType media = 3;
+  int32 role = 4; // video stream index; 0 by default
 }
 
 // Forces an update / key frame (FIR) toward this media.
@@ -318,6 +350,7 @@ message EndpointRequestUpdateReq {
   uint32 session_id = 1;
   uint32 endpoint_id = 2;
   MediaType media = 3;
+  int32 role = 4; // video stream index; 0 by default
 }
 
 // Trickle ICE level 1: only the RTP(1)/UDP host|srflx component is retained.
@@ -326,6 +359,7 @@ message EndpointAddIceCandidateReq {
   uint32 endpoint_id = 2;
   MediaType media = 3;
   string candidate = 4; // SDP candidate: line, prefix optional
+  int32 role = 5; // video stream index; 0 by default
 }
 
 // timeout_ms > 0 arms the inactivity watchdog, 0 disarms it. Do not arm on
@@ -335,6 +369,7 @@ message EndpointStartRtpTimeoutReq {
   uint32 endpoint_id = 2;
   MediaType media = 3;
   uint32 timeout_ms = 4;
+  int32 role = 5; // video stream index; 0 by default
 }
 
 // --- Audio mixers ----------------------------------------------------------------------
@@ -433,6 +468,7 @@ message VideoMixerPortAttachToEndpointReq {
   uint32 mixer_id = 2;
   uint32 port_id = 3;
   uint32 endpoint_id = 4;
+  int32 role = 5; // video stream index; 0 by default
 }
 
 message VideoMixerPortAttachToPlayerReq {
@@ -586,6 +622,7 @@ message GetMediaCandidatesReq {
   uint32 endpoint_id = 2;
   MediaProtocol protocol = 3;
   MediaType media = 4;
+  int32 role = 5; // video stream index; 0 by default
 }
 // -> StringResp (candidate URL)
 
@@ -603,7 +640,7 @@ message ConfigureMediaConnectionReq {
   uint32 session_id = 1;
   uint32 endpoint_id = 2;
   MediaType media = 3;
-  MediaRole role = 4;
+  int32 role = 4;
   MediaProtocol protocol = 5;
   string token = 6;
   string expected_payload = 7;
@@ -626,7 +663,7 @@ message ConnectMediaConnectionReq {
   uint32 session_id = 1;
   uint32 endpoint_id = 2;
   MediaType media = 3;
-  MediaRole role = 4;
+  int32 role = 4;
   string url = 5;
 }
 
