@@ -300,6 +300,86 @@ defmodule Kelix.DomainsTest do
     assert Domains.current().version == v1.version
   end
 
+  describe "parse/1 — [[domain.options]]" do
+    @options """
+    [[domain]]
+    name = "example.com"
+
+    [[domain.options]]
+    pattern = "conf-."
+    script  = "options-mcu.exs"
+
+    [[domain.options]]
+    keepalive = true
+    script    = "options-keepalive.exs"
+
+    [[domain.options]]
+    default = true
+    script  = "options-probe-ua.exs"
+    """
+
+    test "the keepalive rule apart, the others ordered with the catch-all last" do
+      {:ok, %Domains{domains: [d]} = snap} = Domains.parse(@options)
+
+      assert d.options_keepalive == "options-keepalive.exs"
+      assert [%DialRule{raw: "conf-.", script: "options-mcu.exs"} = conf, catch_all] = d.options
+      assert conf.matcher.("conf-42")
+      refute conf.matcher.("alice")
+      assert %DialRule{default?: true, script: "options-probe-ua.exs"} = catch_all
+
+      assert Domains.script_refs(snap) == [
+               {"options-keepalive.exs", "domain example.com options rule keepalive = true"},
+               {"options-mcu.exs", ~s(domain example.com options rule "conf-.")},
+               {"options-probe-ua.exs", "domain example.com options rule default = true"}
+             ]
+    end
+
+    test "a domain without options rules leaves every OPTIONS to the core" do
+      {:ok, %Domains{domains: [d]}} = Domains.parse(~s([[domain]]\nname = "a"))
+      assert d.options == []
+      assert d.options_keepalive == nil
+    end
+
+    test "two keepalive rules are refused" do
+      toml =
+        ~s([[domain]]\nname = "a"\n[[domain.options]]\nkeepalive = true\nscript = "k1"\n) <>
+          ~s([[domain.options]]\nkeepalive = true\nscript = "k2")
+
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "at most one"
+    end
+
+    test "keepalive = false is refused rather than read as a pattern rule" do
+      toml = ~s([[domain]]\nname = "a"\n[[domain.options]]\nkeepalive = false\nscript = "k")
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "`keepalive` must be `true`"
+    end
+
+    test "a keepalive rule takes no pattern" do
+      toml =
+        ~s([[domain]]\nname = "a"\n[[domain.options]]\nkeepalive = true\npattern = "X"\nscript = "k")
+
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "unknown key"
+    end
+
+    test "the catch-all must be the last options rule" do
+      toml =
+        ~s([[domain]]\nname = "a"\n[[domain.options]]\ndefault = true\nscript = "d"\n) <>
+          ~s([[domain.options]]\npattern = "X"\nscript = "s")
+
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "must be the last options rule"
+    end
+
+    test "a rule with neither keepalive, pattern nor default names all three" do
+      toml = ~s([[domain]]\nname = "a"\n[[domain.options]]\nscript = "s")
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "keepalive = true"
+      assert msg =~ "[[domain.options]]"
+    end
+  end
+
   describe "script_refs/1 — every script the config names" do
     test "registrar, presence and each call rule, with the context that names them" do
       {:ok, snap} = Domains.parse(@valid)

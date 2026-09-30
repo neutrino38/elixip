@@ -179,7 +179,7 @@ defmodule Kelix.Domains do
 
   @doc """
   Every script a snapshot refers to — the `registrar`/`presence` block's `script`
-  and each dial-plan rule's — as `[{name, context}]`, deduped by name (first
+  and each dial-plan and options rule's — as `[{name, context}]`, deduped by name (first
   reference wins). `context` says *where* the reference comes from, so an error
   message can name the domain and the rule an operator has to go and fix.
   """
@@ -211,7 +211,16 @@ defmodule Kelix.Domains do
       for rule <- d.dial_plan,
           do: {rule.script, "domain #{d.name} call rule #{rule_label(rule)}"}
 
-    registrar_refs ++ presence_refs ++ call_refs
+    options_refs =
+      for script <- List.wrap(d.options_keepalive),
+          do: {script, "domain #{d.name} options rule keepalive = true"}
+
+    options_refs =
+      options_refs ++
+        for rule <- d.options,
+            do: {rule.script, "domain #{d.name} options rule #{rule_label(rule)}"}
+
+    registrar_refs ++ presence_refs ++ call_refs ++ options_refs
   end
 
   defp rule_label(%DialRule{default?: true}), do: "default = true"
@@ -310,6 +319,7 @@ defmodule Kelix.Domains do
          {:ok, registrar} <- opt_fn_block(dm, "registrar", @registrar_keys, name),
          {:ok, presence} <- parse_presence(Map.get(dm, "presence", []), name),
          {:ok, dial_plan} <- parse_dial_plan(Map.get(dm, "call", []), name),
+         {:ok, {keepalive, options}} <- parse_options(Map.get(dm, "options", []), name),
          :ok <- check_domain_keys(dm, name) do
       {:ok,
        %Domain{
@@ -318,14 +328,16 @@ defmodule Kelix.Domains do
          max_calls: max_calls,
          registrar: registrar,
          presence: presence,
-         dial_plan: dial_plan
+         dial_plan: dial_plan,
+         options: options,
+         options_keepalive: keepalive
        }}
     end
   end
 
   defp parse_domain(_), do: {:error, "each [[domain]] must be a table"}
 
-  @domain_keys ~w(name aliases max_calls registrar presence call)
+  @domain_keys ~w(name aliases max_calls registrar presence call options)
   defp check_domain_keys(dm, name) do
     case Map.keys(dm) -- @domain_keys do
       [] -> :ok
@@ -336,8 +348,8 @@ defmodule Kelix.Domains do
   # ── dial-plan (ordered; first-match-wins; one catch-all, last) ───────────────
 
   defp parse_dial_plan(rules, domain) when is_list(rules) do
-    with {:ok, parsed} <- reduce_while_ok(rules, fn r -> parse_rule(r, domain) end),
-         :ok <- validate_catch_all(parsed, domain) do
+    with {:ok, parsed} <- reduce_while_ok(rules, fn r -> parse_rule(r, domain, "call") end),
+         :ok <- validate_catch_all(parsed, domain, "call") do
       {:ok, parsed}
     end
   end
@@ -345,25 +357,68 @@ defmodule Kelix.Domains do
   defp parse_dial_plan(_, domain),
     do: {:error, "domain #{inspect(domain)}: `call` must be an array of tables"}
 
-  defp parse_rule(%{"default" => true} = r, domain) do
-    with {:ok, script} <- req_string(r, "script", "call rule (domain #{domain})"),
-         :ok <- reject_keys(r, ~w(default script), "default call rule (domain #{domain})") do
+  # `kind` is the table the rule sits in: "call" or "options".
+  defp parse_rule(%{"default" => true} = r, domain, kind) do
+    with {:ok, script} <- req_string(r, "script", "#{kind} rule (domain #{domain})"),
+         :ok <- reject_keys(r, ~w(default script), "default #{kind} rule (domain #{domain})") do
       {:ok, %DialRule{default?: true, script: script}}
     end
   end
 
-  defp parse_rule(%{"pattern" => pattern} = r, domain) when is_binary(pattern) do
-    with {:ok, script} <- req_string(r, "script", "call rule (domain #{domain})"),
-         :ok <- reject_keys(r, ~w(pattern script), "call rule (domain #{domain})"),
+  defp parse_rule(%{"pattern" => pattern} = r, domain, kind) when is_binary(pattern) do
+    with {:ok, script} <- req_string(r, "script", "#{kind} rule (domain #{domain})"),
+         :ok <- reject_keys(r, ~w(pattern script), "#{kind} rule (domain #{domain})"),
          {:ok, matcher} <- compile_pattern(pattern, domain) do
       {:ok, %DialRule{matcher: matcher, raw: pattern, script: script}}
     end
   end
 
-  defp parse_rule(_, domain),
+  defp parse_rule(_, domain, "options"),
     do:
       {:error,
-       "domain #{inspect(domain)}: each [[domain.call]] needs `pattern = \"...\"` or `default = true`"}
+       "domain #{inspect(domain)}: each [[domain.options]] needs `keepalive = true`, " <>
+         "`pattern = \"...\"` or `default = true`"}
+
+  defp parse_rule(_, domain, kind),
+    do:
+      {:error,
+       "domain #{inspect(domain)}: each [[domain.#{kind}]] needs `pattern = \"...\"` or `default = true`"}
+
+  # ── OPTIONS (one keepalive rule for `sip:domain`, then a dial-plan) ───────────
+
+  # The keepalive rule serves an R-URI with no user-part, which no pattern is ever
+  # tried against, so its position among the others does not matter.
+  defp parse_options(rules, domain) when is_list(rules) do
+    {keepalives, others} = Enum.split_with(rules, &match?(%{"keepalive" => _}, &1))
+
+    with {:ok, keepalive} <- parse_keepalive(keepalives, domain),
+         {:ok, parsed} <- reduce_while_ok(others, &parse_rule(&1, domain, "options")),
+         :ok <- validate_catch_all(parsed, domain, "options") do
+      {:ok, {keepalive, parsed}}
+    end
+  end
+
+  defp parse_options(_, domain),
+    do: {:error, "domain #{inspect(domain)}: `options` must be an array of tables"}
+
+  defp parse_keepalive([], _domain), do: {:ok, nil}
+
+  defp parse_keepalive([%{"keepalive" => true} = r], domain) do
+    ctx = "keepalive options rule (domain #{domain})"
+
+    with {:ok, script} <- req_string(r, "script", ctx),
+         :ok <- reject_keys(r, ~w(keepalive script), ctx) do
+      {:ok, script}
+    end
+  end
+
+  defp parse_keepalive([_], domain),
+    do: {:error, "domain #{inspect(domain)}: `keepalive` must be `true` or absent"}
+
+  defp parse_keepalive(_, domain),
+    do:
+      {:error,
+       "domain #{inspect(domain)}: at most one [[domain.options]] rule has keepalive = true"}
 
   defp compile_pattern(pattern, domain) do
     case DialPlan.compile(pattern) do
@@ -376,7 +431,7 @@ defmodule Kelix.Domains do
     end
   end
 
-  defp validate_catch_all(rules, domain) do
+  defp validate_catch_all(rules, domain, kind) do
     case Enum.split_while(rules, &(not &1.default?)) do
       {_before, []} ->
         :ok
@@ -386,7 +441,7 @@ defmodule Kelix.Domains do
 
       {_before, [_default | _after]} ->
         {:error,
-         "domain #{inspect(domain)}: the catch-all (default = true) must be the last call rule"}
+         "domain #{inspect(domain)}: the catch-all (default = true) must be the last #{kind} rule"}
     end
   end
 

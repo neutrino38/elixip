@@ -13,6 +13,11 @@ defmodule Kelix.Domain do
   the package is what a watcher asks for, and what the domain answers **489** on
   when it serves another (DESIGN-PRESENCE.md, *the Router reads `Event`*); the
   list is also what `Allow-Events` is composed from.
+
+  `options` is the ordered `[[domain.options]]` rule list for an R-URI with a
+  user-part, the same `%Kelix.DialRule{}` as the dial-plan; `options_keepalive` is
+  the script of the `keepalive = true` rule, serving an R-URI with none. Both empty
+  = the core answers every OPTIONS (`Kelix.Options`).
   """
 
   @type fn_config :: %{optional(atom) => term}
@@ -23,7 +28,9 @@ defmodule Kelix.Domain do
           max_calls: pos_integer | nil,
           registrar: fn_config | nil,
           presence: [Kelix.PresenceBlock.t()],
-          dial_plan: [Kelix.DialRule.t()]
+          dial_plan: [Kelix.DialRule.t()],
+          options: [Kelix.DialRule.t()],
+          options_keepalive: String.t() | nil
         }
 
   defstruct name: nil,
@@ -31,7 +38,9 @@ defmodule Kelix.Domain do
             max_calls: nil,
             registrar: nil,
             presence: [],
-            dial_plan: []
+            dial_plan: [],
+            options: [],
+            options_keepalive: nil
 end
 
 defmodule Kelix.PresenceBlock do
