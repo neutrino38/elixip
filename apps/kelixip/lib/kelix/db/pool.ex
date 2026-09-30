@@ -133,6 +133,81 @@ defmodule Kelix.DB.Pool do
       else: %{}
   end
 
+  @doc """
+  The keys of a module block that describe its link, `[database]`'s and the
+  account's: what `validate/2` checks, and what a module adds its own keys to.
+  """
+  @spec link_keys() :: [String.t()]
+  def link_keys,
+    do: default_keys() ++ ~w(database username password pool_size call_timeout_ms)
+
+  @doc """
+  Check the link keys of a module block (read over `[database]` by the caller):
+  the account named, the driver known, the types right, and a cleartext link
+  confirmed. `label` names the module in the messages. Unknown keys are the
+  module's to refuse, since only it knows its own.
+
+  `allow_insecure_db_connection` is the ONE gate to a cleartext link, so `ssl =
+  false` — which asks for exactly that, directly — goes through it too. Two
+  independent ways to end up unencrypted would make the key mean nothing, and a
+  `show` could no longer be read as "cleartext ⇒ somebody confirmed it".
+  """
+  @spec validate(map, String.t()) :: :ok | {:error, String.t()}
+  def validate(config, label) when is_map(config) do
+    with :ok <- required_string(config, "database"),
+         :ok <- required_string(config, "username"),
+         :ok <- driver_ok(config),
+         :ok <- bool_ok(config, "ssl"),
+         :ok <- bool_ok(config, "allow_insecure_db_connection"),
+         :ok <- cleartext_confirmed(config, label),
+         :ok <- pos_int_ok(config, "port"),
+         :ok <- pos_int_ok(config, "call_timeout_ms"),
+         :ok <- pos_int_ok(config, "pool_size") do
+      pos_int_ok(config, "connect_timeout_ms")
+    end
+  end
+
+  defp required_string(config, key) do
+    case Map.get(config, key) do
+      v when is_binary(v) and v != "" -> :ok
+      _ -> {:error, "#{key} is required (non-empty string)"}
+    end
+  end
+
+  defp driver_ok(config) do
+    case Map.get(config, "driver") do
+      nil -> :ok
+      d when d in ["mysql", "postgres"] -> :ok
+      _ -> {:error, "driver must be one of mysql|postgres"}
+    end
+  end
+
+  defp bool_ok(config, key) do
+    case Map.get(config, key) do
+      nil -> :ok
+      v when is_boolean(v) -> :ok
+      _ -> {:error, "#{key} must be a boolean"}
+    end
+  end
+
+  defp cleartext_confirmed(config, label) do
+    if Map.get(config, "ssl") == false and not insecure_allowed?(config) do
+      {:error,
+       "ssl = false asks for a CLEARTEXT link to the #{label} database: confirm it with " <>
+         "allow_insecure_db_connection = true, or drop the key to let TLS be negotiated"}
+    else
+      :ok
+    end
+  end
+
+  defp pos_int_ok(config, key) do
+    case Map.get(config, key) do
+      nil -> :ok
+      v when is_integer(v) and v > 0 -> :ok
+      _ -> {:error, "#{key} must be a positive integer"}
+    end
+  end
+
   @doc "Which SQL driver the block asks for: `:mysql` (default) or `:postgres`."
   @spec driver(map) :: :mysql | :postgres
   def driver(config) do

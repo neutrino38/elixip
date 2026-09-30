@@ -5,6 +5,8 @@
 Application.put_env(:elixip2, :unittest_transport, SIP.Test.Transport.Mockup)
 
 Code.require_file("support/mcu_stub.exs", __DIR__)
+Code.require_file("support/silo_memory_store.exs", __DIR__)
+Code.require_file("support/silo_store_contract.exs", __DIR__)
 Code.require_file("../../elixip2/test/support/wait.exs", __DIR__)
 Code.require_file("../../kelixip/test/support/fixtures.exs", __DIR__)
 Code.require_file("../../kelixip/test/support/app_boot.exs", __DIR__)

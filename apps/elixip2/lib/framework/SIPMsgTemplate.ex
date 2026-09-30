@@ -111,10 +111,18 @@ defmodule SIP.MsgTemplate do
     end
   end
 
-  # Header names are case-insensitive (RFC 3261 §7.3.1) and SIPMsg keeps the
-  # spelling the peer used, so the allowlist is matched folded and the header
-  # goes out as it came in.
-  defp page_headers(source) do
+  @doc """
+  The headers of `source` a page carries over (`@page_headers`: Subject,
+  Conversation-ID, Contribution-ID, P-Asserted-Identity), as `name => value`
+  under the spelling the peer used — what a store keeps beside the body, so the
+  page it rebuilds later carries the same ones.
+
+  Header names are case-insensitive (RFC 3261 §7.3.1) and SIPMsg keeps the
+  spelling the peer used, so the allowlist is matched folded and the header goes
+  out as it came in.
+  """
+  @spec page_headers(map()) :: %{binary() => term()}
+  def page_headers(source) do
     for {name, value} <- source,
         is_binary(name) and String.downcase(name) in @page_headers,
         into: %{},

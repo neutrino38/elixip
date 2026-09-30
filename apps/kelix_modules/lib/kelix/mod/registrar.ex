@@ -663,13 +663,15 @@ defmodule Kelix.Mod.Registrar do
         do: [],
         else: drop_contacts(existing, for({:remove, c} <- actions, do: binding_key(c)))
 
+    flow = SIP.Msg.Ops.arrival_flow(req)
+
     added =
       for {:add, c, exp} <- actions do
         %Contact{
           contact: c,
-          received: received_of(req),
-          flow_pid: flow_of(req),
-          flow_module: flow_module_of(req),
+          received: flow.received,
+          flow_pid: flow.tp_pid,
+          flow_module: flow.tp_module,
           dialog_pid: dialog_pid,
           instance: contact_param(c, "+sip.instance"),
           reg_id: contact_param(c, "reg-id"),
@@ -698,7 +700,7 @@ defmodule Kelix.Mod.Registrar do
         # contacts still learns about the other.
         # Monitor the backing dialog so a connected-transport drop invalidates the
         # binding (§6.3, WebRTC-critical).
-        state = ensure_monitor(state, domain, aor, dialog_pid, flow_module_of(req))
+        state = ensure_monitor(state, domain, aor, dialog_pid, flow.tp_module)
         state = supersede_owners(state, domain, aor, existing, added, dialog_pid)
         notify(state, domain, aor, :registered)
         {:registered, granted(aor, merged, granted_expires(actions)), state}
@@ -933,13 +935,6 @@ defmodule Kelix.Mod.Registrar do
     |> Enum.map(fn {_q, group} -> Enum.map(group, &target_uri/1) end)
   end
 
-  defp keep_instance(ruri, contact) do
-    case SIP.Uri.get_header_param(contact, "+sip.instance") do
-      {:ok, value} when is_binary(value) -> SIP.Uri.set_header_param(ruri, "+sip.instance", value)
-      _none -> ruri
-    end
-  end
-
   # The Contact `q` (RFC 3261 §20.10): 0..1, highest preference first. Absent
   # means the device stated no preference, which ranks it top — the single-contact
   # case, i.e. nearly all of them, must not sort below one that asked for 0.3.
@@ -958,41 +953,16 @@ defmodule Kelix.Mod.Registrar do
   # destination and flow.
   defp rewrite(req, %Contact{} = binding), do: Map.put(req, :ruri, target_uri(binding))
 
-  # The stored contact stamped with the destination and flow it registered over.
-  # Both are what `SIP.Transport.Selector.select_transport/1` short-circuits on
-  # (§6.4): a live `tp_pid`+`tp_module` sends straight over the existing
-  # connection, and failing that `destip`/`destport` skip DNS.
-  #
-  # `SIP.Uri.to_request_uri/1` first: what is stored is a Contact *header* value,
-  # display name and binding parameters (`q`, `expires`, `+sip.instance`, the RFC
-  # 3840 feature tags) included, and none of that may appear on the Request-URI
-  # this becomes (RFC 3261 §16.6 item 2). The URI parameters are kept in full —
-  # §19.1.5 requires it — which is the whole reason this is one framework call
-  # and not a list of parameter names maintained here.
-  #
-  # One header parameter is carried back on: `+sip.instance`, the device's
-  # identity (RFC 5626), so a relay fanning a MESSAGE out can say which devices
-  # it reached in the terms the Silo remembers them by (`SIP.Msg.Ops.device_key/1`).
-  # It cannot reach the wire from there — a Request-URI is serialized by
-  # `SIP.Uri.serialize_ruri/1`, which drops every header parameter.
+  # The stored contact stamped with the destination and flow it registered over:
+  # `SIP.Msg.Ops.reach_contact/2`, the one reading of how a registered device is
+  # reached (its `+sip.instance` carried along, so a relay fanning a MESSAGE out
+  # can name the devices it reached as the Silo remembers them).
   defp target_uri(%Contact{contact: c} = binding) do
-    c = c |> SIP.Uri.to_request_uri() |> keep_instance(c)
-    binding = %Contact{binding | contact: c}
-
-    case binding.received do
-      {proto, ip, port} ->
-        %SIP.Uri{
-          c
-          | destip: ip,
-            destport: port,
-            destproto: proto,
-            tp_pid: binding.flow_pid,
-            tp_module: binding.flow_module
-        }
-
-      _ ->
-        %SIP.Uri{c | tp_pid: binding.flow_pid, tp_module: binding.flow_module}
-    end
+    SIP.Msg.Ops.reach_contact(c, %{
+      received: binding.received,
+      tp_pid: binding.flow_pid,
+      tp_module: binding.flow_module
+    })
   end
 
   # ── contact / expires helpers ────────────────────────────────────────────────
@@ -1280,43 +1250,10 @@ defmodule Kelix.Mod.Registrar do
 
   defp to_uri(_), do: nil
 
-  defp received_of(req) do
-    case Map.get(req, :ruri) do
-      %SIP.Uri{destip: ip, destport: port, destproto: proto} when not is_nil(ip) ->
-        {proto, ip, port}
-
-      _ ->
-        nil
-    end
-  end
-
-  defp flow_of(req) do
-    case Map.get(req, :ruri) do
-      %SIP.Uri{tp_pid: pid} -> pid
-      _ -> nil
-    end
-  end
-
-  defp flow_module_of(req) do
-    case Map.get(req, :ruri) do
-      %SIP.Uri{tp_module: t_mod} -> t_mod
-      _ -> nil
-    end
-  end
-
   defp aor_key(%SIP.Uri{userpart: u, domain: d}), do: "#{downcase(u)}@#{fold_alias(d)}"
 
-  # alias → nominal domain name (folds via Domains if running; else identity)
-  defp fold_alias(nil), do: nil
-
-  defp fold_alias(host) do
-    with pid when not is_nil(pid) <- Process.whereis(Kelix.Domains),
-         %Kelix.Domain{name: name} <- Kelix.Domains.lookup(Kelix.Domains.current(), host) do
-      name
-    else
-      _ -> host
-    end
-  end
+  # alias → nominal domain name
+  defp fold_alias(host), do: Kelix.Domains.nominal(host)
 
   # Binding identity is the contact **URI**: RFC 3261 §10.2.4 compares bindings by
   # URI, so a refresh that merely changes `expires` has to REPLACE the binding

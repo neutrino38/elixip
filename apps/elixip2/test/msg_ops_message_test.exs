@@ -164,6 +164,68 @@ defmodule SIP.Test.MsgOpsMessage do
     end
   end
 
+  describe "arrival_flow/1, reach_contact/2, register_targets/1" do
+    defp uri(s) do
+      {:ok, u} = SIP.Uri.parse(s)
+      u
+    end
+
+    # A REGISTER as the transport layer hands it over: its R-URI stamped with
+    # where it came from and the connection that carried it.
+    defp register(contacts, extra \\ %{}) do
+      ruri = %SIP.Uri{
+        uri("sip:example.com")
+        | destip: {192, 0, 2, 7},
+          destport: 40112,
+          destproto: "TCP",
+          tp_pid: self(),
+          tp_module: SIP.Transport.TCP
+      }
+
+      Map.merge(%{method: :REGISTER, ruri: ruri, contact: Enum.map(contacts, &uri/1)}, extra)
+    end
+
+    test "the flow is where the request came from, and over what" do
+      assert Ops.arrival_flow(register([])) == %{
+               received: {"TCP", {192, 0, 2, 7}, 40112},
+               tp_pid: self(),
+               tp_module: SIP.Transport.TCP
+             }
+
+      assert Ops.arrival_flow(%{}) == %{received: nil, tp_pid: nil, tp_module: nil}
+    end
+
+    test "a contact is reached as a Request-URI over the flow, keeping its instance ID" do
+      c =
+        uri(
+          ~s("Bob" <sip:bob@10.0.0.2:5060;transport=tcp>;expires=600;q=0.5;) <>
+            ~s(+sip.instance="<urn:uuid:a11ce000-0000-4000-8000-000000000001>")
+        )
+
+      target = Ops.reach_contact(c, Ops.arrival_flow(register([])))
+
+      assert target.displayname == nil
+      assert target.destip == {192, 0, 2, 7} and target.destport == 40112
+      assert target.tp_pid == self()
+      assert Ops.device_key(target) == "urn:uuid:a11ce000-0000-4000-8000-000000000001"
+      assert {:ok, "sip:bob@10.0.0.2;transport=tcp"} = SIP.Uri.serialize_ruri(target)
+    end
+
+    test "a REGISTER reaches the contacts it binds, not the ones it drops" do
+      req = register(["<sip:bob@10.0.0.2>;expires=0", "<sip:bob@10.0.0.3>", "<sip:bob@10.0.0.4>"])
+      req = Map.put(req, :expires, "600")
+
+      assert [a, b] = Ops.register_targets(req)
+      assert a.domain == "10.0.0.3" and b.domain == "10.0.0.4"
+      assert a.tp_pid == self()
+    end
+
+    test "an un-registration and the wildcard reach nobody" do
+      assert Ops.register_targets(register(["<sip:bob@10.0.0.2>"], %{expires: "0"})) == []
+      assert Ops.register_targets(%{contact: :*, expires: "0"}) == []
+    end
+  end
+
   describe "address_of_record/2" do
     test "user@host of From and To, whatever the tags and display names" do
       req = parsed([], "")

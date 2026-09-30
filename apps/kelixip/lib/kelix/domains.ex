@@ -116,6 +116,24 @@ defmodule Kelix.Domains do
     end
   end
 
+  @doc """
+  The nominal name of the domain `host` belongs to — an alias folds to it — or
+  `host` itself when no domain claims it, or when the table is not running (a
+  unit test). What a module keys per-domain state on, so an alias and the name
+  it stands for share one store.
+  """
+  @spec nominal(String.t() | nil) :: String.t() | nil
+  def nominal(nil), do: nil
+
+  def nominal(host) when is_binary(host) do
+    with pid when not is_nil(pid) <- Process.whereis(__MODULE__),
+         %Domain{name: name} <- lookup(current(), host) do
+      name
+    else
+      _ -> host
+    end
+  end
+
   # ── GenServer callbacks ──────────────────────────────────────────────────────
 
   @impl true

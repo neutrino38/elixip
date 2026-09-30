@@ -692,6 +692,44 @@ stored in order reach each device in that order, even when the Mockup peer
 answers the third one slowly; a device answering 480 to the fourth receives the
 fourth to the tenth at the next flush, still in order.
 
+**As built** (2026-09-30):
+
+- **Whom a flush serves.** `flush(sip_ctx, req)` serves the devices *the
+  REGISTER binds*, over the flow it arrived on — `SIP.Msg.Ops.register_targets/1`,
+  built on `arrival_flow/1` and `reach_contact/2`, the reading the registrar's
+  `targets/2` now delegates to as well. The AOR's other bindings are served by
+  their own REGISTERs; the Silo still does not know the registrar.
+- **A claim that finds part of the backlog held** — another node, or this one
+  serving the AOR's other device — gives back what it took and retries, backing
+  off from 1 s, until the lease it would wait for has run out. Delivering the
+  free part at once would put a newer message ahead of older ones on the device;
+  skipping would leave the second device of a pair registering together without
+  its messages until its next refresh. `lease` is a key of `[module.silo]`
+  (300 s).
+- **Two more answers from `store/3`**: `{:error, :expired}` for a sender's
+  `Expires: 0` (nothing to keep), `{:error, :no_aor}` for a Request-URI naming
+  no user. `{:error, :down}` also covers a schema not verified yet.
+- **The defaults are the module's**, `[module.silo.defaults]`, not per domain:
+  the domain is a column of every row, a per-domain override can come later
+  without a schema change.
+- **Times are `BIGINT` Unix seconds** on both engines rather than `DATETIME` /
+  `TIMESTAMPTZ`: one type, no time zone for a node and its base to disagree on.
+- **The schema check**: absent or stale tables stop the module
+  (`{:schema, :missing | {:stale, v}}`); a base that does not answer does not —
+  it is re-checked every 5 s, and the facades answer `:down` meanwhile.
+- **Shared on the way**: `Kelix.DB.Pool.validate/2` (the link keys, `auth_db`
+  delegates to it), `Kelix.Domains.nominal/1` (the registrar's alias fold),
+  `SIP.MsgTemplate.page_headers/1` (what is stored is what a page carries).
+- **Tests**: the store contract (`test/support/silo_store_contract.exs`) runs on
+  the in-memory store in the default suite, and on PostgreSQL 16 and MariaDB
+  10.11 when `SILO_TEST_POSTGRES` / `SILO_TEST_MYSQL` name one — run green on
+  2026-09-30, four simultaneous claims included. The *done when* list is
+  `silo_test.exs`, on Mockup devices.
+- **Left to C8**: the package installing the DDL where the refusal message
+  points (`/usr/share/kelixip/sql/silo/`), `docs/kelixip/modules/silo.md` with
+  the alert on `kelix_silo_expired_undelivered_total`, the `config.toml`
+  example.
+
 ### C7 — elixipp, end to end with no node
 
 **Delivers** two built-in scenarios under `built-in-scenarios/`, runnable by

@@ -672,6 +672,85 @@ defmodule SIP.Msg.Ops do
   def device_key(_other), do: nil
 
   @doc """
+  The flow a request arrived on, as the transport layer stamped it on its
+  Request-URI: `received` is `{proto, ip, port}` of the source (`nil` when
+  unstamped), `tp_pid` and `tp_module` the transport instance — the connection,
+  for TCP, TLS and WSS — that carried it.
+
+  What a registrar stores beside a binding, and what a delivery to the device
+  that sent the request goes back over (`reach_contact/2`). `source_flow/1`
+  names the same flow as a comparable key; this is what a send needs.
+  """
+  @spec arrival_flow(map()) :: %{
+          received: {term(), term(), term()} | nil,
+          tp_pid: pid() | nil,
+          tp_module: module() | nil
+        }
+  def arrival_flow(req) when is_map(req) do
+    case Map.get(req, :ruri) do
+      %SIP.Uri{destip: ip, destport: port, destproto: proto, tp_pid: pid, tp_module: mod} ->
+        received = if is_nil(ip), do: nil, else: {proto, ip, port}
+        %{received: received, tp_pid: pid, tp_module: mod}
+
+      _ ->
+        %{received: nil, tp_pid: nil, tp_module: nil}
+    end
+  end
+
+  @doc """
+  The Request-URI that reaches `contact` — a Contact header value — over `flow`
+  (`arrival_flow/1`'s shape): the contact as a Request-URI, stamped with the
+  destination and the transport instance `SIP.Transport.Selector` short-circuits
+  on, so a NATed device is reached over the connection it registered on, with
+  no DNS.
+
+  `SIP.Uri.to_request_uri/1` first: the display name and the binding parameters
+  (`q`, `expires`, the RFC 3840 feature tags) may not appear on a Request-URI
+  (RFC 3261 §16.6 item 2), while every URI parameter is kept (§19.1.5). One
+  header parameter is carried back on, `+sip.instance`, so whoever sends to the
+  result can still name the device (`device_key/1`); it cannot reach the wire,
+  since a Request-URI is serialized by `SIP.Uri.serialize_ruri/1`, which drops
+  every header parameter.
+  """
+  @spec reach_contact(SIP.Uri.t(), map()) :: SIP.Uri.t()
+  def reach_contact(%SIP.Uri{} = contact, flow) when is_map(flow) do
+    ruri = contact |> SIP.Uri.to_request_uri() |> keep_instance(contact)
+    ruri = %SIP.Uri{ruri | tp_pid: Map.get(flow, :tp_pid), tp_module: Map.get(flow, :tp_module)}
+
+    case Map.get(flow, :received) do
+      {proto, ip, port} -> %SIP.Uri{ruri | destip: ip, destport: port, destproto: proto}
+      _ -> ruri
+    end
+  end
+
+  defp keep_instance(ruri, contact) do
+    case SIP.Uri.get_header_param(contact, "+sip.instance") do
+      {:ok, value} when is_binary(value) -> SIP.Uri.set_header_param(ruri, "+sip.instance", value)
+      _none -> ruri
+    end
+  end
+
+  @doc """
+  Where the devices a REGISTER binds can be reached **now**: one Request-URI per
+  Contact it binds (a lifetime above 0, `contact_expires/3`), each over the flow
+  the REGISTER arrived on (`reach_contact/2`). Empty for an un-registration and
+  for the `Contact: *` wildcard.
+
+  What a delivery triggered by that REGISTER — the Silo's flush — sends to: the
+  device that just registered, not the AOR's other bindings, which are served by
+  their own REGISTERs.
+  """
+  @spec register_targets(map()) :: [SIP.Uri.t()]
+  def register_targets(req) when is_map(req) do
+    header = expires_header(req)
+    flow = arrival_flow(req)
+
+    for %SIP.Uri{} = contact <- List.wrap(Map.get(req, :contact)),
+        contact_expires(contact, header) > 0,
+        do: reach_contact(contact, flow)
+  end
+
+  @doc """
   The value of a `Subscription-State` header (RFC 6665 §8.2.3), built.
 
   The writer beside the reader above, so the one place that knows how this header
