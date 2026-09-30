@@ -1455,6 +1455,12 @@ defmodule SIP.Msg.Ops do
   # Response headers copied verbatim when a reply is relayed leg-to-leg.
   @b2bua_reply_passthrough ["Reason", "Warning", "Retry-After"]
 
+  # …and, on the answer to an OPTIONS only, the capabilities it reports (RFC 3261
+  # §11.2): they are the whole answer to a probe. On any other response they would
+  # promise extensions this B2BUA does not perform on the far leg (100rel, replaces).
+  @options_reply_capabilities [:supported, :accept, :allowevents]
+  @options_reply_capabilities_lc ["allow", "accept-encoding", "accept-language"]
+
   # Matched case-insensitively: a header with no atom of its own keeps the
   # spelling the peer used (see strip_asserted_identity/1).
   @pai_header_lc "p-asserted-identity"
@@ -1601,7 +1607,9 @@ defmodule SIP.Msg.Ops do
   What a response relayed leg-to-leg carries over: the body (normalized to the
   `[%{contenttype, data}]` part shape so its Content-Type survives
   `update_sip_msg/2`), the `#{inspect(@b2bua_reply_passthrough)}` headers, and
-  the *identity* of the answerer's Contact (see `contact_identity/1`).
+  the *identity* of the answerer's Contact (see `contact_identity/1`). On the
+  answer to an OPTIONS, the capabilities it reports as well: `Allow`, `Accept`,
+  `Accept-Encoding`, `Accept-Language`, `Supported`, `Allow-Events`.
 
   The Contact's address is deliberately NOT copied: the relayed response must
   advertise *our* address on the answering leg, which the transport layer stamps
@@ -1623,8 +1631,24 @@ defmodule SIP.Msg.Ops do
       end
 
     passthrough = for h <- @b2bua_reply_passthrough, v = Map.get(resp, h), do: {h, v}
-    body_fields ++ contact_fields ++ passthrough
+    body_fields ++ contact_fields ++ passthrough ++ options_capabilities(resp)
   end
+
+  # A header with no atom of its own keeps the spelling the peer used, hence the
+  # case-insensitive match on the string keys.
+  defp options_capabilities(%{cseq: [_seq, :OPTIONS]} = resp) do
+    atoms = for h <- @options_reply_capabilities, v = Map.get(resp, h), do: {h, v}
+
+    strings =
+      for {key, v} <- resp,
+          is_binary(key),
+          String.downcase(key) in @options_reply_capabilities_lc,
+          do: {key, v}
+
+    atoms ++ strings
+  end
+
+  defp options_capabilities(_resp), do: []
 
   # The identity half of a Contact crossing a leg boundary: the userpart and
   # display name say WHO answers there; the host, port and transport say WHERE,
