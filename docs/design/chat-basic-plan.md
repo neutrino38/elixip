@@ -839,6 +839,37 @@ The Kamailio `msilo` recipe of Trix's ADR 0008 §5 is the same list; kelixip
 replaces its proxy, and `docs/utilisation/deploiement.md` in trix-web-client
 gains the kelixip configuration beside the Kamailio one.
 
+**As built** (2026-09-30), everything but the recipe:
+
+- `p2p-chat.exs` gates on `challengeable?/1`, authenticates with
+  `AuthDb.SBB.authenticate` — which now awaits a replayed `MESSAGE` as it
+  awaits a replayed INVITE, SUBSCRIBE or PUBLISH — then answers 404 for a
+  recipient `subscriber?/2` does not know, **after** authentication, so the
+  answer tells an unauthenticated sender nothing. It relays with `SBB.Page`,
+  stores on `:unreachable` or when nobody is registered, and waits in
+  `conversing` for the next MESSAGE of the conversation, not challenged. The
+  Silo's answers map to 202 / 486 (quota) / 480 (`Expires: 0`, typing
+  indicator) / 400 / 503;
+- `registrar-chat.exs` is `registrar-presence.exs` plus `Silo.flush/2` after
+  every 200 that leaves the AOR registered, refreshes included;
+- the packages are `kelixip-mod-silo` (its beams, `sql/silo/`, and both
+  reference chat scripts, which the core no longer ships) and
+  `kelixip-mod-conversation` (its beams and `sql/conversation/`), the DDL
+  under `/usr/share/kelixip/sql/<module>/`, RPM and deb. The deb pair was
+  built on Ubuntu 26.04 and its contents checked on 2026-09-30; the RPM spec
+  was not built (no EL host at hand);
+- `docs/kelixip/modules/silo.md` and `conversation.md`; `[[domain.chat]]` in
+  `installation.md` and `domains.toml`, which still said a MESSAGE was
+  answered 405; `[module.silo]`, `[module.conversation]` in `config.toml`;
+- tests: `apps/kelix_modules/test/p2p_chat_script_test.exs` runs both scripts
+  through the real router — two devices online, the second MESSAGE not
+  challenged, offline then flushed by a REGISTER through `registrar-chat.exs`
+  and not again at its refresh, 603 relayed and not stored, a typing
+  indicator 480 and not stored, 404, the Silo down 503.
+
+**Left:** the recipe itself, on Linphone and Trix, and the kelixip section of
+`docs/utilisation/deploiement.md` in trix-web-client.
+
 ## 4. Decisions this plan takes
 
 1. **A chat relay is `SBB.Page`, not a B2BUA leg.** The design leaves the term

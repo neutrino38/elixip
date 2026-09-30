@@ -104,7 +104,7 @@ port = 9095
 #max_trace_bytes = 1048576
 
 # Where the SQL server is and how to reach it, shared by every module that keeps
-# data in SQL (auth_db, silo): each of their blocks inherits these keys, and a key
+# data in SQL (auth_db, silo, conversation): each of their blocks inherits these keys, and a key
 # set in the module's own block wins. Never the account — database, username and
 # password stay in each module's block, since every module connects with its own.
 #[database]
@@ -215,6 +215,33 @@ port = 9095
 #message_queue_max = 100            # skip a leg whose script is that far behind
 # /usr/share/doc/kelixip-mod-mcu/ has the whole block key by key (mcu.md), the
 # control surface and what to look at when a call does not join (mcu_module_guide.md).
+
+#[module.silo]                      # dnf install kelixip-mod-silo
+# Store-and-forward of instant messages: what no device took is kept in SQL and
+# delivered when a device of the recipient registers (registrar-chat.exs). The
+# tables are yours to create: /usr/share/kelixip/sql/silo/{mysql,postgres}.sql.
+# Without them the module does not start. The link keys may come from [database].
+#driver    = "postgres"               # mysql | postgres
+#host      = "db.example.net"
+#database  = "kelixip_silo"
+#username  = "silo"
+#password  = "secret"
+#
+#[module.silo.defaults]
+#retention     = 259200             # seconds, when neither sender nor script says
+#max_retention = 604800             # the cap, whoever asks
+#max_messages  = 200                # per recipient
+#max_bytes     = 1048576            # per recipient
+
+#[module.conversation]              # dnf install kelixip-mod-conversation
+# Chat conversations a script sets aside with hibernate/1, woken by the next
+# MESSAGE between the same two parties on any node. Tables:
+# /usr/share/kelixip/sql/conversation/{mysql,postgres}.sql.
+#database    = "kelixip"
+#username    = "conversation"
+#password    = "secret"
+#default_ttl = 86400                # seconds, when the script names none
+#max_ttl     = 604800
 
 #[module.mcu_presence]             # dnf install kelixip-mod-mcu_presence
 # Conference rooms as presentities: sip:<did>@<domain> is open while the room runs,

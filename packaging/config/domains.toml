@@ -11,7 +11,8 @@
 #
 # A request is routed by its R-URI host (falling back to the To host); no match is
 # a 404. The method then selects the function — REGISTER -> registrar,
-# INVITE -> calls, SUBSCRIBE/PUBLISH -> presence — and a function with no block on
+# INVITE -> calls, SUBSCRIBE/PUBLISH -> presence, MESSAGE -> chat — and a function
+# with no block on
 # that domain is a 405. For presence there is one more step: the request's `Event`
 # header selects which [[domain.presence]] block serves it, and a package this
 # domain declares none for is answered 489 before any script runs.
@@ -30,7 +31,9 @@
 #  [domain.registrar]
 #  script = "registrar.exs"               # or "registrar-presence.exs": the same, and
 #                                         # a subscriber that does not PUBLISH is open
-#                                         # while registered (kelixip-mod-presence)
+#                                         # while registered (kelixip-mod-presence);
+#                                         # or "registrar-chat.exs": that, plus the
+#                                         # delivery of stored messages (kelixip-mod-silo)
 #  #default_expires = 3600       # per-domain override of [module.registrar]
 #  #min_expires     = 60
 #
@@ -41,6 +44,16 @@
 #  event-package = "presence"
 #  subscribe     = "presence-subscribe.exs"
 #  publish       = "presence-publish.exs"
+#
+#  # Chat (page-mode MESSAGE, RFC 3428): the dial-plan's shape, on the R-URI
+#  # user-part. One instance serves a conversation — same sender, same recipient,
+#  # same connection — until it is silent `idle_timeout` seconds. p2p-chat.exs
+#  # authenticates the sender, relays to every device of the recipient and
+#  # stores what nobody took: kelixip-mod-silo, with registrar-chat.exs above.
+#  [[domain.chat]]
+#  default      = true
+#  script       = "p2p-chat.exs"
+#  idle_timeout = 300
 #
 # A buddy list (RFC 4662) is a SUBSCRIBE to a LIST URI, and clients hard-code
 # which one: Linphone sends `sip:rls@sip.linphone.org` whatever the account's own

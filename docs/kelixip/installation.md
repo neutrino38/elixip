@@ -543,16 +543,15 @@ wrong path.
 
 A request is routed by its R-URI host (falling back to the `To` host); no match
 ⇒ `404`. Then the method selects the **function** — `REGISTER` → `registrar`,
-`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH` → `presence` — and a function with no
-block on that domain is **not enabled** ⇒ `405`.
+`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH` → `presence`, an out-of-dialog
+`MESSAGE` → `chat` — and a function with no block on that domain is **not
+enabled** ⇒ `405`.
 
 For presence there is one more step: the request's `Event` header selects which
 `[[domain.presence]]` block serves it, and a package the domain declares none for
 is answered `489 Bad Event` — before any script runs, and carrying `Allow-Events`
 with the packages it does serve.
 
-An out-of-dialog `MESSAGE` is answered `405`: page-mode chat is a function of its
-own and its dispatch is not implemented yet.
 
 ##### Wildcard aliases
 
@@ -641,6 +640,31 @@ Pattern syntax (Asterisk-style, matching the **whole** user-part):
 | `.` | one or more of any character |
 | `!` | zero or more of any character |
 | anything else | itself, literally |
+
+#### `[[domain.chat]]` — page-mode chat
+
+The dial-plan's shape — ordered, first match wins on the R-URI user-part, a
+`pattern` or `default = true`, the catch-all last — for out-of-dialog
+`MESSAGE` requests (RFC 3428). No rule matches ⇒ `404`.
+
+```toml
+  [[domain.chat]]
+  default      = true
+  script       = "p2p-chat.exs"
+  idle_timeout = 300
+```
+
+| Key | Type | Required | Meaning |
+|---|---|---|---|
+| `pattern` / `default` | string / `true` | **one of them** | As in `[[domain.call]]` |
+| `script` | string | **yes** | Scenario script serving the conversation |
+| `idle_timeout` | int > 0 | no | Seconds of silence that end a conversation (default `300`) |
+
+One instance serves a **conversation**: the MESSAGEs of one sender to one
+recipient over one connection. The reference `p2p-chat.exs` authenticates the
+first one, relays each to every device of the recipient, and stores what nobody
+took ([silo.md](modules/silo.md)); pair it with `registrar-chat.exs` as the
+domain's registrar script.
 
 #### `[module.registrar]`
 

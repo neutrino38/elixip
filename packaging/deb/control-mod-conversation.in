@@ -1,0 +1,19 @@
+Package: kelixip-mod-conversation
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@)
+Description: Hibernated chat conversations, for kelixip
+ What a chat script sets aside with hibernate/1, kept in SQL (MariaDB/MySQL or
+ PostgreSQL) until the next message between the same two parties wakes it, on
+ whichever node it reaches. The schema ships under
+ /usr/share/kelixip/sql/conversation/ and is the operator's to create. Enable
+ it with a [module.conversation] block in config.toml.
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

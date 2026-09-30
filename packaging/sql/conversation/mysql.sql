@@ -2,7 +2,8 @@
 --
 -- Run once by the operator, as an account allowed to create tables. The module
 -- never runs DDL, and refuses to start when these tables are absent or at
--- another version. Its own account needs SELECT, INSERT and DELETE on them.
+-- another version. Its own account needs SELECT, INSERT, UPDATE and DELETE on them
+-- (UPDATE for the row lock a wake takes: SELECT ... FOR UPDATE).
 --
 -- One row per hibernated conversation, keyed on a hash of its key (domain,
 -- rule, From AOR, To AOR), which the other columns spell out for listing.
