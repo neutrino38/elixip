@@ -777,6 +777,31 @@ section.
 **Done when** `elixipp UAC.Page` and `elixipp UAS.Page --listen udp` exchange a
 MESSAGE on one machine, and the same pair drives C8's recipe against a node.
 
+**As built** (2026-09-30):
+
+- the options are `--to`, `--body`, `--content-type`, `--expires`, `--count`,
+  `--interval` (ms), `--expect` for `UAC.Page`, and `--code` for `UAS.Page`.
+  They are generic: each lands in the scenario's appdata as `page_*`
+  (`SIP.Scenario.ExternalConfig.with_cli/2` adds them to the header every
+  instance gets), so a `.exs` scenario reads them too;
+- `send_page` gained `auth:` (the 401/407 that challenged a page: sent again
+  with the context's credentials) and `expires:` (the content's lifetime, an
+  `Expires` header, which `page_request/2` also takes). `UAC.Page` answers one
+  challenge per page;
+- `UAS.Page` reports `SIP.Msg.Ops.page_summary/1` — kind, sender, type,
+  size, never the text;
+- `UAC.Page` has **no default proxy**: a page goes to `--to` unless `-c` names
+  one;
+- **`UAS.Page` does not register.** A `uas :message` scenario runs in elixipp's
+  server mode, which binds listeners and registers nothing, and a `:uas_message`
+  sub-FSM under a registering parent is not routed yet
+  (`SIP.FSL.Host.setup_uas_child/2`). The local exchange is done (two
+  processes, three pages, 202 expected, 2026-09-30); receiving through a node
+  is left to C8, where the recipe drives real clients on that side;
+- tests: `apps/elixip2/test/page_scenarios_test.exs` (N pages with their
+  `Expires`, a 407 answered, a wrong code failing the run, `UAS.Page`'s code),
+  `scenario_loader_test.exs` (the built-ins and the copies).
+
 ### C8 — kelixip
 
 **Delivers**

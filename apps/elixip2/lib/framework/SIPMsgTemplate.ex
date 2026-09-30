@@ -67,7 +67,10 @@ defmodule SIP.MsgTemplate do
       the `To`;
     * `:date` — the time the message **arrived**, written as a `Date` header
       (RFC 3261 §20.17). A message delivered from storage says when it was sent,
-      not when it was delivered.
+      not when it was delivered;
+    * `:expires` — the lifetime of the content in seconds, written as an
+      `Expires` header (RFC 3261 §20.19): how long a store is asked to keep it
+      (`SIP.Msg.Ops.content_expires/1` reads it back).
   """
   @spec page_request(map(), keyword()) :: map()
   def page_request(source, opts \\ []) when is_map(source) and is_list(opts) do
@@ -87,6 +90,7 @@ defmodule SIP.MsgTemplate do
     }
     |> Map.merge(page_headers(source))
     |> put_date(Keyword.get(opts, :date))
+    |> put_expires(Keyword.get(opts, :expires))
     |> put_page_body(page_body(source), Map.get(source, :contenttype))
   end
 
@@ -128,6 +132,11 @@ defmodule SIP.MsgTemplate do
         into: %{},
         do: {name, value}
   end
+
+  defp put_expires(req, nil), do: req
+
+  defp put_expires(req, seconds) when is_integer(seconds) and seconds >= 0,
+    do: Map.put(req, :expires, Integer.to_string(seconds))
 
   defp put_date(req, nil), do: req
 

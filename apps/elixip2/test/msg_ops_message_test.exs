@@ -164,6 +164,21 @@ defmodule SIP.Test.MsgOpsMessage do
     end
   end
 
+  describe "page_summary/1" do
+    test "kind, sender, type and size — never the text" do
+      msg = %{
+        from: "\"Alice\" <sip:alice@Example.com>;tag=1",
+        contenttype: "text/plain;charset=UTF-8",
+        body: "Rendez-vous jeudi"
+      }
+
+      summary = Ops.page_summary(msg)
+      assert summary == "im from alice@example.com (text/plain, 17 octets)"
+      refute summary =~ "Rendez-vous"
+      assert Ops.page_summary(%{}) == "im from an unknown sender (no type, 0 octets)"
+    end
+  end
+
   describe "arrival_flow/1, reach_contact/2, register_targets/1" do
     defp uri(s) do
       {:ok, u} = SIP.Uri.parse(s)

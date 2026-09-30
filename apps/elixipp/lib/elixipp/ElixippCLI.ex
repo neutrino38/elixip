@@ -126,6 +126,14 @@ defmodule Elixipp.CLI do
           local_addr: :string,
           tls_cert: :string,
           tls_key: :string,
+          to: :string,
+          body: :string,
+          content_type: :string,
+          expires: :integer,
+          count: :integer,
+          interval: :integer,
+          expect: :integer,
+          code: :integer,
           help: :boolean
         ],
         aliases: [m: :monitor, l: :limit, c: :config, h: :help]
@@ -148,7 +156,12 @@ defmodule Elixipp.CLI do
       end
 
     module = resolve_module(arg)
-    ext_config = load_config(opts[:config])
+
+    ext_config =
+      opts[:config]
+      |> load_config()
+      |> SIP.Scenario.ExternalConfig.with_cli(page_overrides(opts))
+
     scenario_type = SIP.Scenario.Loader.scenario_type(module)
 
     # `--limit` caps concurrent scenario instances. A client run defaults to a
@@ -324,6 +337,25 @@ defmodule Elixipp.CLI do
       print_server_header(module, kind, limit, started)
       server_loop(module, max_run)
     end
+  end
+
+  # The page-mode options (`UAC.Page`, `UAS.Page`): each one given becomes the
+  # scenario key of the same meaning, read from the appdata by the scenario.
+  @page_options [
+    to: :page_to,
+    body: :page_body,
+    content_type: :page_content_type,
+    expires: :page_expires,
+    count: :page_count,
+    interval: :page_interval_ms,
+    expect: :page_expect,
+    code: :page_code
+  ]
+
+  @doc false
+  @spec page_overrides(keyword()) :: keyword()
+  def page_overrides(opts) do
+    for {option, key} <- @page_options, Keyword.has_key?(opts, option), do: {key, opts[option]}
   end
 
   # External-config overrides handed to *every* UAS instance. A server scenario is
@@ -1629,6 +1661,8 @@ defmodule Elixipp.CLI do
       elixipp mon_scenario.exs                    # depuis un fichier
       elixipp UAC.Invite                          # scénario intégré (sans fichier)
       elixipp UAC.Register                        # scénario intégré (sans fichier)
+      elixipp --listen udp:5070 UAS.Page          # répond aux MESSAGE (intégré)
+      elixipp --to sip:bob@127.0.0.1:5070 UAC.Page           # envoie un MESSAGE
       elixipp -m mon_scenario.exs                 # affichage live d'un appel
       elixipp -l 5 mon_scenario.exs               # 5 appels en continu
       elixipp -l 5 --max-run 100 mon_scenario.exs # 5 simultanés, 100 au total
@@ -1683,6 +1717,17 @@ defmodule Elixipp.CLI do
                          (>= 5000), ce qui permet de lancer un UAC sur une machine
                          qui héberge déjà un UAS sur 5060.
       --local-addr ADDR  (mode client) IP locale annoncée dans Via/Contact.
+      --to URI           (UAC.Page) Destinataire des MESSAGE.
+      --body TEXTE       (UAC.Page) Contenu des MESSAGE.
+      --content-type T   (UAC.Page) Type du contenu (défaut : text/plain).
+      --expires N        (UAC.Page) Durée de vie du contenu en secondes (en-tête
+                         Expires) : combien de temps un Silo peut le garder.
+      --count N          (UAC.Page) Nombre de MESSAGE envoyés (défaut : 1).
+      --interval MS      (UAC.Page) Délai entre deux MESSAGE (défaut : 1000).
+      --expect CODE      (UAC.Page) Code final attendu pour chacun (défaut : 200).
+      --code CODE        (UAS.Page) Code de la réponse à chaque MESSAGE (défaut : 200).
+                         Ces options arrivent dans l'appdata du scénario
+                         (page_to, page_body…) : un scénario .exs peut les lire.
       --log-file PATH    Chemin du fichier de log (défaut : elixipp.log).
       --log-level LEVEL  Niveau : debug | info | warning | error (défaut : info).
       --log-sequence     Écrit un diagramme de séquence PlantUML par instance de
@@ -1697,7 +1742,8 @@ defmodule Elixipp.CLI do
 
     SCÉNARIOS
       L'argument est soit un chemin vers un fichier .exs, soit le nom d'un
-      scénario intégré (compilé dans l'exécutable) : UAC.Invite, UAC.Register.
+      scénario intégré (compilé dans l'exécutable) : UAC.Invite, UAC.Register,
+      UAC.Page, UAS.Page.
       Les scénarios intégrés ne nécessitent aucun fichier sur la machine.
       Dans un scénario, un sous-scénario (spawn_fsm "autre.exs") est cherché à
       côté du fichier qui le déclare, pas dans le répertoire courant.

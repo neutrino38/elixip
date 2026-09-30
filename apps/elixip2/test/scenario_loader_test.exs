@@ -13,13 +13,26 @@ defmodule SIP.Test.ScenarioLoader do
   alias SIP.Scenario.Loader
 
   describe "built-in scenarios" do
-    test "load_module! resolves the bundled UAC.Invite and UAC.Register" do
+    test "load_module! resolves the bundled scenarios" do
       assert Loader.load_module!("UAC.Invite") == UAC.Invite
       assert Loader.load_module!("UAC.Register") == UAC.Register
+      assert Loader.load_module!("UAC.Page") == UAC.Page
+      assert Loader.load_module!("UAS.Page") == UAS.Page
+    end
+
+    test "UAS.Page is a page-mode server, UAC.Page a client" do
+      assert Loader.scenario_type(UAS.Page) == :uas_message
+      assert Loader.scenario_type(UAC.Page) == :uac
+    end
+
+    test "the editable copies load by path, under their own names" do
+      dir = Path.expand("../scenarios", __DIR__)
+      assert Loader.load_file!(Path.join(dir, "uac_page.exs")) == UAC.PageExample
+      assert Loader.load_file!(Path.join(dir, "uas_page.exs")) == UAS.PageExample
     end
 
     test "built-ins are real scenario modules (run/1 + __scenario_states__/0)" do
-      for mod <- [UAC.Invite, UAC.Register] do
+      for mod <- [UAC.Invite, UAC.Register, UAC.Page, UAS.Page] do
         # function_exported?/3 only sees loaded modules; force the load first so
         # the assertion does not depend on a prior test having referenced it
         # (ExUnit randomizes test order within the module).

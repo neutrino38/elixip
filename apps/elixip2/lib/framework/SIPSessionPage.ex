@@ -98,13 +98,18 @@ defmodule SIP.Session.Page do
           `{"Name", value}`: those of `SIP.MsgTemplate.page_request/2`'s
           allowlist (Subject, Conversation-ID…);
         * `:date` — the `Date` to write (`%DateTime{}` or string);
+        * `:expires` — the lifetime of the content, in seconds (an `Expires`
+          header): how long a store may keep it undelivered. `nil`, none;
         * `:timeout` — the lifetime of the dialog carrying the page, in seconds
           (60 by default);
         * `:ref` — any term, echoed as `ref:` in the `{:page, …}` event: what
           tells the answers of several pages in flight apart, and what
           `SIP.Session.Page.abandon_pages/1` silences them by;
         * `:leg` — the label of the page's lane in the journal (`page` by
-          default).
+          default);
+        * `:auth` — the 401 or 407 that challenged a previous page: the page is
+          sent again with the credentials of the context
+          (`authusername` / `passwd`) answering that challenge.
       """
       @doc """
       Set this conversation aside and end the instance: what `opts` names is
@@ -184,7 +189,11 @@ defmodule SIP.Session.Page do
   def do_send_page(sip_ctx = %SIP.Context{}, to, body, content_type, opts) when is_list(opts) do
     SIP.Scenario.Monitor.note_command(:sip, "send_page")
 
-    req = page(sip_ctx, to, body, content_type, opts)
+    req =
+      sip_ctx
+      |> page(to, body, content_type, opts)
+      |> authorize(sip_ctx, Keyword.get(opts, :auth))
+
     timeout = Keyword.get(opts, :timeout, 60)
 
     {:ok, relay} =
@@ -200,6 +209,33 @@ defmodule SIP.Session.Page do
     note_activity(sip_ctx)
     SIP.Context.set(sip_ctx, :lasterr, :ok)
   end
+
+  # A page answering a challenge: the digest over the rebuilt request, as
+  # send_auth_SUBSCRIBE and send_auth_REGISTER compute theirs.
+  defp authorize(req, _sip_ctx, nil), do: req
+
+  defp authorize(req, sip_ctx, %{response: code} = rsp) when code in [401, 407] do
+    header = if code == 401, do: :wwwauthenticate, else: :proxyauthenticate
+
+    case Map.get(rsp, header) do
+      nil ->
+        raise "send_page auth: the #{code} carries no #{header} header"
+
+      authparams ->
+        SIP.Msg.Ops.add_authorization_to_req(
+          req,
+          authparams,
+          header,
+          sip_ctx.authusername,
+          sip_ctx.ha1,
+          :ha1
+        )
+    end
+  end
+
+  defp authorize(_req, _sip_ctx, other),
+    do:
+      raise(ArgumentError, "send_page auth: expects the 401/407 response, got #{inspect(other)}")
 
   # The relays started with a `:ref`, by the process that started them — the
   # instance itself, so its dictionary rather than a table of the node's. A relay
@@ -337,13 +373,13 @@ defmodule SIP.Session.Page do
   # allowlisted headers — to the new target, which stays the Request-URI only:
   # the `To` is still whom the sender wrote to.
   defp page(_sip_ctx, to, %{method: :MESSAGE} = received, _content_type, opts) do
-    SIP.MsgTemplate.page_request(received, [ruri: to] ++ Keyword.take(opts, [:date]))
+    SIP.MsgTemplate.page_request(received, [ruri: to] ++ Keyword.take(opts, [:date, :expires]))
   end
 
   defp page(sip_ctx, to, body, content_type, opts) do
     %{from: sender!(sip_ctx, opts), to: to, contenttype: content_type, body: body}
     |> Map.merge(Map.new(Keyword.get(opts, :headers, [])))
-    |> SIP.MsgTemplate.page_request(Keyword.take(opts, [:date]))
+    |> SIP.MsgTemplate.page_request(Keyword.take(opts, [:date, :expires]))
   end
 
   defp sender!(sip_ctx, opts) do

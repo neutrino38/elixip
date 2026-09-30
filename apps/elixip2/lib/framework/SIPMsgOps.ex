@@ -546,6 +546,20 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  @doc """
+  What a MESSAGE is, in one line a log or a report may carry: its kind
+  (`message_kind/1`), its sender's AOR, its media type and its size —
+  `"im from alice@example.com (text/plain, 17 octets)"`. **Never its content**
+  (chat-basic-plan, C1b): this is what a tool says it received.
+  """
+  @spec page_summary(map()) :: String.t()
+  def page_summary(msg) when is_map(msg) do
+    octets = byte_size(body_string(msg) || "")
+    sender = address_of_record(msg, :from) || "an unknown sender"
+
+    "#{message_kind(msg)} from #{sender} (#{body_content_type(msg) || "no type"}, #{octets} octets)"
+  end
+
   # The final answers to a page that are a verdict on the content or the sender,
   # not on the moment: a device that said one of these will say it again.
   # 403 blocked sender, 413 too large, 415 unsupported type, 488 not acceptable,
