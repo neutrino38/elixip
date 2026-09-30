@@ -466,15 +466,15 @@ defmodule Kelix.Mod.AuthDb do
   end
 
   # ACK has no response to carry a challenge (RFC 3261 §17.1.1.3); CANCEL must be
-  # accepted for the transaction it cancels (§22.1); OPTIONS is what liveness
-  # probing uses, and challenging it makes this node look down to its own
-  # infrastructure (see Kelix.Options).
-  @never_challenged [:ACK, :CANCEL, :OPTIONS]
+  # accepted for the transaction it cancels (§22.1). OPTIONS is challengeable: the
+  # liveness ping is protected by the routing — it reaches the keepalive rule or
+  # the core (Kelix.Options), never a script that authenticates.
+  @never_challenged [:ACK, :CANCEL]
 
   @doc """
   Should this request be authenticated at all?
 
-  The rule is **"an initial request, other than ACK, CANCEL and OPTIONS"** — not
+  The rule is **"an initial request, other than ACK and CANCEL"** — not
   "creates a dialog", which would need a per-method list to maintain and would miss
   MESSAGE / PUBLISH. An in-dialog request is excluded because the dialog was
   authenticated when it was created: re-challenging mid-call breaks UAs and proves

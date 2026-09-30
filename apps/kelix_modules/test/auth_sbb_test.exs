@@ -99,6 +99,48 @@ defmodule Kelix.AuthSbbTest do
     end
   end
 
+  # The same block entered on an OPTIONS: a probe relayed to a registered UA
+  # authenticates its sender first (options-probe-ua.exs).
+  defmodule OptionsGate do
+    use SIP.Scenario
+    use Kelix.Mod.AuthDb
+
+    uas(:invite)
+
+    defp report(what) do
+      case Process.whereis(:auth_sbb_probe) do
+        nil -> :ok
+        pid -> send(pid, what)
+      end
+    end
+
+    state initial_state do
+      on_events do
+        {:OPTIONS, _req, _trans, _dlg} -> goto(authenticate_sender)
+      after
+        5_000 -> scenario_failure("no OPTIONS")
+      end
+    end
+
+    state authenticate_sender do
+      AuthDb.SBB.authenticate()
+
+      on_events do
+        {:auth, :authenticated, data} ->
+          report({:outcome, :authenticated, data, ctx_get(:asserted_identity)})
+          scenario_success("authenticated")
+
+        {:auth, outcome, data} ->
+          report({:outcome, outcome, data, nil})
+          scenario_success("#{outcome}")
+      end
+    end
+
+    on_shutdown do
+      scenario_aborted("stopped")
+    end
+  end
+
   setup_all do
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
@@ -137,6 +179,11 @@ defmodule Kelix.AuthSbbTest do
     if auth, do: Map.put(req, :proxyauthorization, auth), else: req
   end
 
+  defp options(auth, cseq) do
+    req = %{invite(auth, cseq) | method: :OPTIONS, cseq: [cseq, :OPTIONS]}
+    Map.delete(req, :contact)
+  end
+
   defp credentials(challenge, opts \\ []) do
     nc = Keyword.get(opts, :nc, "00000001")
     cnonce = "0a4f113b"
@@ -146,7 +193,7 @@ defmodule Kelix.AuthSbbTest do
         "MD5",
         challenge["nonce"],
         Keyword.get(opts, :ha1, @ha1),
-        "INVITE",
+        Keyword.get(opts, :method, "INVITE"),
         @ruri,
         %{"nc" => nc, "cnonce" => cnonce, "qop" => "auth"}
       )
@@ -327,6 +374,32 @@ defmodule Kelix.AuthSbbTest do
 
       send(pid, {:dialog_terminated, dialog, :timeout})
       assert_receive {:outcome, :caller_gone, %{reason: :timeout}, _}, 5_000
+    end
+  end
+
+  describe "on an OPTIONS" do
+    test "challenged 407 with no 100 Trying, then authenticated on its re-submission" do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = options(nil, 1)
+
+      {pid, _ref} =
+        SIP.Scenario.Runner.spawn_uas_instance(OptionsGate,
+          dialog_pid: dialog,
+          inbound_request: req,
+          config_overrides: [domain: @domain]
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: send(pid, {:scenario_ctl, :shutdown, :test}) end)
+      send(pid, {:OPTIONS, req, self(), dialog})
+
+      assert_receive {:replied, 407, _reason, fields}, 5_000
+      refute_received {:replied, 100, _, _}
+      challenge = Keyword.fetch!(fields, :proxyauthenticate)
+
+      send(pid, {:OPTIONS, options(credentials(challenge, method: "OPTIONS"), 2), self(), dialog})
+
+      assert_receive {:outcome, :authenticated, %{user: @caller}, _asserted}, 5_000
+      refute_received {:replied, 100, _, _}
     end
   end
 end
