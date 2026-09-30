@@ -38,13 +38,10 @@ defmodule SIPParser.MixProject do
     [
       # The Finite State Language: the engine every scenario and every kelixip
       # script runs on. It lives in its own repository and ships as the hex
-      # package `finite_state_language` (OTP app `:fsl`, Apache-2.0).
-      #
-      # TEMPORARY: a path dependency on the local checkout, until 0.5.0 — which
-      # adds `:start_state`, what chat-basic-plan C3d wakes a hibernated
-      # conversation with — is published. Then back to
-      # `{:fsl, "~> 0.5.0", hex: :finite_state_language}`.
-      {:fsl, path: "../../../finite-state-language/elixir"},
+      # package `finite_state_language` (OTP app `:fsl`, Apache-2.0). 0.5.0 is
+      # the floor: it adds `:start_state`, what a hibernated conversation is
+      # woken with.
+      {:fsl, "~> 0.5.0", hex: :finite_state_language},
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.6"},
