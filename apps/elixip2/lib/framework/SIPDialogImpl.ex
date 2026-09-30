@@ -637,6 +637,24 @@ defmodule SIP.DialogImpl do
     }
   end
 
+  # An inbound OPTIONS dialog exists only because the application serves the
+  # OPTIONS itself (SIP.Session.Options, `:dispatch`). It lives as long as the NIST
+  # under it, rearmed by every OPTIONS on it, so a sender reusing its Call-ID keeps
+  # reaching the same instance. Outbound OPTIONS dialogs are not concerned, nor an
+  # OPTIONS keepalive we send on a call: the dialog must have been CREATED by one.
+  def arm_expiration_timer(
+        state = %SIP.DialogImpl{direction: :inbound, msg: %{method: :OPTIONS}},
+        req
+      )
+      when req.method == :OPTIONS do
+    state = cancel_expiration_timer(state)
+
+    %SIP.DialogImpl{
+      state
+      | expirationtimer: :erlang.start_timer(32_000, self(), :optionsexpire)
+    }
+  end
+
   # Default, do nothing
   def arm_expiration_timer(state = %SIP.DialogImpl{}, _req) do
     state
@@ -2091,6 +2109,13 @@ defmodule SIP.DialogImpl do
   # runs through the transaction / allow / sequence-number checks so a stale
   # retransmit or an out-of-order OPTIONS is rejected like any other in-dialog
   # request.
+  # Except on a dialog an inbound OPTIONS created: there the application serves
+  # every OPTIONS — the re-submission after a 407 above all.
+  def handle_cast({:sipmsg, msg, transact_pid}, state = %SIP.DialogImpl{direction: :inbound})
+      when is_req(msg) and msg.method == :OPTIONS and state.msg.method == :OPTIONS do
+    in_dialog_request(state, msg, transact_pid)
+  end
+
   def handle_cast({:sipmsg, msg, transact_pid}, state)
       when is_req(msg) and msg.method == :OPTIONS do
     with {:ok, state} <- on_new_transaction(state, msg, transact_pid),
@@ -2885,6 +2910,10 @@ defmodule SIP.DialogImpl do
   # answer and nothing to tell anyone: the published state lives in the
   # collection, not here (plan decision 5).
   def handle_info({:timeout, _timerRef, :publishexpire}, state = %SIP.DialogImpl{}) do
+    {:stop, :normal, state}
+  end
+
+  def handle_info({:timeout, _timerRef, :optionsexpire}, state = %SIP.DialogImpl{}) do
     {:stop, :normal, state}
   end
 

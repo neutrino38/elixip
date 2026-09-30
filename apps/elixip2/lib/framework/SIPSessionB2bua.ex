@@ -251,7 +251,14 @@ defmodule SIP.Session.B2bua do
 
   # Dialog lifetime (seconds) of an outbound leg, by method. Mirrors the inbound
   # values SIP.Dialog.start_new_dialog_for/3 uses.
-  @default_timeouts %{INVITE: 1800, MESSAGE: 60, REGISTER: 600, SUBSCRIBE: 600, PUBLISH: 600}
+  @default_timeouts %{
+    INVITE: 1800,
+    MESSAGE: 60,
+    REGISTER: 600,
+    SUBSCRIBE: 600,
+    PUBLISH: 600,
+    OPTIONS: 32
+  }
 
   defmacro __using__(_opts) do
     quote do
@@ -3598,8 +3605,18 @@ defmodule SIP.Session.B2bua do
   end
 
   # Only a request that can create a dialog can create a leg (RFC 3261 §12.1).
+  # OPTIONS is not dialog-forming, but a probe relayed to a registered UA is one
+  # leg carrying one transaction, as a MESSAGE is.
   defp dialog_forming?(req) when is_map(req) do
-    Map.get(req, :method) in [:INVITE, :MESSAGE, :REGISTER, :SUBSCRIBE, :PUBLISH, :NOTIFY]
+    Map.get(req, :method) in [
+      :INVITE,
+      :MESSAGE,
+      :REGISTER,
+      :SUBSCRIBE,
+      :PUBLISH,
+      :NOTIFY,
+      :OPTIONS
+    ]
   end
 
   defp dialog_forming?(_), do: false

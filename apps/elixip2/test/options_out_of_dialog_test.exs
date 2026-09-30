@@ -62,9 +62,22 @@ defmodule SIP.Test.OptionsOutOfDialog do
     def on_options(_req, _transaction_id), do: :default
   end
 
+  # Serves the OPTIONS itself: the dialog layer opens a dialog and hands it to
+  # `on_new_options/3`, whose app is the test process named in the app env.
+  defmodule Dispatching do
+    @behaviour SIP.Session.Options
+
+    @impl true
+    def on_options(_req, _transaction_id), do: :dispatch
+
+    @impl true
+    def on_new_options(_dialog_pid, _req, _transaction_id),
+      do: {:accept, Application.get_env(:elixip2, :options_test_app)}
+  end
+
   # Send an out-of-dialog OPTIONS through the mockup transport and return its
-  # Call-ID, the transport pid and the dialog id it would have created.
-  defp send_options(callid) do
+  # From-tag and Call-ID — the dialog id it would create, To tag aside.
+  defp send_options(callid, ftag \\ nil, cseq \\ 1) do
     ruri =
       %SIP.Uri{scheme: "sip:", domain: "example.com", port: 5060}
       |> SIP.Uri.set_uri_param("unittest", "options_ood")
@@ -73,7 +86,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
     :ok = SIP.Test.Transport.Mockup.attach_probe(ruri.tp_pid)
 
     aor = %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"}
-    ftag = "ft-#{System.unique_integer([:positive])}"
+    ftag = ftag || "ft-#{System.unique_integer([:positive])}"
 
     req = %{
       "Max-Forwards" => "70",
@@ -84,7 +97,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
       to: aor,
       useragent: "Elixipp-test",
       callid: callid,
-      cseq: [1, :OPTIONS],
+      cseq: [cseq, :OPTIONS],
       contentlength: 0,
       via: ["SIP/2.0/UDP 1.2.3.4:5060;branch=z9hG4bK#{System.unique_integer([:positive])}"],
       transid: "z9hG4bK#{System.unique_integer([:positive])}"
@@ -141,5 +154,67 @@ defmodule SIP.Test.OptionsOutOfDialog do
 
     Process.sleep(100)
     refute dialog_alive?(id)
+  end
+
+  describe "an OPTIONS the application serves itself (:dispatch)" do
+    setup do
+      :ok = SIP.Session.ConfigRegistry.set_options_processing_module(Dispatching)
+      Application.put_env(:elixip2, :options_test_app, self())
+      on_exit(fn -> Application.delete_env(:elixip2, :options_test_app) end)
+      :ok
+    end
+
+    test "reaches the app on a dialog of its own, and the app's answer goes out" do
+      cid = "opt-#{System.unique_integer([:positive])}"
+      id = send_options(cid)
+
+      assert_receive {:OPTIONS, req, _trans, dlg}, 2_000
+      assert dialog_alive?(id)
+      # Nothing is answered until the app decides.
+      refute_receive {:sip_mockup, {:response_sent, _, %{callid: ^cid}}}, 100
+
+      SIP.Dialog.reply(dlg, req, 404, "Not Found", [])
+      assert_receive {:sip_mockup, {:response_sent, 404, %{callid: ^cid}}}, 2_000
+    end
+
+    # The re-submission after a 407: same Call-ID and From-tag, no To tag, a new
+    # CSeq. It must reach the instance that challenged, not the dialog's own
+    # keepalive answer.
+    test "a second OPTIONS on the same dialog reaches the app and rearms the lifetime" do
+      cid = "opt-#{System.unique_integer([:positive])}"
+      {ftag, _} = id = send_options(cid)
+
+      assert_receive {:OPTIONS, req1, _trans, dlg}, 2_000
+      SIP.Dialog.reply(dlg, req1, 407, "Proxy Authentication Required", [])
+      assert_receive {:sip_mockup, {:response_sent, 407, %{callid: ^cid}}}, 2_000
+
+      first = :erlang.read_timer(:sys.get_state(dlg).expirationtimer)
+      assert is_integer(first) and first <= 32_000
+      Process.sleep(50)
+
+      send_options(cid, ftag, 2)
+      assert_receive {:OPTIONS, %{cseq: [2, :OPTIONS]} = req2, _trans, ^dlg}, 2_000
+      refute_received {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}
+
+      second = :erlang.read_timer(:sys.get_state(dlg).expirationtimer)
+      assert second > first
+
+      SIP.Dialog.reply(dlg, req2, 200, "OK", [])
+      assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
+      assert dialog_alive?(id)
+    end
+  end
+
+  # The OPTIONS lifetime belongs to a dialog an OPTIONS created. An OPTIONS
+  # keepalive we send on an inbound call must leave the call's own timer alone:
+  # 32 s instead of 1800 would hang up a call that is working.
+  test "an OPTIONS on an inbound INVITE dialog does not arm the OPTIONS lifetime" do
+    call = %SIP.DialogImpl{direction: :inbound, msg: %{method: :INVITE}}
+    assert SIP.DialogImpl.arm_expiration_timer(call, %{method: :OPTIONS}) == call
+
+    probe = %SIP.DialogImpl{direction: :inbound, msg: %{method: :OPTIONS}}
+    armed = SIP.DialogImpl.arm_expiration_timer(probe, %{method: :OPTIONS})
+    assert is_reference(armed.expirationtimer)
+    :erlang.cancel_timer(armed.expirationtimer)
   end
 end
