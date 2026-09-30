@@ -16,21 +16,27 @@ defmodule Kelix.Mod.Conversation do
   state to resume in, the appdata it kept (plain data, checked by `hibernate/1`)
   and the TTL it asked for.
 
+  ## Storage
+
+  SQL — MariaDB/MySQL or PostgreSQL — over a `Kelix.DB.Pool` of the module's own
+  (`Kelix.Mod.Conversation.Conn`), so a conversation hibernated on one node
+  wakes on another and survives a restart. The schema is the operator's to
+  create (`packaging/sql/conversation/`); the module refuses to start without
+  it, and answers as if nothing were kept while its base does not answer.
+
   ## Configuration
 
       [module.conversation]
+      driver      = "postgres"
+      host        = "db.example.net"
+      database    = "kelixip"
+      username    = "conversation"
       default_ttl = 86400      # seconds, when the script names none
       max_ttl     = 604800     # the cap, whoever asks
 
-  The granted TTL is the script's, bounded by `max_ttl`. A sweep deletes what
-  expired; `wake/1` never returns an expired snapshot either.
-
-  ## Storage
-
-  In memory (ETS, owned by this module's process) until `Kelix.DB.Pool` lands
-  (chat-basic-plan, C5): a restart loses what was hibernated. The SQL store —
-  a conversation hibernated on one node waking on another — comes with C5,
-  behind the same two facades.
+  The link keys are `Kelix.DB.Pool`'s, read over `[database]`. The granted TTL
+  is the script's, bounded by `max_ttl`. A sweep deletes what expired;
+  `wake/1` never returns an expired snapshot either.
 
   `kelictl conversation list` shows what is set aside — its parties, the state
   it resumes in, when it expires — never the data it kept.
@@ -39,13 +45,14 @@ defmodule Kelix.Mod.Conversation do
   @behaviour Kelix.Module
   require Logger
 
-  @table __MODULE__
+  @conn Kelix.Mod.Conversation.Conn
   @default_ttl 86_400
   @max_ttl 604_800
   @sweep_ms 60_000
-  @config_keys ~w(module default_ttl max_ttl)
+  @recheck_ms 5_000
+  @config_keys ~w(module default_ttl max_ttl) ++ Kelix.DB.Pool.link_keys()
 
-  @type key :: {String.t(), String.t() | :default, String.t(), String.t()}
+  @type key :: Kelix.Mod.Conversation.Store.key()
   @type snapshot :: %{
           required(:script) => String.t(),
           required(:resume) => atom,
@@ -53,17 +60,41 @@ defmodule Kelix.Mod.Conversation do
           optional(:ttl) => pos_integer | nil
         }
 
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-
   # ── Kelix.Module behaviour ───────────────────────────────────────────────────
 
+  @doc """
+  The module's tree: its pool, then the service holding the schema verdict and
+  the TTLs (`:rest_for_one`: the service checks the schema through the pool).
+  """
   @impl Kelix.Module
-  def child_spec(_name, config),
-    do: %{id: __MODULE__, start: {__MODULE__, :start_link, [ttls(config)]}}
+  def child_spec(_name, config) do
+    config = Kelix.DB.Pool.with_defaults(config)
+
+    service =
+      [store: Kelix.Mod.Conversation.Store.SQL, handle: Kelix.DB.SQL.handle(config, @conn)] ++
+        ttls(config)
+
+    %{
+      id: __MODULE__,
+      type: :supervisor,
+      start:
+        {Supervisor, :start_link,
+         [
+           [
+             Kelix.DB.Pool.child_spec(config, name: @conn, label: "conversation"),
+             %{id: __MODULE__, start: {__MODULE__, :start_link, [service]}}
+           ],
+           [strategy: :rest_for_one, name: Kelix.Mod.Conversation.Supervisor]
+         ]}
+    }
+  end
 
   @impl Kelix.Module
   def validate_config(config) when is_map(config) do
+    config = Kelix.DB.Pool.with_defaults(config)
+
     with :ok <- reject_unknown_keys(config),
+         :ok <- Kelix.DB.Pool.validate(config, "conversation"),
          :ok <- pos_int(config, "default_ttl"),
          :ok <- pos_int(config, "max_ttl") do
       opts = ttls(config)
@@ -80,7 +111,7 @@ defmodule Kelix.Mod.Conversation do
   def reload(_name, config), do: GenServer.call(__MODULE__, {:reload, ttls(config)})
 
   @impl Kelix.Module
-  def describe(), do: %{version: "1.0", exports: [hibernate: 2, wake: 1]}
+  def describe(), do: %{version: "2.0", exports: [hibernate: 2, wake: 1]}
 
   @impl Kelix.Module
   def describe_control() do
@@ -97,7 +128,13 @@ defmodule Kelix.Mod.Conversation do
   end
 
   @impl Kelix.Module
-  def handle_control("list", _args), do: {:ok, list()}
+  def handle_control("list", _args) do
+    case list() do
+      rows when is_list(rows) -> {:ok, rows}
+      {:error, _} = error -> error
+    end
+  end
+
   def handle_control(command, _args), do: {:error, {:unknown_command, command}}
 
   # ── Facades ──────────────────────────────────────────────────────────────────
@@ -108,98 +145,163 @@ defmodule Kelix.Mod.Conversation do
   already hibernated under `key` is replaced: it is the same two parties.
   """
   @spec hibernate(key, snapshot) :: {:ok, pos_integer} | {:error, term}
-  def hibernate({_d, _r, _f, _t} = key, %{script: _, resume: resume, data: data} = snapshot)
-      when is_atom(resume) and is_map(data),
-      do: Kelix.Module.safe_call(__MODULE__, {:hibernate, key, snapshot})
+  def hibernate({_d, _r, _f, _t} = key, %{script: script, resume: resume, data: data} = snapshot)
+      when is_atom(resume) and is_map(data) do
+    with {:ok, ctx} <- context() do
+      ttl = min(Map.get(snapshot, :ttl) || ctx.default_ttl, ctx.max_ttl)
+      entry = %{script: script, resume: resume, data: data, ttl: ttl, expires_at: now() + ttl}
+
+      case ctx.store.put(ctx.handle, key, entry) do
+        :ok ->
+          {:ok, ttl}
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            message: "conversation: not hibernated, the store failed: #{short(reason)}"
+          )
+
+          {:error, :down}
+      end
+    end
+  end
 
   @doc """
   Take the conversation hibernated under `key`: `{:ok, snapshot}`, and it is no
-  longer kept, or `:none`.
+  longer kept, or `:none` — also when the module or its base does not answer,
+  in which case the MESSAGE starts a new conversation.
   """
   @spec wake(key) :: {:ok, snapshot} | :none
   def wake({_d, _r, _f, _t} = key) do
-    case Kelix.Module.safe_call(__MODULE__, {:wake, key}) do
-      {:ok, snapshot} -> {:ok, snapshot}
-      _none_or_down -> :none
+    with {:ok, ctx} <- context(),
+         {:ok, entry} <- ctx.store.take(ctx.handle, key, now()) do
+      {:ok, Map.delete(entry, :expires_at)}
+    else
+      {:error, reason} when reason not in [:down, :timeout] ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "conversation: could not be woken, the store failed: #{short(reason)}"
+        )
+
+        :none
+
+      _none_or_down ->
+        :none
     end
   end
 
   @doc "What is hibernated, one row per conversation (`kelictl conversation list`)."
   @spec list() :: [map] | {:error, :down | :timeout}
-  def list(), do: Kelix.Module.safe_call(__MODULE__, :list)
-
-  # ── GenServer ────────────────────────────────────────────────────────────────
-
-  @impl true
-  def init(opts) do
-    table = :ets.new(@table, [:set, :private])
-    schedule_sweep(Keyword.get(opts, :sweep_ms, @sweep_ms))
-
-    {:ok,
-     %{
-       table: table,
-       default_ttl: Keyword.get(opts, :default_ttl, @default_ttl),
-       max_ttl: Keyword.get(opts, :max_ttl, @max_ttl),
-       sweep_ms: Keyword.get(opts, :sweep_ms, @sweep_ms)
-     }}
-  end
-
-  @impl true
-  def handle_call({:hibernate, key, snapshot}, _from, state) do
-    ttl = min(Map.get(snapshot, :ttl) || state.default_ttl, state.max_ttl)
-    entry = snapshot |> Map.put(:ttl, ttl) |> Map.put(:expires_at, now() + ttl)
-    :ets.insert(state.table, {key, entry})
-    {:reply, {:ok, ttl}, state}
-  end
-
-  def handle_call({:wake, key}, _from, state) do
+  def list() do
     now = now()
 
-    case :ets.take(state.table, key) do
-      [{^key, %{expires_at: at} = entry}] when at > now ->
-        {:reply, {:ok, Map.delete(entry, :expires_at)}, state}
+    with {:ok, ctx} <- context() do
+      case ctx.store.list(ctx.handle, now) do
+        {:ok, rows} ->
+          for row <- rows do
+            row |> Map.delete(:expires_at) |> Map.put(:expires_in, row.expires_at - now)
+          end
 
-      _none_or_expired ->
-        {:reply, :none, state}
+        {:error, _} ->
+          {:error, :down}
+      end
     end
   end
 
-  def handle_call(:list, _from, state) do
-    now = now()
+  defp context(), do: Kelix.Module.safe_call(__MODULE__, :context)
 
-    rows =
-      for {{domain, rule, from, to}, entry} <- :ets.tab2list(state.table),
-          entry.expires_at > now do
-        %{
-          domain: domain,
-          rule: rule,
-          from: from,
-          to: to,
-          script: entry.script,
-          resume: entry.resume,
-          expires_in: entry.expires_at - now
-        }
-      end
+  # ── GenServer ────────────────────────────────────────────────────────────────
 
-    {:reply, Enum.sort_by(rows, &{&1.domain, &1.from, &1.to}), state}
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @impl true
+  def init(opts) do
+    state = %{
+      store: Keyword.fetch!(opts, :store),
+      handle: Keyword.fetch!(opts, :handle),
+      default_ttl: Keyword.get(opts, :default_ttl, @default_ttl),
+      max_ttl: Keyword.get(opts, :max_ttl, @max_ttl),
+      sweep_ms: Keyword.get(opts, :sweep_ms, @sweep_ms),
+      schema: :unchecked
+    }
+
+    case check_schema(state) do
+      {:stop, reason} ->
+        {:stop, reason}
+
+      state ->
+        Process.send_after(self(), :sweep, state.sweep_ms)
+        {:ok, state}
+    end
   end
+
+  # Absent or stale tables stop the module: the operator has DDL to run. A base
+  # that does not answer does not — it is checked again until it does.
+  defp check_schema(state) do
+    case state.store.check_schema(state.handle) do
+      :ok ->
+        %{state | schema: :ok}
+
+      {:error, reason} when reason == :missing or elem(reason, 0) == :stale ->
+        Logger.error(
+          module: __MODULE__,
+          message:
+            "conversation: the schema is #{if reason == :missing, do: "missing", else: "stale"} " <>
+              "(#{inspect(reason)}) — create or upgrade it with the DDL in " <>
+              "/usr/share/kelixip/sql/conversation/; the module never runs DDL itself"
+        )
+
+        {:stop, {:schema, reason}}
+
+      {:error, reason} ->
+        Logger.error(
+          module: __MODULE__,
+          message: "conversation: the database does not answer (#{short(reason)}) — retrying"
+        )
+
+        Process.send_after(self(), :recheck, @recheck_ms)
+        %{state | schema: :unchecked}
+    end
+  end
+
+  @impl true
+  def handle_call(:context, _from, %{schema: :ok} = state),
+    do: {:reply, {:ok, Map.take(state, [:store, :handle, :default_ttl, :max_ttl])}, state}
+
+  def handle_call(:context, _from, state), do: {:reply, {:error, :down}, state}
 
   def handle_call({:reload, opts}, _from, state),
     do: {:reply, :ok, %{state | default_ttl: opts[:default_ttl], max_ttl: opts[:max_ttl]}}
 
   @impl true
+  def handle_info(:recheck, %{schema: :unchecked} = state) do
+    case check_schema(state) do
+      {:stop, reason} -> {:stop, reason, state}
+      state -> {:noreply, state}
+    end
+  end
+
   def handle_info(:sweep, state) do
-    now = now()
+    if state.schema == :ok do
+      case state.store.sweep(state.handle, now()) do
+        {:ok, 0} ->
+          :ok
 
-    swept =
-      :ets.select_delete(state.table, [
-        {{:_, %{expires_at: :"$1"}}, [{:"=<", :"$1", now}], [true]}
-      ])
+        {:ok, swept} ->
+          Logger.info(
+            module: __MODULE__,
+            message: "#{swept} hibernated conversation(s) expired"
+          )
 
-    if swept > 0,
-      do: Logger.info(module: __MODULE__, message: "#{swept} hibernated conversation(s) expired")
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            message: "conversation: sweep failed: #{short(reason)}"
+          )
+      end
+    end
 
-    schedule_sweep(state.sweep_ms)
+    Process.send_after(self(), :sweep, state.sweep_ms)
     {:noreply, state}
   end
 
@@ -207,10 +309,9 @@ defmodule Kelix.Mod.Conversation do
 
   # ── internals ────────────────────────────────────────────────────────────────
 
-  defp schedule_sweep(ms), do: Process.send_after(self(), :sweep, ms)
-
-  # Wall-clock seconds, not monotonic: what the SQL store will write, and what a
-  # conversation hibernated before a restart will be compared against.
+  # Wall-clock seconds, not monotonic: what the rows hold, and what a
+  # conversation hibernated on another node, or before a restart, is compared
+  # against.
   defp now(), do: System.os_time(:second)
 
   defp ttls(config),
@@ -233,4 +334,6 @@ defmodule Kelix.Mod.Conversation do
       _ -> {:error, "#{key} must be a positive integer (seconds)"}
     end
   end
+
+  defp short(reason), do: reason |> inspect() |> String.slice(0, 200)
 end

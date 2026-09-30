@@ -461,6 +461,35 @@ the core: hibernate on a MESSAGE, on a dropped connection, a pid refused, no
 module), `apps/elixip2/test/page_mode_test.exs` (the verb), FSL's
 `engine_test.exs` (`:start_state`).
 
+
+**As built, the SQL gate** (2026-09-30): the store is SQL, behind
+`Kelix.Mod.Conversation.Store` — `Store.SQL` over the module's own
+`Kelix.DB.Pool` (`Kelix.Mod.Conversation.Conn`), the ETS store gone from `lib/`
+to the test support, as the Silo's is. `[module.conversation]` now takes the
+link keys (read over `[database]`) beside the two TTLs. The schema ships under
+`packaging/sql/conversation/`; absent or stale tables stop the module, a base
+that does not answer leaves `wake/1` answering `:none` (the MESSAGE starts a
+new conversation) until it does.
+
+- a row is keyed on the SHA-256 of `{domain, rule, From, To}` — four 255-char
+  columns exceed MySQL's primary-key limit — with the parts beside it for
+  `list`; the default rule is the empty string, and the column `chat_rule`
+  (`rule` is a PostgreSQL keyword);
+- the kept data is the Erlang external term format, read with `[:safe]`
+  first; `take/3` is `SELECT … FOR UPDATE` then `DELETE`, so two nodes woken
+  at once wake it once;
+- `list` gives the resume state as text: it is read back from the base;
+- the statement plumbing both SQL modules share — placeholders, transactions,
+  the version check — is `Kelix.DB.SQL`, in the core;
+- tests: `conversation_store_contract.exs` on both stores, and on PostgreSQL
+  16 / MariaDB 10.11 a conversation hibernated before a module restart that
+  wakes after it — green on 2026-09-30. The engines are named by
+  `KELIX_TEST_POSTGRES` / `KELIX_TEST_MYSQL`, for both modules (renamed from
+  C6's `SILO_TEST_*`).
+
+Still to C8: the `kelixip-mod-conversation` package installing the DDL under
+`/usr/share/kelixip/sql/conversation/`, and its module doc.
+
 ### C4 — the page relay
 
 ```elixir
@@ -722,7 +751,8 @@ fourth to the tenth at the next flush, still in order.
   `SIP.MsgTemplate.page_headers/1` (what is stored is what a page carries).
 - **Tests**: the store contract (`test/support/silo_store_contract.exs`) runs on
   the in-memory store in the default suite, and on PostgreSQL 16 and MariaDB
-  10.11 when `SILO_TEST_POSTGRES` / `SILO_TEST_MYSQL` name one — run green on
+  10.11 when `KELIX_TEST_POSTGRES` / `KELIX_TEST_MYSQL` name one (named
+  `SILO_TEST_*` at first) — run green on
   2026-09-30, four simultaneous claims included. The *done when* list is
   `silo_test.exs`, on Mockup devices.
 - **Left to C8**: the package installing the DDL where the refusal message

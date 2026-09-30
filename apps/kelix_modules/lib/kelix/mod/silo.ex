@@ -100,11 +100,7 @@ defmodule Kelix.Mod.Silo do
   def service_opts(config) do
     [
       store: Kelix.Mod.Silo.Store.SQL,
-      handle: %{
-        conn: @conn,
-        driver: Kelix.DB.Pool.driver(config),
-        timeout: config["call_timeout_ms"] || Kelix.Module.default_call_timeout_ms()
-      },
+      handle: Kelix.DB.SQL.handle(config, @conn),
       defaults: defaults(config),
       lease: config["lease"] || @default_lease
     ]

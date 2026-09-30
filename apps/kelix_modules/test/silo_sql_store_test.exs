@@ -1,96 +1,27 @@
-defmodule Kelix.Test.SiloSQL do
-  @moduledoc """
-  The SQL half of the Silo against a real engine, when one is named: an URL in
-  `SILO_TEST_POSTGRES` or `SILO_TEST_MYSQL` (`postgres://user:pw@host:port/db`,
-  `mysql://…`), on a database the test may wipe. Skipped otherwise — the same
-  gate as the Mendooze E2E. The tables are recreated from the DDL the package
-  ships, so what is tested is what an operator installs.
-  """
-
-  @doc "The block an URL stands for, or nil."
-  def config(env) do
-    case System.get_env(env) do
-      nil ->
-        nil
-
-      url ->
-        u = URI.parse(url)
-
-        [user, password] =
-          (String.split(u.userinfo || "", ":", parts: 2) ++ [nil]) |> Enum.take(2)
-
-        %{
-          "driver" => if(u.scheme == "mysql", do: "mysql", else: "postgres"),
-          "host" => u.host,
-          "port" => u.port,
-          "database" => String.trim_leading(u.path || "", "/"),
-          "username" => user,
-          "password" => password,
-          "ssl" => false,
-          "allow_insecure_db_connection" => true,
-          "pool_size" => 3
-        }
-    end
-  end
-
-  @ddl Path.expand("../../../packaging/sql/silo", __DIR__)
-
-  @doc "Start a pool on `config` under `name`, and recreate the tables."
-  def start!(config, name) do
-    {:ok, _pid} = Kelix.DB.Pool.start_link(config, name: name, label: "silo-test")
-    mod = Kelix.DB.Pool.driver_module(Kelix.DB.Pool.driver(config))
-
-    for table <- ~w(silo_served silo_message silo_version),
-        do: mod.query!(name, "DROP TABLE IF EXISTS #{table}", [])
-
-    file = if config["driver"] == "mysql", do: "mysql.sql", else: "postgres.sql"
-
-    @ddl
-    |> Path.join(file)
-    |> File.read!()
-    |> strip_comments()
-    |> String.split(";")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.each(&mod.query!(name, &1, []))
-
-    %{conn: name, driver: Kelix.DB.Pool.driver(config), timeout: 5_000}
-  end
-
-  def wipe!(%{conn: conn} = h) do
-    mod = Kelix.DB.Pool.driver_module(h.driver)
-    mod.query!(conn, "DELETE FROM silo_served", [])
-    mod.query!(conn, "DELETE FROM silo_message", [])
-  end
-
-  defp strip_comments(sql) do
-    sql
-    |> String.split("\n")
-    |> Enum.reject(&String.starts_with?(String.trim(&1), "--"))
-    |> Enum.join("\n")
-  end
-end
-
-for {engine, env} <- [postgres: "SILO_TEST_POSTGRES", mysql: "SILO_TEST_MYSQL"] do
+for {engine, config} <- Kelix.Test.SQL.engines() do
   defmodule Module.concat(Kelix.Mod.SiloSQLStoreTest, Macro.camelize(to_string(engine))) do
-    @moduledoc "The store contract on #{engine} (#{env})."
+    @moduledoc "The Silo's store contract on #{engine} (KELIX_TEST_#{String.upcase(to_string(engine))})."
     use ExUnit.Case, async: false
 
-    @config Kelix.Test.SiloSQL.config(env)
+    @config config
     @conn Module.concat(__MODULE__, Conn)
+    @tables ~w(silo_served silo_message silo_version)
 
     # Before the contract's tests are defined: a tag applies to the tests that follow it.
-    if @config == nil, do: @moduletag(skip: "#{env} not set")
+    if @config == nil,
+      do: @moduletag(skip: "KELIX_TEST_#{String.upcase(to_string(engine))} not set")
 
     use Kelix.Test.SiloStoreContract
 
     # setup_all runs even for a skipped module: no engine, nothing to start.
     setup_all do
-      if @config, do: %{handle: Kelix.Test.SiloSQL.start!(@config, @conn)}, else: :ok
+      if @config,
+        do: %{handle: Kelix.Test.SQL.start!(@config, @conn, "silo", @tables)},
+        else: :ok
     end
 
     setup context do
-      if h = context[:handle], do: Kelix.Test.SiloSQL.wipe!(h)
+      if h = context[:handle], do: Kelix.Test.SQL.wipe!(h, ~w(silo_served silo_message))
       %{store: Kelix.Mod.Silo.Store.SQL}
     end
 

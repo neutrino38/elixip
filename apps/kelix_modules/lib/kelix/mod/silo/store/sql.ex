@@ -21,25 +21,17 @@ defmodule Kelix.Mod.Silo.Store.SQL do
   """
   @behaviour Kelix.Mod.Silo.Store
 
+  alias Kelix.DB.SQL
   alias Kelix.Mod.Silo.Schema
+
+  import Kelix.DB.SQL, only: [query: 3, query!: 4, transaction: 2, marks: 1, to_int: 1]
 
   @columns "id, sender, recipient, content_type, headers, body, received_at, expires_at"
 
   # ── Kelix.Mod.Silo.Store ─────────────────────────────────────────────────────
 
   @impl true
-  def check_schema(h) do
-    case query(h, "SELECT version FROM silo_version", []) do
-      {:ok, %{rows: [[version]]}} ->
-        if version == Schema.version(), do: :ok, else: {:error, {:stale, version}}
-
-      {:ok, %{rows: rows}} ->
-        {:error, {:stale, Enum.map(rows, &hd/1)}}
-
-      {:error, reason} ->
-        if undefined_table?(reason), do: {:error, :missing}, else: {:error, reason}
-    end
-  end
+  def check_schema(h), do: SQL.check_version(h, "silo_version", Schema.version())
 
   @impl true
   def usage(h, domain, aor, now) do
@@ -287,50 +279,4 @@ defmodule Kelix.Mod.Silo.Store.SQL do
       _ -> %{}
     end
   end
-
-  defp marks(ids), do: Enum.map_join(ids, ", ", fn _ -> "?" end)
-
-  # A MySQL SUM comes back as a Decimal; everything else here is an integer.
-  defp to_int(n) when is_integer(n), do: n
-  defp to_int(%Decimal{} = d), do: Decimal.to_integer(d)
-  defp to_int(nil), do: 0
-
-  defp driver_module(%{driver: driver}), do: Kelix.DB.Pool.driver_module(driver)
-
-  defp query(h, sql, params) do
-    driver_module(h).query(h.conn, placeholders(h, sql), params, timeout: h.timeout)
-  rescue
-    e -> {:error, e}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
-  end
-
-  defp query!(h, conn, sql, params),
-    do: driver_module(h).query!(conn, placeholders(h, sql), params, timeout: h.timeout)
-
-  defp transaction(h, fun) do
-    driver_module(h).transaction(h.conn, fun, timeout: h.timeout)
-  rescue
-    e -> {:error, e}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
-  end
-
-  # `?` → `$1, $2…` for PostgreSQL. No statement here holds a literal `?`.
-  defp placeholders(%{driver: :mysql}, sql), do: sql
-
-  defp placeholders(%{driver: :postgres}, sql) do
-    sql
-    |> String.split("?")
-    |> Enum.with_index()
-    |> Enum.map_join(fn
-      {part, 0} -> part
-      {part, i} -> "$#{i}" <> part
-    end)
-  end
-
-  # ER_NO_SUCH_TABLE / undefined_table: the schema was never created.
-  defp undefined_table?(%MyXQL.Error{mysql: %{code: 1146}}), do: true
-  defp undefined_table?(%Postgrex.Error{postgres: %{code: :undefined_table}}), do: true
-  defp undefined_table?(_), do: false
 end

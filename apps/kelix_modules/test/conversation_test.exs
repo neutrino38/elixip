@@ -12,13 +12,21 @@ defmodule Kelix.Mod.ConversationTest do
 
   setup do
     Process.register(self(), :kelix_conversation_test)
-    start_supervised!({Conversation, [default_ttl: 300, max_ttl: 3_600]})
+    start_conversation(default_ttl: 300, max_ttl: 3_600)
     :ok = Kelix.ModuleRegistry.register("conversation", Conversation, %{})
     on_exit(fn -> Kelix.ModuleRegistry.unregister("conversation") end)
     :ok
   end
 
   @key {"d.test", :default, "alice@d.test", "bot@d.test"}
+
+  # The module on the in-memory store; the SQL one is tested against the same
+  # contract (conversation_sql_store_test.exs).
+  defp start_conversation(opts) do
+    {:ok, store} = Kelix.Test.ConversationMemoryStore.start_link()
+    opts = [store: Kelix.Test.ConversationMemoryStore, handle: store] ++ opts
+    start_supervised!(%{id: Conversation, start: {Conversation, :start_link, [opts]}})
+  end
 
   describe "the module" do
     test "keeps a snapshot, and gives it back once" do
@@ -42,14 +50,14 @@ defmodule Kelix.Mod.ConversationTest do
         Conversation.hibernate(@key, %{script: "b.exs", resume: :x, data: %{secret: "hi"}})
 
       assert [row] = Conversation.list()
-      assert %{from: "alice@d.test", to: "bot@d.test", resume: :x, script: "b.exs"} = row
+      assert %{from: "alice@d.test", to: "bot@d.test", resume: "x", script: "b.exs"} = row
       refute Map.has_key?(row, :data)
       refute inspect(row) =~ "hi\""
     end
 
     test "an expired conversation neither wakes nor survives the sweep" do
       stop_supervised!(Conversation)
-      start_supervised!({Conversation, [default_ttl: 1, max_ttl: 1, sweep_ms: 200]})
+      start_conversation(default_ttl: 1, max_ttl: 1, sweep_ms: 200)
 
       {:ok, 1} = Conversation.hibernate(@key, %{script: "b.exs", resume: :x, data: %{}})
       other = put_elem(@key, 2, "carol@d.test")
@@ -61,10 +69,14 @@ defmodule Kelix.Mod.ConversationTest do
     end
 
     test "validate_config" do
-      assert Conversation.validate_config(%{"default_ttl" => 60, "max_ttl" => 600}) == :ok
-      assert {:error, _} = Conversation.validate_config(%{"default_ttl" => 0})
-      assert {:error, _} = Conversation.validate_config(%{"default_ttl" => 700, "max_ttl" => 600})
-      assert {:error, _} = Conversation.validate_config(%{"ttl" => 60})
+      link = %{"database" => "kelixip", "username" => "conversation"}
+      ok = Map.merge(link, %{"default_ttl" => 60, "max_ttl" => 600})
+      assert Conversation.validate_config(ok) == :ok
+      assert {:error, _} = Conversation.validate_config(Map.put(link, "default_ttl", 0))
+      assert {:error, _} = Conversation.validate_config(Map.put(ok, "default_ttl", 700))
+      assert {:error, _} = Conversation.validate_config(Map.put(link, "ttl", 60))
+      assert {:error, msg} = Conversation.validate_config(%{"default_ttl" => 60})
+      assert msg =~ "database"
     end
   end
 
@@ -85,7 +97,7 @@ defmodule Kelix.Mod.ConversationTest do
       pid = deliver(snap, message(dom, "hibernate now", port: 5060))
       assert_down(pid, :normal)
       assert active(dom) == 0
-      assert [%{resume: :awaiting_answer}] = Enum.filter(Conversation.list(), &(&1.domain == dom))
+      assert [%{resume: "awaiting_answer"}] = Enum.filter(Conversation.list(), &(&1.domain == dom))
 
       woken = deliver(snap, message(dom, "the answer", port: 6000))
       assert_receive {:woken, ^woken, 2}, 1_000
