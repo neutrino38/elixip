@@ -45,6 +45,18 @@ defmodule Kelix.Mod.ConversationTest do
       assert {:ok, 3_600} = Conversation.hibernate(@key, Map.put(snap, :ttl, 999_999))
     end
 
+    test "show: the link, what is set aside, and this node's counters" do
+      snap = %{script: "b.exs", resume: :x, data: %{}}
+      {:ok, _} = Conversation.hibernate(@key, snap)
+      {:ok, _} = Conversation.hibernate(put_elem(@key, 2, "carol@d.test"), snap)
+      {:ok, _} = Conversation.wake(@key)
+
+      assert {:ok, show} = Conversation.handle_control("show", %{})
+      assert %{state: :down, error: _} = show
+      assert %{schema: :ok, conversations: 1, domains: 1, default_ttl: 300, max_ttl: 3_600} = show
+      assert show.since_start == %{hibernated: 2, woken: 1, expired: 0}
+    end
+
     test "list shows the parties and the state, never the data" do
       {:ok, _} =
         Conversation.hibernate(@key, %{script: "b.exs", resume: :x, data: %{secret: "hi"}})

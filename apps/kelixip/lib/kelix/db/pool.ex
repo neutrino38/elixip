@@ -465,6 +465,36 @@ defmodule Kelix.DB.Pool do
     end
   end
 
+  @doc """
+  `describe/3`, plus what the module's store says it holds: `held` is run beside
+  the live `SELECT 1` — not after it, so a stuck pool costs one timeout, not two —
+  and bounded by `timeout_ms`. Its `{:ok, map}` is merged in; anything else, or no
+  answer in time, contributes nothing: `state` and `error` already say why.
+  """
+  @spec describe(term, atom, String.t(), (-> {:ok, map} | term), pos_integer) :: map
+  def describe(key, conn, label, held, timeout_ms) when is_function(held, 0) do
+    parent = self()
+    ref = make_ref()
+
+    {pid, mon} =
+      spawn_monitor(fn -> send(parent, {ref, bounded(held, timeout_ms)}) end)
+
+    link = describe(key, conn, label)
+
+    receive do
+      {^ref, {:ok, {:ok, %{} = stats}}} ->
+        Process.demonitor(mon, [:flush])
+        Map.merge(link, stats)
+
+      {^ref, _failed} ->
+        Process.demonitor(mon, [:flush])
+        link
+
+      {:DOWN, ^mon, :process, ^pid, _reason} ->
+        link
+    end
+  end
+
   defp state(descriptor, conn) do
     timeout = descriptor.query_timeout_ms
 

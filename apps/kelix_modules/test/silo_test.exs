@@ -369,6 +369,24 @@ defmodule Kelix.Mod.SiloTest do
       assert {:ok, []} = Silo.handle_control("list", %{"aor" => "bob@unit.test"})
     end
 
+    test "show: the link, what the store holds, and this node's counters" do
+      store!("m1")
+      store!("m22")
+
+      assert {:ok, show} = Silo.handle_control("show", %{})
+      # no pool in this suite: the link is down, and says why
+      assert %{state: :down, error: _} = show
+      assert %{schema: :ok, messages: 2, aors: 1, bytes: 5, claimed: 0} = show
+      assert %{stored: 2, delivered: 0} = show.since_start
+      refute Map.has_key?(show.since_start, :schema)
+    end
+
+    test "show answers with the link alone when the service is gone" do
+      stop_supervised!(Silo)
+      assert {:ok, %{state: :down} = show} = Silo.handle_control("show", %{})
+      refute Map.has_key?(show, :since_start)
+    end
+
     test "an AOR that is not user@domain is refused" do
       assert {:error, msg} = Silo.handle_control("list", %{"aor" => "bob"})
       assert msg =~ "user@domain"

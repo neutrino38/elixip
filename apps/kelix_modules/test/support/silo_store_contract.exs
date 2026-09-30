@@ -142,6 +142,23 @@ defmodule Kelix.Test.SiloStoreContract do
         assert {:ok, []} = store.list(h, "example.com", "bob", @now)
         assert {:ok, [_]} = store.list(h, "example.com", "carol", @now)
       end
+
+      test "stats count the live messages, their AORs, their bytes and the claimed ones", %{
+        store: store,
+        handle: h
+      } do
+        assert {:ok, %{messages: 0, aors: 0, bytes: 0, claimed: 0}} = store.stats(h, @now)
+
+        {:ok, _} = store.insert(h, row(%{size: 10}))
+        {:ok, _} = store.insert(h, row(%{size: 5}))
+        {:ok, _} = store.insert(h, row(%{aor: "carol", size: 7}))
+        {:ok, _} = store.insert(h, row(%{domain: "other.net", size: 1}))
+        {:ok, _} = store.insert(h, row(%{aor: "dave", size: 99, expires_at: @now - 1}))
+        {:ok, [_, _], 0} = store.claim(h, "example.com", "bob", "n1", @now, @now + 60)
+
+        assert {:ok, %{messages: 4, aors: 3, bytes: 23, claimed: 2}} = store.stats(h, @now)
+        assert {:ok, %{claimed: 0}} = store.stats(h, @now + 60)
+      end
     end
   end
 end

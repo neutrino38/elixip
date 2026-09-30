@@ -52,6 +52,16 @@ defmodule Kelix.Test.ConversationMemoryStore do
   end
 
   @impl true
+  def stats(pid, now) do
+    live =
+      for {{domain, _r, _f, _t}, e} <- Agent.get(pid, & &1.entries),
+          e.expires_at > now,
+          do: domain
+
+    {:ok, %{conversations: length(live), domains: live |> Enum.uniq() |> length()}}
+  end
+
+  @impl true
   def sweep(pid, now) do
     Agent.get_and_update(pid, fn s ->
       {expired, kept} = Enum.split_with(s.entries, fn {_k, e} -> e.expires_at <= now end)

@@ -144,6 +144,20 @@ defmodule Kelix.Mod.Silo do
   def describe_control() do
     [
       %{
+        name: "show",
+        rest: {:get, "/db"},
+        rw: :r,
+        args: [],
+        render: %{
+          kind: :detail,
+          fields: ~w(state schema host port database username driver tls certificate transport
+                     pool_size query_timeout_ms error messages aors bytes claimed since_start)
+        },
+        help:
+          "The Silo's database link — does it answer, where, encrypted? — what it holds, " <>
+            "and what this node did since it started"
+      },
+      %{
         name: "list",
         rest: {:get, "/messages/:aor"},
         rw: :r,
@@ -174,7 +188,28 @@ defmodule Kelix.Mod.Silo do
     end
   end
 
+  # `show` never fails on a base that is down: "down, and here is why" is its
+  # answer, and the counters of this node are there whatever the base says.
+  def handle_control("show", _args) do
+    link = Kelix.DB.Pool.describe(@conn, @conn, "silo", &held/0, show_timeout())
+
+    case status() do
+      %{schema: schema} = status ->
+        {:ok, Map.merge(link, %{schema: schema, since_start: Map.delete(status, :schema)})}
+
+      {:error, _} ->
+        {:ok, link}
+    end
+  end
+
   def handle_control(command, _args), do: {:error, {:unknown_command, command}}
+
+  defp held() do
+    with {:ok, ctx} <- context(), do: ctx.store.stats(ctx.handle, now())
+  end
+
+  defp show_timeout(),
+    do: Kelix.ModuleRegistry.call_timeout(__MODULE__, Kelix.Module.default_call_timeout_ms())
 
   defp control("list", ctx, domain, aor) do
     now = now()

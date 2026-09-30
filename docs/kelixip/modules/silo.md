@@ -94,8 +94,8 @@ name = "example.com"
 
 ### Checking
 
+`kelictl silo show` shows whether the database answers, and what the Silo holds.
 `kelictl silo list bob@example.com` shows what is stored for Bob.
-`kelictl status` shows the module's counters.
 
 ## Parameters
 
@@ -177,10 +177,11 @@ A REGISTER that binds nothing (an un-registration) flushes nothing.
 
 | Command | REST | Description |
 |---|---|---|
+| `kelictl silo show` | `GET /modules/silo/db` | The database link (state, host, port, database, account, driver, TLS, pool size, error when down), the schema check, what is stored (`messages`, `aors`, `bytes`, `claimed` by a flush in progress) and, under `since_start`, this node's counters |
 | `kelictl silo list <aor>` | `GET /modules/silo/messages/<aor>` | Messages stored for `user@domain`: id, sender, type, size, arrival, time left, devices served. Never the content |
 | `kelictl silo purge <aor>` | `DELETE /modules/silo/messages/<aor>` | Deletes them |
 
-`kelictl status` shows, under `silo`, what this node did since it started:
+`kelictl status` also shows, under `silo`, what this node did since it started:
 `stored`, `delivered`, `accepted`, `refused`, `unreachable`, `expired`,
 `expired_undelivered`.
 

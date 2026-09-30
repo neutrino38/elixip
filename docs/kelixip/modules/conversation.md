@@ -104,6 +104,7 @@ Called by the node, not by scripts:
 
 | Command | REST | Description |
 |---|---|---|
+| `kelictl conversation show` | `GET /modules/conversation/db` | The database link (state, host, port, database, account, driver, TLS, pool size, error when down), the schema check, the conversations kept (`conversations`, `domains`), `default_ttl` and `max_ttl`, and, under `since_start`, this node's counters: `hibernated`, `woken`, `expired` |
 | `kelictl conversation list` | `GET /modules/conversation/conversations` | Conversations kept: domain, rule, parties, script, resume state, time left. Never the data |
 
 ## Events
