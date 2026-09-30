@@ -11,8 +11,9 @@
 #
 # A request is routed by its R-URI host (falling back to the To host); no match is
 # a 404. The method then selects the function — REGISTER -> registrar,
-# INVITE -> calls, SUBSCRIBE/PUBLISH -> presence — and a function with no block on
-# that domain is a 405. For presence there is one more step: the request's `Event`
+# INVITE -> calls, SUBSCRIBE/PUBLISH -> presence, OPTIONS -> [[domain.options]] —
+# and a function with no block on that domain is a 405 (OPTIONS excepted: the
+# node answers it itself). For presence there is one more step: the request's `Event`
 # header selects which [[domain.presence]] block serves it, and a package this
 # domain declares none for is answered 489 before any script runs.
 
@@ -65,6 +66,25 @@
 #  [[domain.call]]
 #  default = true
 #  script  = "default_call.exs"
+#
+#  # OPTIONS: with no block the node answers every OPTIONS itself (200, or 503
+#  # while draining). A rule hands it to a script: `keepalive = true` for an R-URI
+#  # with no user-part (the load balancer's ping), then patterns in order on the
+#  # user-part, as in the dial-plan. The drain, an unknown host and `sip:domain`
+#  # with no keepalive rule are always answered by the node. `*` is literal in a
+#  # pattern: write `conf-.`, not `conf-*`. Each instance counts in max_calls.
+#  [[domain.options]]
+#  keepalive = true
+#  script    = "options-keepalive.exs"
+#
+#  [[domain.options]]
+#  pattern = "conf-."
+#  script  = "options-mcu.exs"          # an example: no such script is shipped
+#
+#  [[domain.options]]
+#  default = true
+#  script  = "options-probe-ua.exs"     # 407, then relayed to the registered UA;
+#                                       # needs kelixip-mod-registrar and -auth_db
 
 # The usrloc store's own block. It lives HERE, not in config.toml, so it is
 # reloadable alongside the domains it serves — a stray copy in config.toml is

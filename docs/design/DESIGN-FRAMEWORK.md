@@ -80,7 +80,8 @@ creates a dialog** by implementing a behaviour and registering the module in
 | | `on_call_end(dialog_pid, app_pid)` | ignored |
 | `SIP.Session.Registrar` | `on_new_registration(dialog_pid, register, trans_pid)` | `{:accept, app_pid}` \| `{:reject, code, reason}` |
 | | `on_registration_expired(dialog_pid, app_pid)` | ignored |
-| `SIP.Session.Options` | `on_options(req, trans_pid)` | the answer to an out-of-dialog OPTIONS |
+| `SIP.Session.Options` | `on_options(req, trans_pid)` | the answer to an out-of-dialog OPTIONS, or `:dispatch` |
+| | `on_new_options(dialog_pid, options, trans_pid)` (optional) | after `:dispatch`: `{:accept, app_pid}` \| `{:reject, code, reason}` |
 
 The dialog layer calls `ConfigRegistry`'s dispatcher, which applies the
 configured module or — with none configured — rejects with `500`. That single

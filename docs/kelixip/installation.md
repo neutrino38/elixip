@@ -518,7 +518,7 @@ wrong path.
 |---|---|---|---|
 | `name` | string | **yes** | Nominal domain name. **This is also the digest `realm`** |
 | `aliases` | list of strings | no | Other hosts routed to this domain (case-insensitive). An entry written `*.suffix` routes **every** host below that suffix. A name/alias used twice rejects the file |
-| `max_calls` | int > 0 | no | Per-domain concurrent-instance cap (`503` beyond) |
+| `max_calls` | int > 0 | no | Per-domain concurrent-instance cap (`503` beyond). An OPTIONS served by a script counts in it like a call |
 
 A request is routed by its R-URI host (falling back to the `To` host); no match
 ⇒ `404`. Then the method selects the **function** — `REGISTER` → `registrar`,
@@ -621,6 +621,43 @@ Pattern syntax (Asterisk-style, matching the **whole** user-part):
 | `!` | zero or more of any character |
 | anything else | itself, literally |
 
+#### `[[domain.options]]` — OPTIONS served by scripts
+
+Without any of these blocks the node answers every out-of-dialog OPTIONS itself:
+`200` with its `Allow`, or `503` while it drains. A rule hands the OPTIONS to a
+script instead. Three kinds of rule, each with a `script`:
+
+| Rule | Serves |
+|---|---|
+| `keepalive = true` | an R-URI with **no user-part** (`sip:example.com`): the ping of an upstream proxy or load balancer. At most one per domain, anywhere in the list |
+| `pattern = "…"` | an R-URI whose user-part matches, with the `[[domain.call]]` syntax below |
+| `default = true` | any other user-part. Must be the last rule |
+
+Ordered, **first match wins**, as for the dial-plan. What the node still answers
+itself, whatever the rules say:
+
+- a draining node answers `503` before any script is asked;
+- an R-URI host matching no domain gets `200`, not `404`: a load balancer pinging
+  an address asks whether the node is up;
+- an R-URI with no user-part and no `keepalive` rule gets `200`. The `default`
+  rule never serves it: a probe script would answer the load balancer `480`.
+
+A user-part no rule matches is answered `404`.
+
+The script gets the OPTIONS on a dialog of its own. It lasts 32 s after the last
+OPTIONS on it, so the re-submission after a `407` reaches the instance that
+challenged it. Each instance takes a `max_calls` slot for as long as it lives.
+
+Two reference scripts:
+
+- `options-keepalive.exs` answers `200` with the node's `Allow`, then ends;
+- `options-probe-ua.exs` challenges the sender with a `407`, then relays the
+  OPTIONS to the registered UA and relays its answer back — `480` when the UA is
+  not registered. It needs kelixip-mod-registrar and kelixip-mod-auth_db.
+
+`*` is a literal character in a pattern: `conf-*` matches only `conf-*`. Write
+`conf-.` for "`conf-` then at least one character".
+
 #### `[module.registrar]`
 
 The usrloc store's own block. It lives here — not in `config.toml` — so it is
@@ -672,6 +709,14 @@ aliases = ["sip.example.com", "203.0.113.10"]
   [[domain.call]]
   default = true                    # catch-all, must be last
   script  = "default_call.exs"
+
+  [[domain.options]]
+  keepalive = true                  # sip:example.com — the load balancer's ping
+  script    = "options-keepalive.exs"
+
+  [[domain.options]]
+  default = true                    # sip:bob@example.com — probe the registered UA
+  script  = "options-probe-ua.exs"
 
 [module.registrar]
 max_contacts_per_aor = 5
