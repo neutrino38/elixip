@@ -372,7 +372,7 @@ defmodule SIP.Session.Notifier do
     with :ok <- check_required_extensions(req),
          {:ok, name, id} <- read_event(req, opts),
          {:ok, package} <- lookup_package(name),
-         {:ok, entries} <- read_recipient_list(req),
+         {:ok, entries} <- read_recipient_list(req, opts),
          {:ok, content_type} <- pick_content_type(req, package, entries),
          {:ok, granted} <- bound_expires(req, package, opts) do
       {:ok,
@@ -391,10 +391,14 @@ defmodule SIP.Session.Notifier do
   # `nil` — not `[]` — is "this SUBSCRIBE is not a list subscription": a watcher
   # may legitimately send a list that names nobody, and it still gets a list
   # NOTIFY, empty.
-  defp read_recipient_list(req) do
+  #
+  # A refresh need not carry the list again (RFC 5367): it refreshes the list
+  # the initial SUBSCRIBE named, which the caller hands over as `:list_entries`.
+  # One that does carry a list replaces it.
+  defp read_recipient_list(req, opts) do
     case SIP.Msg.Ops.recipient_list(req) do
       :none ->
-        {:ok, nil}
+        {:ok, Keyword.get(opts, :list_entries)}
 
       {:ok, entries} ->
         {:ok, entries}
@@ -577,7 +581,7 @@ defmodule SIP.Session.Notifier do
   def do_accept_subscription(sip_ctx = %SIP.Context{}, opts) when is_list(opts) do
     req = stored_subscribe!(sip_ctx)
 
-    case negotiate(req, opts) do
+    case negotiate(req, held_list(sip_ctx, opts)) do
       {:ok, negotiated} ->
         accept(sip_ctx, req, negotiated, opts)
 
@@ -655,6 +659,20 @@ defmodule SIP.Session.Notifier do
     case SIP.Context.appdata_get(sip_ctx, :subscription) do
       %SIP.Subscription{} = held -> Map.fetch!(held, field) || fresh
       _first -> fresh
+    end
+  end
+
+  # The list a refresh keeps when it does not repeat it: a refresh sent without
+  # its body is the same list subscription, not an ordinary one naming nobody —
+  # read as the latter, it answered a full-state NOTIFY with no resource in it,
+  # and the watcher's roster emptied at its first refresh.
+  defp held_list(sip_ctx, opts) do
+    case SIP.Context.appdata_get(sip_ctx, :subscription) do
+      %SIP.Subscription{list_uri: uri, list_entries: entries} when is_binary(uri) ->
+        Keyword.put(opts, :list_entries, entries)
+
+      _first_or_not_a_list ->
+        opts
     end
   end
 
@@ -833,8 +851,7 @@ defmodule SIP.Session.Notifier do
   # instance in the terminated state rather than left out: a resource absent from
   # the manifest is one the watcher goes on waiting for.
   defp list_part(_sub, uri, nil) do
-    {:ok,
-     %SIP.Presence.Rlmi.Resource{uri: uri, instances: [SIP.Presence.Rlmi.unserved(uri)]}}
+    {:ok, %SIP.Presence.Rlmi.Resource{uri: uri, instances: [SIP.Presence.Rlmi.unserved(uri)]}}
   end
 
   defp list_part(sub, uri, doc) do
@@ -848,7 +865,8 @@ defmodule SIP.Session.Notifier do
           instances: [%SIP.Presence.Rlmi.Instance{id: id, state: :active, cid: cid}]
         }
 
-        {:ok, resource, %{"Content-ID" => "<" <> cid <> ">", contenttype: sub.content_type, data: body}}
+        {:ok, resource,
+         %{"Content-ID" => "<" <> cid <> ">", contenttype: sub.content_type, data: body}}
 
       {:error, reason} ->
         # One buddy's document is unwritable; the other buddies' are not. Dropping
