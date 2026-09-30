@@ -66,6 +66,8 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @participant_rtp 0
   # the default mosaic and the default sidebar (decision 6b)
   @default_mosaic 0
+  # SetParticipantDisplayName on every mosaic (mcu.ex has the same constant)
+  @all_mosaics -1
   @default_sidebar 0
 
   # Total conversation: audio, video and text. Anything else offered (an
@@ -191,6 +193,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          conf_id: conf.conf_id,
          part_ref: participant.ref,
          part_id: part_id,
+         # what the mosaic shows under an extra video stream of this leg
+         name: participant.name,
+         # video sections beyond the first (UNIFIED-PLAN E1): section key (its
+         # a=mid, or its position) → %{role:, source_id:}. A role is never reused.
+         extra_videos: %{},
          # medias requested by the scenario, capped to what this increment answers
          # what this leg answers: what the scenario asked for, intersected with what the
          # conference serves (§8.4 `medias`). Dropping a media from the conference is
@@ -295,9 +302,22 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # re-read the profile: it is the conference's value *at answer time* that
          # this leg keeps for its life (§8.3)
          state = %{state | video: conf.video},
-         {:ok, state} <- setup_local_security(state, descs),
-         {:ok, state, negotiated} <- open_receive_plane(state, conf, descs),
-         :ok <- ensure_any_media(negotiated) do
+         # a section offered with port 0 is declined or withdrawn (RFC 3264 §6,
+         # §8.2): it opens nothing, and the answer rejects it with port 0
+         descs = index_sections(descs),
+         live = Enum.reject(descs, &withdrawn?/1),
+         # video sections beyond the first are extra streams of this leg (E1)
+         extras = extra_video_sections(state, live),
+         primary = live -- extras,
+         {:ok, state} <- setup_local_security(state, primary),
+         {:ok, state, negotiated} <- open_receive_plane(state, conf, primary),
+         :ok <- ensure_any_media(negotiated),
+         {:ok, state, extra_negs} <- open_extra_videos(state, conf, extras) do
+      # a media this renegotiation no longer carries stops on the media server,
+      # or it keeps receiving what the answer declares refused
+      state = if renegotiation?, do: stop_withdrawn(state, negotiated), else: state
+      state = delete_withdrawn_videos(state, extra_negs)
+
       answer =
         Sdp.build(%{
           ip: media_ip(state),
@@ -311,7 +331,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           medias:
             descs
             |> Enum.reject(&omit_from_answer?(state, negotiated, &1))
-            |> Enum.map(&answer_or_reject(state, negotiated, &1))
+            |> Enum.map(&answer_section(state, negotiated, {extras, extra_negs}, &1))
         })
 
       state = %{state | negotiated: negotiated, status: :answered}
@@ -456,7 +476,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                media_int(desc.type),
                ice.ufrag,
                ice.pwd,
-               @role_main
+               role_of(desc)
              ]) do
           :ok -> {:cont, :ok}
           err -> {:halt, err}
@@ -691,7 +711,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
            rpc(state, "StartReceiving", start_receiving_args(state, m, %{}, %{}, profile)),
          {:ok, ip} <- announced_ip(state, returned),
          :ok <- set_remote_security(state, m, desc) do
-      {:ok, %{state | receiving: [desc.type | state.receiving], media_ip: ip},
+      {:ok, %{state | receiving: add_media(state.receiving, desc.type), media_ip: ip},
        %{
          transport: :sctp,
          rec_port: rec_port,
@@ -760,14 +780,14 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         # Our own codec capability, pushed BEFORE StartReceiving because that is
         # when the negotiator reads it (§16.3.4 (a)): sent after, it would
         # negotiate against an empty map and announce the server's defaults.
-        push_local_codec_props(state, m, media)
+        push_local_codec_props(state, m, media, role_of(desc))
 
         with {:ok, state, profile} <- leg_profile(state, desc),
              {:ok, [rec_port | returned]} <-
                rpc(
                  state,
                  "StartReceiving",
-                 start_receiving_args(state, m, rtp_map, offer, profile)
+                 start_receiving_args(state, m, rtp_map, offer, profile, role_of(desc))
                ),
              {:ok, ip} <- announced_ip(state, returned),
              :ok <- set_remote_security(state, m, desc),
@@ -796,7 +816,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
             # (see `keep_answerable/4`). Decline the media rather than answer a codec
             # the caller cannot match — and close the receive plane we just opened, or
             # the server holds a port for a media the answer says is off.
-            void_rpc(state, "StopReceiving", [state.conf_id, state.part_id, m, @role_main])
+            void_rpc(state, "StopReceiving", [state.conf_id, state.part_id, m, role_of(desc)])
             :skip
           else
             neg =
@@ -823,7 +843,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
             {
               :ok,
-              %{state | receiving: [media | state.receiving], media_ip: ip},
+              %{state | receiving: add_media(state.receiving, media), media_ip: ip},
               # decided once, here, from the payload type we will actually send on: the
               # answer states that profile and the encoder is configured with it, so the
               # two cannot drift apart
@@ -886,7 +906,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # capability the mixer exceeds, which is the H.264 `profile-level-id` incident
   # transposed. Nothing to say for H.264 (its profile comes from the offer) nor
   # for VP8 (no parameter).
-  defp push_local_codec_props(state, m, :video) do
+  defp push_local_codec_props(state, m, :video, role) do
     with {width, height} <- Vocabulary.size_dimensions(state.video.size),
          level when is_integer(level) <- Sdp.av1_level_idx(width, height, state.video.fps) do
       void_rpc(state, "SetRTPProperties", [
@@ -894,14 +914,14 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         state.part_id,
         m,
         %{"codec.av1.level-idx" => Integer.to_string(level)},
-        @role_main
+        role
       ])
     else
       _ -> :ok
     end
   end
 
-  defp push_local_codec_props(_state, _m, _media), do: :ok
+  defp push_local_codec_props(_state, _m, _media, _role), do: :ok
 
   # ── the one thing kelixip checks in the server's verdict (§6.3 rule 12) ──────
   #
@@ -958,7 +978,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         {{:dtls, setup, hash, fingerprint}, _} ->
           [
             {"SetRemoteCryptoDTLS",
-             [@role_main, peer_setup(setup) |> to_string(), hash, fingerprint]}
+             [role_of(desc), peer_setup(setup) |> to_string(), hash, fingerprint]}
           ]
 
         {_, %{suite: suite, peer_key: peer_key}} ->
@@ -968,7 +988,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           # argument the MCU API asks for: `(iiissii)`. Sending six was the one arity
           # the server has no format string for (7 with role+rank, or the legacy 5
           # without either), so it answered a parse fault and the call became a 500.
-          [{"SetRemoteCryptoSDES", [suite, peer_key, @role_main, @sdes_key_rank]}]
+          [{"SetRemoteCryptoSDES", [suite, peer_key, role_of(desc), @sdes_key_rank]}]
 
         _ ->
           []
@@ -979,7 +999,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     ice_calls =
       case {desc.ice, state.local_ice} do
         {%{ufrag: ufrag, pwd: pwd}, %{}} ->
-          [{"SetRemoteSTUNCredentials", [ufrag, pwd, @role_main]}]
+          [{"SetRemoteSTUNCredentials", [ufrag, pwd, role_of(desc)]}]
 
         _ ->
           []
@@ -1026,7 +1046,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         state.part_id,
         m,
         props,
-        @role_main
+        role_of(desc)
       ])
     end
   end
@@ -1234,8 +1254,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       end
     end)
     |> case do
-      {:ok, state} -> join_mixer(state)
-      err -> err
+      {:ok, state} ->
+        with {:ok, state} <- join_mixer(state), do: join_extra_videos(state)
+
+      err ->
+        err
     end
   end
 
@@ -1245,7 +1268,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     with :ok <- set_codec(state, media, neg),
          :ok <-
            void_rpc(state, "StartSending", start_sending_args(state, media, ip, port, neg)) do
-      {:ok, %{state | sending: [media | state.sending]}}
+      {:ok, %{state | sending: add_media(state.sending, media)}}
     end
   end
 
@@ -1332,11 +1355,13 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # `profile` is positional and LAST in both calls (§6.7 bis), and omitted when
   # this leg has none to ask for: the RPC is then byte-for-byte the one a
   # controller that never heard of profiles makes.
-  defp start_receiving_args(state, m, rtp_map, offer, nil),
-    do: [state.conf_id, state.part_id, m, rtp_map, @role_main, @proto_rtp, offer]
+  defp start_receiving_args(state, m, rtp_map, offer, profile, role \\ @role_main)
 
-  defp start_receiving_args(state, m, rtp_map, offer, profile),
-    do: start_receiving_args(state, m, rtp_map, offer, nil) ++ [profile]
+  defp start_receiving_args(state, m, rtp_map, offer, nil, role),
+    do: [state.conf_id, state.part_id, m, rtp_map, role, @proto_rtp, offer]
+
+  defp start_receiving_args(state, m, rtp_map, offer, profile, role),
+    do: start_receiving_args(state, m, rtp_map, offer, nil, role) ++ [profile]
 
   defp start_sending_args(state, media, ip, port, neg) do
     args = [
@@ -2055,6 +2080,199 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # Stop the planes then delete the participant. Best effort throughout: this runs
   # on the call-end path (and on a crash), where a failed RPC must not prevent the
   # rest of the cleanup.
+  defp withdrawn?(desc), do: Map.get(desc, :port) == 0
+
+  defp role_of(desc), do: Map.get(desc, :role, @role_main)
+
+  defp index_sections(descs),
+    do: descs |> Enum.with_index() |> Enum.map(fn {desc, i} -> Map.put(desc, :index, i) end)
+
+  # The key of a video section across renegotiations: its a=mid, which a JSEP
+  # peer keeps for the life of the transceiver; its position otherwise.
+  defp section_key(desc), do: Map.get(desc, :mid) || "#" <> Integer.to_string(desc.index)
+
+  # Every answerable RTP video section after the first one. The first stays the
+  # camera, role 0, on the path every other leg takes.
+  defp extra_video_sections(state, live) do
+    live
+    |> Enum.filter(&(&1.type == :video and answerable?(&1, state.medias)))
+    |> Enum.drop(1)
+  end
+
+  defp open_extra_videos(state, conf, extras) do
+    Enum.reduce_while(extras, {:ok, state, %{}}, fn desc, {:ok, st, acc} ->
+      case open_extra_video(st, conf, desc) do
+        {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.index, neg)}}
+        {:skip, st} -> {:cont, {:ok, st, acc}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # SDES keys are kept per media type, and an extra stream would need its own:
+  # an SDES-only extra section is declined. The browsers that offer several
+  # videos key them with DTLS, whose fingerprint is server-wide.
+  defp open_extra_video(state, conf, desc) do
+    if sdes_offered?(desc) and not match?({:dtls, _, _, _}, desc.crypto) do
+      Logger.warning(
+        module: __MODULE__,
+        message: "conference #{state.conf_uid}: extra video section without DTLS declined"
+      )
+
+      {:skip, state}
+    else
+      key = section_key(desc)
+
+      with {:ok, state, stream} <- ensure_video_stream(state, key) do
+        desc = Map.put(desc, :role, stream.role)
+
+        with :ok <- extra_local_ice(state, desc) do
+          case open_receive(state, conf, desc) do
+            {:ok, state, neg} ->
+              {:ok, state, Map.merge(neg, %{role: stream.role, source_id: stream.source_id})}
+
+            :skip ->
+              {:skip, delete_video_stream(state, key)}
+
+            {:error, _} = err ->
+              err
+          end
+        end
+      end
+    end
+  end
+
+  defp ensure_video_stream(state, key) do
+    case Map.fetch(state.extra_videos, key) do
+      {:ok, stream} ->
+        {:ok, state, stream}
+
+      :error ->
+        case rpc(state, "CreateVideoStream", [state.conf_id, state.part_id]) do
+          {:ok, [role, source_id | _]} ->
+            stream = %{role: role, source_id: source_id, joined: false}
+            {:ok, %{state | extra_videos: Map.put(state.extra_videos, key, stream)}, stream}
+
+          {:ok, other} ->
+            {:error, {:bad_create_video_stream, other}}
+
+          {:error, _} = err ->
+            err
+        end
+    end
+  end
+
+  defp extra_local_ice(%{local_ice: %{ufrag: ufrag, pwd: pwd}} = state, %{ice: %{}} = desc),
+    do:
+      void_rpc(state, "SetLocalSTUNCredentials", [
+        state.conf_id,
+        state.part_id,
+        media_int(:video),
+        ufrag,
+        pwd,
+        role_of(desc)
+      ])
+
+  defp extra_local_ice(_state, _desc), do: :ok
+
+  # A stream whose section is gone from the offer, or declined in it, leaves the
+  # media server: its slot frees itself there.
+  defp delete_withdrawn_videos(state, extra_negs) do
+    live_keys = extra_negs |> Map.values() |> Enum.map(& &1.role)
+
+    state.extra_videos
+    |> Enum.reject(fn {_key, stream} -> stream.role in live_keys end)
+    |> Enum.reduce(state, fn {key, _stream}, st -> delete_video_stream(st, key) end)
+  end
+
+  defp delete_video_stream(state, key) do
+    case Map.fetch(state.extra_videos, key) do
+      {:ok, stream} ->
+        void_rpc(state, "DeleteVideoStream", [state.conf_id, state.part_id, stream.role])
+        %{state | extra_videos: Map.delete(state.extra_videos, key)}
+
+      :error ->
+        state
+    end
+  end
+
+  # Decided 2026-09-30 (plan §9): mosaic 0, as the camera, named after the
+  # participant. The media server never places an extra stream by itself.
+  defp join_extra_videos(state) do
+    state.extra_videos
+    |> Enum.reject(fn {_key, stream} -> stream.joined end)
+    |> Enum.reduce_while({:ok, state}, fn {key, stream}, {:ok, st} ->
+      with :ok <-
+             void_rpc(st, "AddMosaicParticipant", [st.conf_id, @default_mosaic, stream.source_id]),
+           :ok <-
+             void_rpc(st, "SetParticipantDisplayName", [
+               st.conf_id,
+               @all_mosaics,
+               stream.source_id,
+               "#{st.name} (écran)",
+               0
+             ]) do
+        pin_in_vad(st, stream.source_id)
+        stream = %{stream | joined: true}
+        {:cont, {:ok, %{st | extra_videos: Map.put(st.extra_videos, key, stream)}}}
+      else
+        err -> {:halt, err}
+      end
+    end)
+  end
+
+  # A section this offer does not open is declined with port 0 — never answered
+  # with the negotiation of another section of the same type, which gave two
+  # sections the same port.
+  # A stream other than the camera is never elected speaker: in a VAD conference
+  # its slot would go to the next one who speaks. It stays in the slot it landed
+  # in, fixed there.
+  defp pin_in_vad(state, source_id) do
+    with {:ok, %{vad: vad}} when vad != 0 <- fetch_conference(state.conf_uid),
+         {:ok, positions} <- rpc(state, "GetMosaicPositions", [state.conf_id, @default_mosaic]),
+         slot when is_integer(slot) <- Enum.find_index(positions, &(&1 == source_id)) do
+      void_rpc(state, "SetMosaicSlot", [state.conf_id, @default_mosaic, slot, source_id])
+    else
+      _ -> :ok
+    end
+  end
+
+  defp answer_section(state, negotiated, {extras, extra_negs}, desc) do
+    cond do
+      withdrawn?(desc) ->
+        reject_spec(desc)
+
+      Map.has_key?(extra_negs, desc.index) ->
+        # received only (UNIFIED-PLAN §4.2): the mosaic goes out on the camera
+        state
+        |> answer_spec(desc, Map.fetch!(extra_negs, desc.index))
+        |> Map.put(:direction, extra_direction(Map.get(desc, :direction, :sendrecv)))
+
+      Enum.any?(extras, &(&1.index == desc.index)) ->
+        reject_spec(desc)
+
+      true ->
+        answer_or_reject(state, negotiated, desc)
+    end
+  end
+
+  defp extra_direction(offered) when offered in [:sendrecv, :sendonly], do: :recvonly
+  defp extra_direction(_offered), do: :inactive
+
+  defp add_media(list, media), do: if(media in list, do: list, else: [media | list])
+
+  defp stop_withdrawn(state, negotiated) do
+    Enum.reduce(Map.keys(state.negotiated) -- Map.keys(negotiated), state, fn media, st ->
+      if media in st.sending,
+        do: void_rpc(st, "StopSending", [st.conf_id, st.part_id, media_int(media), @role_main])
+
+      if media in st.receiving,
+        do: void_rpc(st, "StopReceiving", [st.conf_id, st.part_id, media_int(media), @role_main])
+
+      %{st | sending: List.delete(st.sending, media), receiving: List.delete(st.receiving, media)}
+    end)
+  end
+
   defp teardown(state) do
     for media <- state.sending do
       void_rpc(state, "StopSending", [state.conf_id, state.part_id, media_int(media), @role_main])
@@ -2083,9 +2301,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          rec_port: neg.rec_port,
          send: neg.remote,
          dtmf: Map.get(neg, :dtmf, false)
-       }}
+       }
+       |> add_extra_count(media, state)}
     end)
   end
+
+  # How many tiles this leg adds beyond its camera: the layout counts sources,
+  # not participants (UNIFIED-PLAN E1).
+  defp add_extra_count(info, :video, state),
+    do: Map.put(info, :extra_videos, Enum.count(state.extra_videos, fn {_k, s} -> s.joined end))
+
+  defp add_extra_count(info, _media, _state), do: info
 
   # What the mixer ENCODES towards this leg, and not the first codec we proposed: the
   # two part company as soon as the server's verdict or the conference's preference

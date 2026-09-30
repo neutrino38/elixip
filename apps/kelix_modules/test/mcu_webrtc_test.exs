@@ -60,6 +60,20 @@ defmodule Kelix.Mod.McuWebrtcTest do
                          "a=setup:actpass\r\n" <>
                          "a=sctp-port:5000\r\n"
 
+  # A browser sharing its screen next to its camera, in `max-compat` (UNIFIED-PLAN
+  # E1): a second m=video, with a mid and a port of its own, right after the first.
+  @screen_section (fn ->
+                     [_, video] = Regex.run(~r/(m=video .*?)(?=m=text)/s, @chrome_offer)
+
+                     video
+                     |> String.replace("m=video 46093", "m=video 46095")
+                     |> String.replace("a=mid:1", "a=mid:2")
+                   end).()
+
+  @two_video_offer String.replace(@chrome_offer, "m=text", @screen_section <> "m=text",
+                     global: false
+                   )
+
   # The fmtp a media server that arbitrated the offer returns for the payload types it
   # keeps (§16.3, `StartReceiving`'s third return value). Nothing unproposed is ever
   # accepted — which is what a real negotiator does, and what makes the audio case the
@@ -257,7 +271,15 @@ defmodule Kelix.Mod.McuWebrtcTest do
        transport:
          TestStub.transport(
            self(),
-           %{"StartReceiving" => verdict} |> Map.merge(ws_override) |> Map.merge(dc_override)
+           %{"StartReceiving" => verdict}
+           |> Map.merge(ws_override)
+           |> Map.merge(dc_override)
+           |> Map.merge(
+             if(context[:positions],
+               do: %{"GetMosaicPositions" => {:ok, context[:positions]}},
+               else: %{}
+             )
+           )
          ),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
@@ -338,6 +360,96 @@ defmodule Kelix.Mod.McuWebrtcTest do
       line, [current | rest] -> [current ++ [line] | rest]
     end)
     |> Enum.reverse()
+  end
+
+  describe "a second video section is an extra stream (UNIFIED-PLAN E1)" do
+    test "it gets its own stream on the media server, received only", ctx do
+      conn = leg(ctx.did)
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, @two_video_offer)
+
+      assert_received {:rpc, "CreateVideoStream", [_conf, _part]}
+      assert_received {:rpc, "StartReceiving", [_conf, _part, 1, _map, 2 | _rest]}
+
+      videos = answer |> sections() |> Enum.filter(&String.starts_with?(hd(&1), "m=video"))
+      assert length(videos) == 2
+      [camera, screen] = videos
+      assert "a=mid:1" in camera
+      assert "a=sendrecv" in camera
+      assert "a=mid:2" in screen
+      assert "a=recvonly" in screen
+    end
+
+    test "at the ACK it takes a slot of mosaic 0, named after the participant", ctx do
+      conn = leg(ctx.did)
+      assert {:ok, _answer} = Adapter.set_remote_offer(conn, @two_video_offer)
+      TestStub.rpc_order()
+
+      assert {:ok, _} = Adapter.attach(conn)
+
+      assert_received {:rpc, "AddMosaicParticipant", [_conf, 0, 731]}
+      assert_received {:rpc, "SetParticipantDisplayName", [_conf, -1, 731, name, 0]}
+      assert name =~ "(écran)"
+    end
+
+    # The conference is in VAD: a screen is never the speaker, so it stays pinned in
+    # the slot it landed in.
+    @tag positions: [7, 731, -2, -2]
+    test "in a VAD conference the stream is pinned where it landed", ctx do
+      conn = leg(ctx.did)
+      assert {:ok, _answer} = Adapter.set_remote_offer(conn, @two_video_offer)
+      TestStub.rpc_order()
+
+      assert {:ok, _} = Adapter.attach(conn)
+      assert_received {:rpc, "SetMosaicSlot", [_conf, 0, 1, 731]}
+    end
+
+    test "a renegotiation keeps the stream, and withdrawing it deletes it", ctx do
+      conn = leg(ctx.did)
+      assert {:ok, _} = Adapter.set_remote_offer(conn, @two_video_offer)
+      TestStub.rpc_order()
+
+      assert {:ok, _} = Adapter.set_remote_offer(conn, @two_video_offer)
+      refute_received {:rpc, "CreateVideoStream", _params}
+      refute_received {:rpc, "DeleteVideoStream", _params}
+
+      withdrawn = String.replace(@two_video_offer, "m=video 46095", "m=video 0")
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, withdrawn)
+
+      assert_received {:rpc, "DeleteVideoStream", [_conf, _part, 2]}
+      assert answer =~ ~r/m=video 0 /
+    end
+
+    # No codec in common on the extra section: declined with port 0, its stream
+    # deleted — never answered with the camera's negotiation.
+    test "an extra section with no common codec is declined on its own", ctx do
+      unknown =
+        "m=video 46095 UDP/TLS/RTP/SAVPF 127\r\n" <>
+          "c=IN IP4 0.0.0.0\r\n" <>
+          "a=rtpmap:127 FOO/90000\r\n" <>
+          "a=mid:2\r\n" <>
+          "a=ice-ufrag:mx0p\r\n" <>
+          "a=ice-pwd:xstrY7K5+U2iAZlJGRPUzyq8\r\n" <>
+          "a=fingerprint:sha-256 C6:8E:44:42:79:01:0C:E9:BF:75:AD:27:04:B8:D8:6B:CC:0B:13:F9:4C:8A:5F:4F:29:ED:C2:74:68:67:54:09\r\n" <>
+          "a=setup:actpass\r\n" <>
+          "a=rtcp-mux\r\n" <>
+          "a=sendrecv\r\n"
+
+      offer = String.replace(@chrome_offer, "m=text", unknown <> "m=text", global: false)
+      conn = leg(ctx.did)
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, offer)
+
+      [_camera, extra] =
+        answer |> sections() |> Enum.filter(&String.starts_with?(hd(&1), "m=video"))
+
+      assert hd(extra) =~ ~r/^m=video 0 /
+      refute Enum.any?(extra, &(&1 == "a=mid:1"))
+    end
+
+    test "an offer with one video changes nothing", ctx do
+      conn = leg(ctx.did)
+      assert {:ok, _answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+      refute_received {:rpc, "CreateVideoStream", _params}
+    end
   end
 
   describe "a=mid (§6.3 rule 11 — JSEP RFC 8829 §5.3.1)" do

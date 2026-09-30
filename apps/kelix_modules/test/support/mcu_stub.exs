@@ -45,6 +45,9 @@ defmodule Kelix.Mcu.TestStub do
        [
          "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00"
        ]},
+    # `[role, sourceId]`: an extra video stream of the participant (UNIFIED-PLAN E1)
+    "CreateVideoStream" => {:ok, [2, 731]},
+    "DeleteVideoStream" => {:ok, []},
     "AddSidebarParticipant" => {:ok, []},
     "AddMosaicParticipant" => {:ok, []},
     "SendFPU" => {:ok, []},

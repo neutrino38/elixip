@@ -993,6 +993,23 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:rpc, "SetCompositionType", [42, 0, 0, 6]}, 2000
     end
 
+    # UNIFIED-PLAN E1: the layout counts video SOURCES. One leg sharing its screen
+    # next to its camera fills two tiles.
+    test "a leg with two videos counts as two tiles", ctx do
+      screen =
+        "m=video 40004 RTP/AVPF 99\r\n" <>
+          "a=rtpmap:99 H264/90000\r\n" <>
+          "a=fmtp:99 profile-level-id=42e01f;packetization-mode=1\r\n" <>
+          "a=sendonly\r\n"
+
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video <> screen))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+
+      assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 731]}, 2000
+      assert_receive {:rpc, "SetCompositionType", [42, 0, 6, 6]}, 2000
+    end
+
     test "an audio-only conference issues no mosaic RPC at all", ctx do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
@@ -1164,6 +1181,51 @@ defmodule Kelix.Mod.McuCallTest do
       # the ACK path returns early on an attached leg, so if the answer did not
       # re-arm, a resumed media would stay unwatched for good
       assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, ms, _role]} when ms > 0
+    end
+  end
+
+  describe "sections withdrawn and renegotiated (UNIFIED-PLAN E0)" do
+    # RFC 3264 §6 / §8.2: port 0 declines or withdraws a section. Opening it gave
+    # the section a live port in the answer, for a media the peer does not want.
+    test "a section offered with port 0 opens nothing and is declined", ctx do
+      offer = String.replace(@offer_video, "m=video 40002", "m=video 0")
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: offer))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      assert fields[:body] =~ ~r/m=video 0 /
+      refute_received {:rpc, "StartReceiving", [_conf, _part, 1 | _rest]}
+    end
+
+    test "a renegotiation that withdraws video stops it on the media server", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      part = joined_participant(ctx.uid)
+
+      TestStub.rpc_order()
+      offer = String.replace(@offer_video, "m=video 40002", "m=video 0")
+      assert {:ok, answer} = Conn.set_remote_offer(part.conn, offer)
+
+      assert answer =~ ~r/m=video 0 /
+      assert_received {:rpc, "StopSending", [_conf, _part, 1, 0]}
+      assert_received {:rpc, "StopReceiving", [_conf, _part, 1, 0]}
+      refute_received {:rpc, "StopReceiving", [_conf, _part, 0, 0]}
+    end
+
+    # The ACK of a renegotiation re-runs StartSending — it is what applies a new
+    # remote address — but the leg must not count its medias twice.
+    test "a renegotiated leg does not stack its medias", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      part = joined_participant(ctx.uid)
+
+      assert {:ok, _} = Conn.set_remote_offer(part.conn, @offer_video)
+      assert {:ok, _} = GenServer.call(part.conn, :attach)
+
+      state = :sys.get_state(part.conn)
+      assert Enum.sort(state.sending) == [:audio, :video]
+      assert Enum.sort(state.receiving) == [:audio, :video]
     end
   end
 

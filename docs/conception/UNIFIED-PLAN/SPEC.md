@@ -1,6 +1,7 @@
 # Flux vidéo multiples et BUNDLE : ce qu'elixip doit faire
 
-> Statut : **plan**. Rien n'est codé dans elixip. Branche `feat/unified-plan`.
+> Statut : **en cours**. E0 (côté conférence) et E1 sont codés et testés ;
+> E2, E3 et E4 restent à faire. Branche `feat/unified-plan`.
 >
 > Ce document est le lot 4 de la conception du serveur média :
 > `mediaserver/docs/conception/UNIFIED-PLAN/SPEC.md` (appelée « SPEC serveur »
@@ -81,10 +82,12 @@ toucher.
    BUNDLE, **toute section `bundle-only` arrive en port 0** : ce défaut devient
    bloquant, mais dans l'autre sens (§4.3).
 2. **MCU : après une renégociation, l'ACK rejoue tout l'attachement.**
-   `conn.ex:317` remet `status` à `:answered`. Le commentaire de `:319-322` dit
-   que « le chemin de l'ACK sort tôt sur une jambe attachée ». C'est faux :
-   l'ACK suivant repasse par `handle_call(:attach)` (`:345`), et rejoue
-   `SetCodec`, `StartSending` et `AddMosaicParticipant`.
+   `conn.ex:317` remet `status` à `:answered`, et l'ACK suivant repasse par
+   `handle_call(:attach)`. Rejouer `StartSending` est **nécessaire** : c'est ce
+   qui applique une nouvelle adresse distante. Le serveur dédoublonne
+   `AddMosaicParticipant` et `AddSidebarParticipant`. Le seul défaut réel : les
+   listes `receiving` et `sending` se dupliquaient, et le démontage envoyait
+   deux `StopSending` par média.
 3. **MCU : une renégociation tire une nouvelle clé SDES** (`conn.ex:504`).
 4. **JSR-309 : une réoffre côté UAS tire de nouveaux identifiants ICE.**
    `setup_local_security_for_offer` (`MediaServerMendoozeConn.ex:1948`) ne
@@ -110,11 +113,14 @@ Chaque section média de l'offre a une **clé de flux** `{type, role}` :
 - l'audio et le texte gardent une seule section, rôle 0. Une seconde section
   audio ou texte reste refusée, comme aujourd'hui.
 
-La jambe tient une table `mid → {type, role}`. Sans `a=mid` (vieux endpoint
-SIP), la position de la section dans l'offre sert de clé. Les maps d'état
-passent de `media` à `{media, role}` : `negotiated`, `local_ports`, `negs`,
-`accepted`, `proposed_recv`, `local_sdes`, `watchdogs`, `connected`,
-`timed_out`.
+La jambe tient une table des flux supplémentaires, `extra_videos` : clé de
+section (`a=mid`, sinon la position dans l'offre) → `{role, source_id}`.
+L'état existant (`negotiated`, `local_sdes`, `receiving`, `sending`) reste
+indexé par type : il décrit les sections de rôle 0, sur le chemin de toutes
+les autres jambes. Le rôle d'une section voyage avec elle, et les RPC de
+réception et de sécurité le lisent au lieu du 0 en dur. Un flux ≥ 2 est d'une
+autre nature — reçu seulement, sans codec d'émission, source de mosaïque — et
+cette forme laisse intact le chemin des appels d'aujourd'hui.
 
 Exemple, l'offre d'un navigateur caméra + écran :
 
@@ -290,13 +296,23 @@ appels et leur ordre, et la réponse SDP.
 
 | Lot | Contenu | Attend côté serveur | Preuve |
 |---|---|---|---|
-| **E0** | Corrections préalables : défauts 1 (port 0 en MCU), 2 (ACK après renégociation), 6 (retrait en renégociation). Clé `{type, role}` dans les deux adaptateurs, rôle 0 partout : aucun changement visible. | rien | toute la suite reste verte ; un test par défaut corrigé |
-| **E1** | Conférence, N vidéos sans BUNDLE (§4.2) : `CreateVideoStream`, `recvonly`, slot, nom, mise en page par source, `DeleteVideoStream` en renégociation. | lot 1 (**fait**) | tests bouchon ; recette : Chrome en `max-compat`, caméra + écran, deux slots (scénario 5 de la SPEC serveur §7) |
+| **E0** | Corrections préalables côté conférence : défauts 1 (port 0), 2 (listes dupliquées), 6 (retrait en renégociation). **Fait.** | rien | `mcu_call_test.exs`, « sections withdrawn and renegotiated » |
+| **E1** | Conférence, N vidéos sans BUNDLE (§4.2) : `CreateVideoStream`, `recvonly`, slot épinglé en VAD, nom, mise en page par source, `DeleteVideoStream` en renégociation. **Fait.** | lot 1 (**fait**) | `mcu_webrtc_test.exs`, « a second video section is an extra stream » ; `mcu_call_test.exs`, « a leg with two videos counts as two tiles ». Recette : Chrome en `max-compat`, caméra + écran, deux slots (scénario 5 de la SPEC serveur §7) |
 | **E2** | Conférence, BUNDLE (§4.3) : SDP, `bundle=1`, `mid`, `remote-ssrc`, extmap `sdes:mid`. | lot 2 | tests SDP et bouchon ; recette : Chrome et Firefox par défaut (scénarios 1 à 3, 7, 8) |
 | **E3** | JSR-309, N vidéos et BUNDLE (§4.4), défauts 4 et 5. | lots 2 et 3 | tests `jsr309_fake_server` ; recette : B2BUA Chrome ↔ Chrome (scénario 6) |
 | **E4** | BFCP pour endpoint SIP (§4.5). | lot 1b (**fait**) | tests bouchon ; recette réelle (scénarios 9 et 10) reportée faute d'endpoint |
 
-E0, E1 et E4 peuvent commencer tout de suite. E4 est indépendant des autres.
+E2, E3 et E4 peuvent commencer : les lots 2 et 3 du serveur sont faits. E4 est
+indépendant des autres.
+
+Limites d'E1, à reprendre si le besoin se confirme :
+
+- une section supplémentaire chiffrée en SDES seul est déclinée : les clés
+  SDES sont tenues par type de média. Les navigateurs chiffrent en DTLS ;
+- le nom est « nom (écran) » ; `a=content` n'est pas encore lu, et le script
+  n'a pas encore de moyen de le remplacer ;
+- l'épinglage en VAD est posé par la jambe, pas par le registre : il n'est
+  pas rejoué après un redémarrage du serveur média (`replay_slots/2`).
 
 Chaque lot met à jour la documentation qu'il rend fausse :
 `docs/design/DESIGN-MCU.md` (§ BUNDLE, hors périmètre BFCP),

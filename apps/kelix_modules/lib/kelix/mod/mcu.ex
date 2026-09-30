@@ -2429,10 +2429,14 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # One tile per video SOURCE: a participant sharing its screen next to its
+  # camera takes two (UNIFIED-PLAN E1).
   defp video_participants(conf) do
     conf
     |> Conference.participants()
-    |> Enum.count(&(&1.state == :connected and Map.has_key?(&1.medias, :video)))
+    |> Enum.filter(&(&1.state == :connected and Map.has_key?(&1.medias, :video)))
+    |> Enum.map(&(1 + Map.get(&1.medias.video, :extra_videos, 0)))
+    |> Enum.sum()
   end
 
   # ── MCU restart (§9.2) and orphan collection (§9.4) ───────────────────────────
