@@ -962,6 +962,37 @@ defmodule Kelix.PresenceScriptTest do
     end
   end
 
+  # A refresh as a UA really sends it: inside the dialog, to the remote target —
+  # our own Contact, which names no user. The presentity is the initial
+  # SUBSCRIBE's; reading it off this Request-URI answered 404 to every refresh
+  # (Trix → kelixip, 2026-09-30), and the watcher lost the presence for good.
+  describe "a refresh sent to our Contact" do
+    setup do
+      serve_registrar_domain()
+    end
+
+    test "is granted, and the watcher still watches the same presentity", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      submit(pid, dialog, subscribe())
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      contact = %SIP.Uri{
+        domain: "[2001:db8::1]",
+        port: 8443,
+        params: %{"transport" => "wss"}
+      }
+
+      submit(pid, dialog, Map.put(subscribe(expires: 1800), :ruri, contact))
+      assert_receive {:replied, 200, "OK", fields, _}, 1000
+      assert fields[:expires] == 1800
+      assert_receive {:notified, _, _}, 1000
+      assert [_watcher] = Presence.watchers(@domain, @presentity)
+    end
+  end
+
   # ── the list subscription's own fixtures ─────────────────────────────────────
 
   defp bob_uri, do: "sip:#{@presentity}@#{@domain}"

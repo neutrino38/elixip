@@ -93,12 +93,12 @@ defmodule Kelix.PresenceSubscribe do
   # module reports a state for, a conference room: subscribing to one nobody
   # provisioned is 404, not an empty state a watcher would wait on for an hour.
   #
-  # The SUBSCRIBE itself needs no carrying around: on_events stores the inbound
-  # request and last_uas_req() reads it back in any later state.
+  # The presentity is not read off the Request-URI: a refresh comes back through
+  # here, and its Request-URI is our own Contact, which names nobody. Reading it
+  # answered 404 to every refresh, and the watcher lost the contact's presence
+  # half an hour after subscribing. `presentity_aor/1` knows which one to read.
   state authorize do
-    req = last_uas_req()
-
-    if Kelix.Mod.Presence.exists?(sip_ctx, SIP.Msg.Ops.target_aor(req)) do
+    if Kelix.Mod.Presence.exists?(sip_ctx, SIP.Session.Notifier.presentity_aor(sip_ctx)) do
       goto(subscribe, "presentity exists")
     else
       reject_subscription(404, "Not Found")

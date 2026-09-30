@@ -601,10 +601,10 @@ defmodule SIP.Session.Notifier do
         event_id: negotiated.event_id,
         package: package,
         content_type: content_type,
-        list_uri: negotiated.list_uri,
+        list_uri: held_or(sip_ctx, :list_uri, negotiated.list_uri),
         list_entries: negotiated.list_entries,
         body_encoding: negotiated.body_encoding,
-        presentity_uri: presentity_uri(req),
+        presentity_uri: held_or(sip_ctx, :presentity_uri, presentity_uri(req)),
         watcher_username: from_user,
         watcher_domain: from_domain,
         from_user: from_user,
@@ -644,6 +644,20 @@ defmodule SIP.Session.Notifier do
   # A refresh is the SAME subscription (RFC 6665 §4.1.2.2), and its NOTIFY count
   # goes on from where it was: a document version that fell back to 0 is one a
   # watcher discards as older than the last it saw (RFC 4235 §4.1.1).
+  # What a refresh keeps from the subscription it refreshes: the resource.
+  #
+  # The resource is named by the Request-URI of the INITIAL SUBSCRIBE (RFC 6665
+  # §4.1.2.1). A refresh is sent inside the dialog, to the remote target — our
+  # own Contact, `sip:192.0.2.1:8443;transport=wss`, which names no user — so
+  # reading it again from the refresh turns `sip:bob@example.com` into an IP
+  # address. Kept, not re-read.
+  defp held_or(sip_ctx, field, fresh) do
+    case SIP.Context.appdata_get(sip_ctx, :subscription) do
+      %SIP.Subscription{} = held -> Map.fetch!(held, field) || fresh
+      _first -> fresh
+    end
+  end
+
   defp continued_version(sip_ctx) do
     case SIP.Context.appdata_get(sip_ctx, :subscription) do
       %SIP.Subscription{version: version} -> version
@@ -857,6 +871,28 @@ defmodule SIP.Session.Notifier do
   end
 
   # ── Helpers ─────────────────────────────────────────────────────────────────
+
+  @doc """
+  The address-of-record the SUBSCRIBE this instance is serving is **for** — the
+  question a script asks before it lets anyone watch.
+
+  The initial SUBSCRIBE names it in its Request-URI (`SIP.Msg.Ops.target_aor/1`).
+  A refresh does not: it is sent to the remote target of the dialog, our own
+  Contact, which carries no user part. For a refresh the answer is therefore the
+  subscription's own presentity, the one the initial SUBSCRIBE named.
+
+  `nil` when neither names a user.
+  """
+  @spec presentity_aor(%SIP.Context{}) :: String.t() | nil
+  def presentity_aor(sip_ctx = %SIP.Context{}) do
+    case SIP.Context.appdata_get(sip_ctx, :subscription) do
+      %SIP.Subscription{presentity_uri: uri} when is_binary(uri) ->
+        SIP.Msg.Ops.target_aor(%{ruri: uri})
+
+      _first ->
+        SIP.Msg.Ops.target_aor(stored_subscribe!(sip_ctx))
+    end
+  end
 
   # The SUBSCRIBE this instance is serving. `auto_store/2` puts every inbound one
   # there — the initial request AND every refresh — which is the whole reason a
