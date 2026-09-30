@@ -174,7 +174,8 @@ defmodule SIP.Test.SbbPage do
   # ── The fan-out, end to end ─────────────────────────────────────────────────
 
   test "200 and 480: the sender gets the 200" do
-    devices(phone: [code: 200], desk: [code: 480])
+    # The 200 concludes at once, so the 480 must land first to be in `answers`.
+    devices(phone: [code: 200, delay: 100], desk: [code: 480])
     callid = inject_message()
 
     assert_receive {:outcome, :delivered, %{code: 200, served: served, answers: answers}}, 3_000
