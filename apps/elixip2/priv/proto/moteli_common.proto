@@ -13,8 +13,11 @@
 // - Codec ids are int32 carrying the media server's wire values (tables
 //   below), NOT proto enums: the codec vocabulary is append-only server-side
 //   and must not require a schema change. Structural enums (media type,
-//   protocol, role, mosaic, size, VAD) are proto enums whose numeric values
-//   ARE the wire values.
+//   protocol, mosaic, size, VAD) are proto enums whose numeric values ARE the
+//   wire values.
+// - A video role is an int32, not an enum: it is the index of the video
+//   stream in its participant or endpoint (0 main, 1 slides, >= 2 allocated
+//   by CreateVideoStream). MediaRole below only names 0 and 1.
 // - Object ids (conference, session, endpoint, ...) are uint32, allocated by
 //   the server. Failure is reported through Error, never through negative or
 //   zero ids (the XML-RPC "negative id" rule does not exist on the bus).
@@ -49,7 +52,7 @@ enum MediaProtocol {
   PROTO_SCTP = 5;
 }
 
-// MediaFrame::MediaRole
+// MediaFrame::MediaRole: the two fixed roles. Role fields are int32.
 enum MediaRole {
   ROLE_VIDEO_MAIN = 0;
   ROLE_VIDEO_SLIDES = 1;

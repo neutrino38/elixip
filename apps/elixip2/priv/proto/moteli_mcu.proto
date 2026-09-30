@@ -156,6 +156,9 @@ message CreateParticipantReq {
   ParticipantType type = 3;
   uint32 mosaic_id = 4;
   uint32 sidebar_id = 5;
+  // One shared transport for all the legs (BUNDLE, RFC 8843). Refused by the
+  // server until it implements it.
+  bool bundle = 6;
 }
 // -> CreatedResp (part_id)
 
@@ -168,6 +171,41 @@ message SetParticipantMosaicReq {
   uint32 conf_id = 1;
   uint32 part_id = 2;
   uint32 mosaic_id = 3;
+}
+
+// A video stream of role >= 2 (RTP participant): its own leg, its own mixer
+// source. Received only until SetVideoStreamMosaic gives it a mosaic.
+message CreateVideoStreamReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+}
+
+message CreateVideoStreamResp {
+  int32 role = 1;
+  uint32 source_id = 2; // to use wherever a mosaic verb takes a part_id
+}
+
+message DeleteVideoStreamReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  int32 role = 3; // >= 2
+}
+
+message SetVideoStreamMosaicReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  int32 role = 3;
+  int32 mosaic_id = 4; // -1 = none
+}
+
+message GetVideoStreamSourceReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  int32 role = 3;
+}
+
+message GetVideoStreamSourceResp {
+  uint32 source_id = 1; // role 0: the part_id
 }
 
 message SetParticipantSidebarReq {
@@ -238,7 +276,7 @@ message SetVideoCodecReq {
   // (h264.profile-level-id, h264.packetization-mode — explicit "0" forces the
   // software encoder).
   map<string, string> properties = 8;
-  MediaRole role = 9;
+  int32 role = 9;
 }
 
 message SetAudioCodecReq {
@@ -267,7 +305,7 @@ message SetRtpPropertiesReq {
   uint32 part_id = 2;
   MediaType media = 3;
   map<string, string> properties = 4;
-  MediaRole role = 5;
+  int32 role = 5;
 }
 
 message GetSupportedCodecsReq {
@@ -303,7 +341,7 @@ message StartReceivingReq {
   uint32 part_id = 2;
   MediaType media = 3;
   map<string, int32> rtp_map = 4; // PT (string) -> codec id
-  MediaRole role = 5;
+  int32 role = 5;
   MediaProtocol proto = 6;
   optional SdpOffer offer = 7;
   optional string profile = 8;
@@ -321,7 +359,7 @@ message StopReceivingReq {
   uint32 conf_id = 1;
   uint32 part_id = 2;
   MediaType media = 3;
-  MediaRole role = 4;
+  int32 role = 4;
 }
 
 // timeout_ms > 0 arms the inactivity watchdog, 0 disarms it.
@@ -330,7 +368,7 @@ message StartRtpTimeoutReq {
   uint32 part_id = 2;
   MediaType media = 3;
   uint32 timeout_ms = 4;
-  MediaRole role = 5;
+  int32 role = 5;
 }
 
 // send_ip "0.0.0.0" authorizes NAT latching for this leg.
@@ -341,7 +379,7 @@ message StartSendingReq {
   string send_ip = 4;
   uint32 send_port = 5;
   map<string, int32> rtp_map = 6;
-  MediaRole role = 7;
+  int32 role = 7;
   // Same profile as this leg's StartReceiving (see above).
   optional string profile = 8;
 }
@@ -350,7 +388,7 @@ message StopSendingReq {
   uint32 conf_id = 1;
   uint32 part_id = 2;
   MediaType media = 3;
-  MediaRole role = 4;
+  int32 role = 4;
 }
 
 // Switch a participant's text plane off RTP (media = MEDIA_TEXT).
@@ -403,7 +441,7 @@ message SetLocalCryptoSdesReq {
   MediaType media = 3;
   string suite = 4;
   string key = 5;
-  MediaRole role = 6;
+  int32 role = 6;
 }
 
 message SetRemoteCryptoSdesReq {
@@ -412,7 +450,7 @@ message SetRemoteCryptoSdesReq {
   MediaType media = 3;
   string suite = 4;
   string key = 5;
-  MediaRole role = 6;
+  int32 role = 6;
   uint32 key_rank = 7;
 }
 
@@ -426,7 +464,7 @@ message SetRemoteCryptoDtlsReq {
   uint32 conf_id = 1;
   uint32 part_id = 2;
   MediaType media = 3;
-  MediaRole role = 4;
+  int32 role = 4;
   string setup = 5; // peer's SDP setup: active | passive | actpass
   string hash = 6;
   string fingerprint = 7;
@@ -438,7 +476,7 @@ message SetLocalStunCredentialsReq {
   MediaType media = 3;
   string username = 4;
   string pwd = 5;
-  MediaRole role = 6;
+  int32 role = 6;
 }
 
 message SetRemoteStunCredentialsReq {
@@ -447,7 +485,7 @@ message SetRemoteStunCredentialsReq {
   MediaType media = 3;
   string username = 4;
   string pwd = 5;
-  MediaRole role = 6;
+  int32 role = 6;
 }
 
 // --- Players ---------------------------------------------------------------------
@@ -577,7 +615,7 @@ message McuParticipantMediaTimeout {
   string conf_tag = 2;
   uint32 part_id = 3;
   MediaType media = 4;
-  MediaRole role = 5;
+  int32 role = 5;
 }
 
 message McuParticipantMediaConnected {
@@ -585,7 +623,7 @@ message McuParticipantMediaConnected {
   string conf_tag = 2;
   uint32 part_id = 3;
   MediaType media = 4;
-  MediaRole role = 5;
+  int32 role = 5;
 }
 
 // Wire event codes stay append-only server-side (1 FPU, 2 doc sharing,

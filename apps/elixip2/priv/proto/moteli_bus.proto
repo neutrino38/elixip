@@ -138,6 +138,10 @@ message ControlRequest {
     StopDocSharingReq stop_doc_sharing = 72;
     SetDocSharingMosaicReq set_doc_sharing_mosaic = 73;
     UploadImageReq upload_image = 74;
+    CreateVideoStreamReq create_video_stream = 75;
+    DeleteVideoStreamReq delete_video_stream = 76;
+    SetVideoStreamMosaicReq set_video_stream_mosaic = 77;
+    GetVideoStreamSourceReq get_video_stream_source = 78;
 
     // JSR-309 plane (200-299) — point-to-point legs
     MediaSessionCreateReq media_session_create = 200;
@@ -252,6 +256,8 @@ message ControlResponse {
     CreatedResp create_player = 58;
     CreatedResp start_broadcaster = 66;
     CreatedResp start_publishing = 68;
+    CreateVideoStreamResp create_video_stream = 75;
+    GetVideoStreamSourceResp get_video_stream_source = 78;
 
     // JSR-309 plane (tags mirror the request's)
     CreatedResp media_session_create = 200;
