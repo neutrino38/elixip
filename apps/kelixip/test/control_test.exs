@@ -152,6 +152,51 @@ defmodule Kelix.ControlTest do
     end
   end
 
+  describe "chat rules" do
+    @chat_toml """
+    [[domain]]
+    name = "chat.example.com"
+
+    [[domain.chat]]
+    pattern = "mybot"
+    script = "mybot.exs"
+    idle_timeout = 3600
+
+    [[domain.chat]]
+    default = true
+    script = "p2p-chat.exs"
+
+    [[domain.call]]
+    default = true
+    script = "catchall.exs"
+    """
+
+    setup do
+      Kelix.Test.Fixtures.serve_domains(@chat_toml)
+      :ok
+    end
+
+    test "a chat rule carries its idle timeout, the default included; a call rule none" do
+      assert {:ok, d} = Control.domain("chat.example.com")
+      assert :chat in d.functions
+
+      assert d.chat == [
+               %{pattern: "mybot", default: false, script: "mybot.exs", idle_timeout: 3600},
+               %{pattern: nil, default: true, script: "p2p-chat.exs", idle_timeout: 300}
+             ]
+
+      assert d.dial_plan == [%{pattern: nil, default: true, script: "catchall.exs"}]
+    end
+
+    test "kelictl prints the idle timeout on the chat rules only" do
+      {0, text} = Kelix.Control.CLI.run(["domain", "show", "chat.example.com"], node())
+
+      assert text =~ ~r/mybot\s+-> mybot\.exs .* idle 3600s/
+      assert text =~ ~r/\(default\) -> p2p-chat\.exs .* idle 300s/
+      assert text =~ ~r/\(default\) -> catchall\.exs +\[[^\]]*\]$/m
+    end
+  end
+
   describe "registrations/1 + registration/1" do
     @reg_domains """
     [[domain]]

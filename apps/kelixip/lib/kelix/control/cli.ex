@@ -1247,9 +1247,14 @@ defmodule Kelix.Control.CLI do
     |> Enum.with_index(1)
     |> Enum.map(fn {{pattern, r}, i} ->
       "  #{i}. #{String.pad_trailing(pattern, pw)} -> " <>
-        "#{String.pad_trailing(r.script, sw)}  #{format_script_module(r)}"
+        "#{String.pad_trailing(r.script, sw)}  #{format_script_module(r)}" <>
+        format_idle_timeout(Map.get(r, :idle_timeout))
     end)
   end
+
+  # A chat rule's silence before its conversation ends; a call rule has none.
+  defp format_idle_timeout(seconds) when is_integer(seconds), do: "  idle #{seconds}s"
+  defp format_idle_timeout(_), do: ""
 
   # A script the registry has never loaded has no module yet — say so rather than
   # printing a blank, which would read as "no module" instead of "not loaded".
