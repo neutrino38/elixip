@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.1
+Version:        1.6.2
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        2%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -365,6 +365,24 @@ fi
 %{_datadir}/%{name}/sql/conversation
 
 %changelog
+* Wed Sep 30 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.2-1
+- Basic instant messaging (page mode, RFC 3428): a [[domain.chat]] block routes
+  a MESSAGE to the `chat` function; a MESSAGE's content is never logged.
+- Conversations: one scenario handles every MESSAGE of a conversation, keyed on
+  its flow; an idle conversation hibernates and is woken by the next MESSAGE.
+- New subpackage kelixip-mod-conversation keeps hibernated conversations in
+  SQL, so one hibernated on a node wakes on another and survives a restart.
+- New subpackage kelixip-mod-silo: store-and-forward in SQL. A MESSAGE no
+  device took is stored and delivered when one of the recipient's devices
+  registers; kelictl silo list|purge.
+- SBB.Page relays one MESSAGE to every device of the recipient in parallel.
+- Reference scripts p2p-chat.exs and registrar-chat.exs.
+- Kelix.DB.Pool: the SQL link shared by every SQL module; an optional
+  [database] block in config.toml supplies driver, host, port and TLS.
+- kelictl shows an inactivity column for hibernated scenarios.
+- The control API encodes a pid as text: GET /scenarios no longer answers 500.
+- User-Agent is now Kelixip/1.6.2.
+
 * Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.1-1
 - kelescope shows presence live: Kelix.Control.subscribe_presence/2 returns a
   domain's presentities, then pushes each change.
