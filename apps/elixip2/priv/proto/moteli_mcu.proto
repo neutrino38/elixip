@@ -156,8 +156,8 @@ message CreateParticipantReq {
   ParticipantType type = 3;
   uint32 mosaic_id = 4;
   uint32 sidebar_id = 5;
-  // One shared transport for all the legs (BUNDLE, RFC 8843). Refused by the
-  // server until it implements it.
+  // One shared transport for all the legs (BUNDLE, RFC 8843), the audio
+  // leg's. RTP participants only; decided at creation.
   bool bundle = 6;
 }
 // -> CreatedResp (part_id)
