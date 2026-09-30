@@ -122,8 +122,10 @@ defmodule SIP.Test.Peers.Manual do
   def on_request(%{method: :CANCEL} = req, state) do
     case state.req do
       %{transid: transid} = invite when transid == req.transid ->
-        {[reply_as(state.totag, req, 200, "OK", [], 100),
-          reply_as(state.totag, invite, 487, nil, [], 200)], state}
+        {[
+           reply_as(state.totag, req, 200, "OK", [], 100),
+           reply_as(state.totag, invite, 487, nil, [], 200)
+         ], state}
 
       nil ->
         {[reply_as(state.totag, req, 481, "No such transaction", [], 100)], state}

@@ -2,7 +2,7 @@
 # load-time contract (§5.3): kelixip forbids the abrupt default shutdown.
 defmodule KelixTest.NoShutdown do
   use SIP.Scenario
-  uas :register
+  uas(:register)
 
   state initial_state do
     scenario_success("ok")

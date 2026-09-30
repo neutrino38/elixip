@@ -20,10 +20,14 @@ defmodule SIP.Transport.TLS do
   def init({dest_ip, dest_port}), do: init({dest_ip, dest_port, nil})
 
   def init({dest_ip, dest_port, domain}) do
-    initial_state = %{t_isreliable: true,
-      upperlayer: nil, destip: dest_ip, destport: dest_port,
+    initial_state = %{
+      t_isreliable: true,
+      upperlayer: nil,
+      destip: dest_ip,
+      destport: dest_port,
       destdomain: domain,
-      buffer: %SIP.Transport.Depack{}}
+      buffer: %SIP.Transport.Depack{}
+    }
 
     try do
       state = SIP.Transport.ImplHelpers.connect(initial_state, :tls)
@@ -31,9 +35,15 @@ defmodule SIP.Transport.TLS do
     rescue
       err in Socket.Error ->
         dest_ip_str = if is_tuple(dest_ip), do: NetUtils.ip2string(dest_ip), else: dest_ip
-        Logger.info([module: __MODULE__, dest: "#{dest_ip_str}:#{dest_port}",
-                     message: "Failed to connect socket: #{err.message}" <>
-                       SIP.Transport.ImplHelpers.connect_failure_hint()])
+
+        Logger.info(
+          module: __MODULE__,
+          dest: "#{dest_ip_str}:#{dest_port}",
+          message:
+            "Failed to connect socket: #{err.message}" <>
+              SIP.Transport.ImplHelpers.connect_failure_hint()
+        )
+
         {:stop, :cnxerror}
     end
   end
@@ -42,14 +52,15 @@ defmodule SIP.Transport.TLS do
   def init({:inbound, ssl_socket, localip, localport, peer_ip, peer_port}) do
     state = %{
       t_isreliable: true,
-      upperlayer:   nil,
-      destip:       peer_ip,
-      destport:     peer_port,
-      buffer:       %SIP.Transport.Depack{},
-      socket:       ssl_socket,
-      localip:      localip,
-      localport:    localport
+      upperlayer: nil,
+      destip: peer_ip,
+      destport: peer_port,
+      buffer: %SIP.Transport.Depack{},
+      socket: ssl_socket,
+      localip: localip,
+      localport: localport
     }
+
     {:ok, state}
   end
 
@@ -72,12 +83,20 @@ defmodule SIP.Transport.TLS do
     {:reply, {:ok, state.localip, state.localport}, state}
   end
 
-  @spec handle_call({:sendmsg, binary(), :inet.ip_address(), :inet.port_number()}, any(), map()) :: {:reply, :ok, map()}
+  @spec handle_call({:sendmsg, binary(), :inet.ip_address(), :inet.port_number()}, any(), map()) ::
+          {:reply, :ok, map()}
   def handle_call({:sendmsg, msgstr, _destip, _dest_port}, _from, state) do
     destipstr = SIP.NetUtils.ip2string(state.destip)
-    Logger.debug(fn -> "TLS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> SIPMsg.loggable(msgstr) <> "\r\n-----------------" end)
+
+    Logger.debug(fn ->
+      "TLS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <>
+        SIPMsg.loggable(msgstr) <> "\r\n-----------------"
+    end)
+
     case Socket.Stream.send(state.socket, msgstr) do
-      :ok -> {:reply, :ok, state}
+      :ok ->
+        {:reply, :ok, state}
+
       {:error, reason} ->
         Logger.debug("TLS: failed to send message. Error: #{reason}")
         {:reply, :transporterror, state}
@@ -95,28 +114,58 @@ defmodule SIP.Transport.TLS do
   # Handle data reception.
   @impl true
   def handle_info({:ssl, socket, data}, state) do
-    buf = SIP.Transport.Depack.on_data_received(state.buffer, data,
-      fn what, msg ->
+    buf =
+      SIP.Transport.Depack.on_data_received(state.buffer, data, fn what, msg ->
         case what do
-          :ping -> nil
-          :msg -> SIP.Transport.ImplHelpers.process_incoming_message(state, msg, "TLS", __MODULE__, socket, state.destip, state.destport)
+          :ping ->
+            nil
+
+          :msg ->
+            SIP.Transport.ImplHelpers.process_incoming_message(
+              state,
+              msg,
+              "TLS",
+              __MODULE__,
+              socket,
+              state.destip,
+              state.destport
+            )
 
           # The depacketizer refused to frame further: answer what we can out of
           # the header block it hands up, then take this connection down. It has
           # deliberately not read the octets Content-Length announced, so nothing
           # further along this stream is a message boundary any more.
           :too_large ->
-            SIP.Transport.ImplHelpers.refuse_and_close(state, 513, msg, "TLS", state.destip, state.destport)
+            SIP.Transport.ImplHelpers.refuse_and_close(
+              state,
+              513,
+              msg,
+              "TLS",
+              state.destip,
+              state.destport
+            )
 
           :bad_frame ->
-            SIP.Transport.ImplHelpers.refuse_and_close(state, 400, msg, "TLS", state.destip, state.destport)
+            SIP.Transport.ImplHelpers.refuse_and_close(
+              state,
+              400,
+              msg,
+              "TLS",
+              state.destip,
+              state.destport
+            )
         end
       end)
+
     {:noreply, %{state | buffer: buf}}
   end
 
   def handle_info({:ssl_closed, _socket}, state) do
-    Logger.debug([module: __MODULE__, message: "TLS connection closed, stopping transport instance"])
+    Logger.debug(
+      module: __MODULE__,
+      message: "TLS connection closed, stopping transport instance"
+    )
+
     {:stop, :normal, state}
   end
 

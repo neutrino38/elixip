@@ -64,9 +64,7 @@ defmodule Kelix.Listener.SupervisorTest do
     port = free_port(:udp)
 
     pid =
-      start_supervised!(
-        {LSup, listen: [entry(:udp, port), entry(:udp, port, %{addr: "::1"})]}
-      )
+      start_supervised!({LSup, listen: [entry(:udp, port), entry(:udp, port, %{addr: "::1"})]})
 
     assert [{:udp, "127.0.0.1", ^port}, {:udp, "::1", ^port}] =
              Enum.map(Supervisor.which_children(pid), &elem(&1, 0)) |> Enum.sort()
@@ -86,7 +84,6 @@ defmodule Kelix.Listener.SupervisorTest do
 
     assert [{:udp, "127.0.0.1", ^p1}] = Enum.map(Supervisor.which_children(pid), &elem(&1, 0))
   end
-
 
   describe "an entry with no addr binds every family the host carries" do
     # Host-dependent by nature, so the assertion is the RULE, not a fixed list:

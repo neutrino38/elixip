@@ -31,34 +31,53 @@ defmodule SIP.Transport.WSS do
   def is_reliable, do: true
 
   @impl true
-  def init({ dest_ip, dest_port}), do: init({ dest_ip, dest_port, nil})
+  def init({dest_ip, dest_port}), do: init({dest_ip, dest_port, nil})
 
-  def init({ dest_ip, dest_port, domain}) do
-    initial_state = %{ t_isreliable: true,
-      upperlayer: nil, destip: dest_ip, destport: dest_port,
-      destdomain: domain }
+  def init({dest_ip, dest_port, domain}) do
+    initial_state = %{
+      t_isreliable: true,
+      upperlayer: nil,
+      destip: dest_ip,
+      destport: dest_port,
+      destdomain: domain
+    }
 
     try do
       state = SIP.Transport.ImplHelpers.connect(initial_state, :wss)
       # Outbound: Socket.Web.connect! has already spawned the reader (mode: :active),
       # so the connection is live and the keep-alive starts here. Inbound starts it
       # in :activate_socket, which is where its reader is spawned.
-      { :ok, start_keepalive(state) }
+      {:ok, start_keepalive(state)}
     rescue
       err in Socket.Error ->
-        dest_ip = if is_tuple(dest_ip) do NetUtils.ip2string(dest_ip) else dest_ip end
-        Logger.info([ module: __MODULE__, dest: "#{dest_ip}:#{dest_port}",
-                       message: "Failed to connect socket: #{err.message}" <>
-                         SIP.Transport.ImplHelpers.connect_failure_hint()])
-        Logger.debug( Exception.format_stacktrace(__STACKTRACE__))
-        { :stop, :cnxerror }
+        dest_ip =
+          if is_tuple(dest_ip) do
+            NetUtils.ip2string(dest_ip)
+          else
+            dest_ip
+          end
+
+        Logger.info(
+          module: __MODULE__,
+          dest: "#{dest_ip}:#{dest_port}",
+          message:
+            "Failed to connect socket: #{err.message}" <>
+              SIP.Transport.ImplHelpers.connect_failure_hint()
+        )
+
+        Logger.debug(Exception.format_stacktrace(__STACKTRACE__))
+        {:stop, :cnxerror}
 
       err in Protocol.UndefinedError ->
-        Logger.info([ module: __MODULE__, dest: "#{dest_ip}:#{dest_port}",
-                      message: "Runtime error in connect() "])
+        Logger.info(
+          module: __MODULE__,
+          dest: "#{dest_ip}:#{dest_port}",
+          message: "Runtime error in connect() "
+        )
+
         Logger.debug(inspect(err))
-        Logger.debug( Exception.format_stacktrace(__STACKTRACE__))
-        { :stop, :cnxerror }
+        Logger.debug(Exception.format_stacktrace(__STACKTRACE__))
+        {:stop, :cnxerror}
     end
   end
 
@@ -66,51 +85,57 @@ defmodule SIP.Transport.WSS do
   def init({:inbound, ws_socket, localip, localport, peer_ip, peer_port}) do
     state = %{
       t_isreliable: true,
-      upperlayer:   nil,
-      destip:       peer_ip,
-      destport:     peer_port,
-      socket:       ws_socket,
-      localip:      localip,
-      localport:    localport
+      upperlayer: nil,
+      destip: peer_ip,
+      destport: peer_port,
+      socket: ws_socket,
+      localip: localip,
+      localport: localport
     }
+
     {:ok, state}
   end
 
   # Set the upper layer handler for transactions to process
 
   @impl true
-  def handle_call( {:setupperlayer, ul_pid }, _from, state) when is_pid(ul_pid) do
-    { :reply, :ok, Map.put(state, :upperlayer, ul_pid) }
+  def handle_call({:setupperlayer, ul_pid}, _from, state) when is_pid(ul_pid) do
+    {:reply, :ok, Map.put(state, :upperlayer, ul_pid)}
   end
 
-  def handle_call( {:setupperlayer, ul_func }, _from, state) when is_function(ul_func, 2) do
-    { :reply, :ok, Map.put(state, :upperlayer, ul_func) }
+  def handle_call({:setupperlayer, ul_func}, _from, state) when is_function(ul_func, 2) do
+    {:reply, :ok, Map.put(state, :upperlayer, ul_func)}
   end
 
-  def handle_call( {:setupperlayer, nil }, _from, state) do
-    { :reply, :ok, Map.put(state, :upperlayer, nil) }
+  def handle_call({:setupperlayer, nil}, _from, state) do
+    {:reply, :ok, Map.put(state, :upperlayer, nil)}
   end
 
   def handle_call(:getlocalipandport, _from, state) do
-    { :reply, { :ok, state.localip, state.localport }, state}
+    {:reply, {:ok, state.localip, state.localport}, state}
   end
 
-
-  @spec handle_call(  {:sendmsg, binary(), :inet.ip_address(), :inet.port_number }, any(), map() ) ::  { :reply, :ok, map() }
-  def handle_call({ :sendmsg, msgstr, _destip, _dest_port }, _from, state) do
+  @spec handle_call({:sendmsg, binary(), :inet.ip_address(), :inet.port_number()}, any(), map()) ::
+          {:reply, :ok, map()}
+  def handle_call({:sendmsg, msgstr, _destip, _dest_port}, _from, state) do
     try do
       Socket.Web.send!(state.socket, {:text, msgstr})
-      destipstr = if is_tuple(state.destip), do: SIP.NetUtils.ip2string(state.destip), else: state.destip
-      Logger.debug(fn -> "WSS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> SIPMsg.loggable(msgstr) <> "\r\n-----------------" end)
-      { :reply, :ok, state }
-      rescue
-        err in Socket.Error ->
-          Logger.debug("WSS: failed to send message. Error #{err.message}");
-          { :reply, :transporterror, state }
+
+      destipstr =
+        if is_tuple(state.destip), do: SIP.NetUtils.ip2string(state.destip), else: state.destip
+
+      Logger.debug(fn ->
+        "WSS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <>
+          SIPMsg.loggable(msgstr) <> "\r\n-----------------"
+      end)
+
+      {:reply, :ok, state}
+    rescue
+      err in Socket.Error ->
+        Logger.debug("WSS: failed to send message. Error #{err.message}")
+        {:reply, :transporterror, state}
     end
   end
-
-
 
   # Activates the WebSocket reader once WSSListener has transferred the connection.
   # Registers self() as target_pid, spawns the Socket.Web reader process, then
@@ -132,20 +157,34 @@ defmodule SIP.Transport.WSS do
 
     cond do
       state.missed >= @max_missed ->
-        Logger.warning([module: __MODULE__, message: "WSS: no answer from #{peer(state)} after " <>
-          "#{state.missed} keep-alive periods (#{state.missed * keepalive_period()}s), closing"])
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "WSS: no answer from #{peer(state)} after " <>
+              "#{state.missed} keep-alive periods (#{state.missed * keepalive_period()}s), closing"
+        )
+
         {:stop, :normal, state}
 
       true ->
         case Socket.Web.ping(state.socket, <<"elixip">>) do
           {:error, reason} ->
-            Logger.warning([module: __MODULE__,
-              message: "WSS: keep-alive ping to #{peer(state)} failed (#{inspect(reason)}), closing"])
+            Logger.warning(
+              module: __MODULE__,
+              message:
+                "WSS: keep-alive ping to #{peer(state)} failed (#{inspect(reason)}), closing"
+            )
+
             {:stop, :normal, state}
 
           _cookie ->
-            Logger.debug([module: __MODULE__, message: "WSS: keep-alive ping -> #{peer(state)}" <>
-              (if state.missed > 0, do: " (#{state.missed} period(s) unanswered)", else: "")])
+            Logger.debug(
+              module: __MODULE__,
+              message:
+                "WSS: keep-alive ping -> #{peer(state)}" <>
+                  if(state.missed > 0, do: " (#{state.missed} period(s) unanswered)", else: "")
+            )
+
             {:noreply, schedule_keepalive(%{state | rx: false})}
         end
     end
@@ -153,7 +192,7 @@ defmodule SIP.Transport.WSS do
 
   # The peer answered our ping — the connection is alive whatever else is idle.
   def handle_info({:web_pong, _socket, _cookie}, state) do
-    Logger.debug([module: __MODULE__, message: "WSS: pong <- #{peer(state)}"])
+    Logger.debug(module: __MODULE__, message: "WSS: pong <- #{peer(state)}")
     {:noreply, %{state | rx: true, missed: 0}}
   end
 
@@ -161,7 +200,7 @@ defmodule SIP.Transport.WSS do
   # resolver delegates DNS to the socket layer), so use the socket's real peer
   # address as the message source — a proper IP tuple, like UDP passes. Falls
   # back to the stored dest only if the peer address is momentarily unavailable.
-  def handle_info({:web, socket, data}, state ) do
+  def handle_info({:web, socket, data}, state) do
     state = %{state | rx: true, missed: 0}
 
     # RFC 5626 §4.4.1, which RFC 7118 §4 carries over to WebSocket: a client that
@@ -171,25 +210,41 @@ defmodule SIP.Transport.WSS do
     # default policy, SIPMsg.keepalive?/1) is what a *datagram* transport does;
     # a connected transport owes the answer.
     if SIPMsg.keepalive?(data) do
-      Logger.debug([module: __MODULE__, message: "WSS: CRLF keep-alive from #{peer(state)}, answering"])
+      Logger.debug(
+        module: __MODULE__,
+        message: "WSS: CRLF keep-alive from #{peer(state)}, answering"
+      )
 
       case Socket.Web.send(socket, {:text, "\r\n"}) do
-        :ok -> :ok
+        :ok ->
+          :ok
+
         {:error, reason} ->
-          Logger.debug([module: __MODULE__,
-            message: "WSS: failed to answer the CRLF keep-alive: #{inspect(reason)}"])
+          Logger.debug(
+            module: __MODULE__,
+            message: "WSS: failed to answer the CRLF keep-alive: #{inspect(reason)}"
+          )
       end
 
-      { :noreply, state }
+      {:noreply, state}
     else
-      { src_ip, src_port } =
+      {src_ip, src_port} =
         case SIP.Transport.ImplHelpers.remote_address(socket) do
-          { ip, port } -> { ip, port }
-          nil -> { state.destip, state.destport }
+          {ip, port} -> {ip, port}
+          nil -> {state.destip, state.destport}
         end
 
-      SIP.Transport.ImplHelpers.process_incoming_message(state, data, "WSS", __MODULE__, socket, src_ip, src_port)
-      { :noreply, state }
+      SIP.Transport.ImplHelpers.process_incoming_message(
+        state,
+        data,
+        "WSS",
+        __MODULE__,
+        socket,
+        src_ip,
+        src_port
+      )
+
+      {:noreply, state}
     end
   end
 
@@ -197,13 +252,16 @@ defmodule SIP.Transport.WSS do
   # hang-up from a policy violation or a proxy timing the flow out, so it is
   # logged rather than flattened into "closed".
   def handle_info({:web_closed, _socket, reason}, state) do
-    Logger.info([module: __MODULE__,
-      message: "WSS connection from #{peer(state)} closed: #{inspect(reason)}"])
+    Logger.info(
+      module: __MODULE__,
+      message: "WSS connection from #{peer(state)} closed: #{inspect(reason)}"
+    )
+
     {:stop, :normal, state}
   end
 
   def handle_info({:web_closed, _socket}, state) do
-    Logger.info([module: __MODULE__, message: "WSS connection from #{peer(state)} closed by peer"])
+    Logger.info(module: __MODULE__, message: "WSS connection from #{peer(state)} closed by peer")
     {:stop, :normal, state}
   end
 
@@ -212,13 +270,18 @@ defmodule SIP.Transport.WSS do
   # the frame decoder, which drops a working connection and used to leave a single
   # debug line as the only trace.
   def handle_info({:DOWN, _ref, :process, _pid, :normal}, state) do
-    Logger.debug([module: __MODULE__, message: "WSS reader process exited, stopping transport"])
+    Logger.debug(module: __MODULE__, message: "WSS reader process exited, stopping transport")
     {:stop, :normal, state}
   end
 
   def handle_info({:DOWN, _ref, :process, _pid, reason}, state) do
-    Logger.warning([module: __MODULE__, message: "WSS reader process for #{peer(state)} died: " <>
-      "#{inspect(reason)} — dropping the connection"])
+    Logger.warning(
+      module: __MODULE__,
+      message:
+        "WSS reader process for #{peer(state)} died: " <>
+          "#{inspect(reason)} — dropping the connection"
+    )
+
     {:stop, :normal, state}
   end
 

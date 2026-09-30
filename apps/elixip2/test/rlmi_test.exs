@@ -70,14 +70,18 @@ defmodule SIP.Test.Rlmi do
     end
 
     test "a list naming nobody is an empty list, not an error" do
-      body = ~s(<resource-lists xmlns="urn:ietf:params:xml:ns:resource-lists"><list/></resource-lists>)
+      body =
+        ~s(<resource-lists xmlns="urn:ietf:params:xml:ns:resource-lists"><list/></resource-lists>)
 
       assert {:ok, []} = SIP.Presence.ResourceLists.parse(body)
     end
 
     test "junk off the network is refused without raising" do
       assert {:error, {:malformed_xml, _}} = SIP.Presence.ResourceLists.parse("<resource-lists")
-      assert {:error, {:not_a_resource_list, "presence"}} = SIP.Presence.ResourceLists.parse(~s(<presence/>))
+
+      assert {:error, {:not_a_resource_list, "presence"}} =
+               SIP.Presence.ResourceLists.parse(~s(<presence/>))
+
       assert {:error, :doctype_not_allowed} =
                SIP.Presence.ResourceLists.parse(~s(<!DOCTYPE x SYSTEM "x"><resource-lists/>))
     end
@@ -187,7 +191,11 @@ defmodule SIP.Test.Rlmi do
     defp parts do
       [
         %{"Content-ID" => "<rlmi@kelixip>", contenttype: "application/rlmi+xml", data: "<list/>"},
-        %{"Content-ID" => "<p1@kelixip>", contenttype: "application/pidf+xml", data: "<presence/>"}
+        %{
+          "Content-ID" => "<p1@kelixip>",
+          contenttype: "application/pidf+xml",
+          data: "<presence/>"
+        }
       ]
     end
 
@@ -235,10 +243,14 @@ defmodule SIP.Test.Rlmi do
     # The boundary is read out of the parameters wherever they sit, and a quoted
     # one is not part of the delimiter.
     test "the boundary is found whatever the parameter order, quoted or not" do
-      assert SIPMsg.multipart_boundary(~s(multipart/related; boundary=abc; type="application/rlmi+xml")) ==
+      assert SIPMsg.multipart_boundary(
+               ~s(multipart/related; boundary=abc; type="application/rlmi+xml")
+             ) ==
                "abc"
 
-      assert SIPMsg.multipart_boundary(~s(multipart/related; type="x/y"; BOUNDARY="a=b"; start="<c>")) ==
+      assert SIPMsg.multipart_boundary(
+               ~s(multipart/related; type="x/y"; BOUNDARY="a=b"; start="<c>")
+             ) ==
                "a=b"
 
       assert SIPMsg.multipart_boundary("application/pidf+xml") == nil
@@ -246,10 +258,14 @@ defmodule SIP.Test.Rlmi do
 
     test "mixed still composes the way it did, boundary generated and Content-Type set" do
       msg =
-        SIP.Msg.Ops.update_sip_msg(%{method: :MESSAGE}, {:body, [
-          %{contenttype: "text/plain", data: "hello"},
-          %{contenttype: "application/sdp", data: "v=0"}
-        ]})
+        SIP.Msg.Ops.update_sip_msg(
+          %{method: :MESSAGE},
+          {:body,
+           [
+             %{contenttype: "text/plain", data: "hello"},
+             %{contenttype: "application/sdp", data: "v=0"}
+           ]}
+        )
 
       assert msg.contenttype =~ "multipart/mixed; boundary="
       assert msg.contentlength == byte_size(SIPMsg.multipart_body(msg.body))

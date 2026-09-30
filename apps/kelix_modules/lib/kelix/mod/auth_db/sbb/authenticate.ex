@@ -97,7 +97,9 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
   # credentials, never the challenged one.
   state initial_state do
     req = last_uas_req()
-    realm = Kelix.Mod.AuthDb.SBB.Authenticate.realm_of(sbb_data_get(:realm), req, ctx_get(:domain))
+
+    realm =
+      Kelix.Mod.AuthDb.SBB.Authenticate.realm_of(sbb_data_get(:realm), req, ctx_get(:domain))
 
     case Kelix.Mod.AuthDb.authenticate(req, realm) do
       # The digest proved `identity.user`, and the identity check has already had

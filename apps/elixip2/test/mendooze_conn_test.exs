@@ -3386,8 +3386,7 @@ defmodule Mendooze.ConnTest do
     assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 2]}, 1_000
     assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 5, 4, 2]}, 1_000
 
-    refute_receive {:jsr309_call, "EndpointSetRTPProperties",
-                    [_, _, 2, %{"useOriSeqNum" => _}]},
+    refute_receive {:jsr309_call, "EndpointSetRTPProperties", [_, _, 2, %{"useOriSeqNum" => _}]},
                    200
   end
 

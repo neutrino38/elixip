@@ -252,12 +252,12 @@ defmodule SIP.Context do
 
   # Set the password
   defp do_set(ctx, :passwd, value)
-      when ctx.authusername != nil and ctx.algorithm != nil and ctx.domain != nil do
+       when ctx.authusername != nil and ctx.algorithm != nil and ctx.domain != nil do
     Map.put(ctx, :ha1, SIP.Auth.compute_ha1(ctx.algorithm, ctx.authusername, ctx.domain, value))
   end
 
   defp do_set(ctx, :passwd, _value)
-      when is_nil(ctx.authusername) or is_nil(ctx.algorithm) or is_nil(ctx.domain) do
+       when is_nil(ctx.authusername) or is_nil(ctx.algorithm) or is_nil(ctx.domain) do
     raise "Cannot set password. One of the following has not been set: authusername, domain, algorithm"
   end
 
@@ -266,7 +266,8 @@ defmodule SIP.Context do
   # defined once, in FSL, and not re-derived by every binding. The spellings
   # stay: `SIP.Context.set(ctx, :currentstate, …)` is what a test and a script
   # write, and FSL writes `FSL.Context.put/3`.
-  defp do_set(ctx, prop, value) when prop in [:lasterr, :currentstate, :laststate, :errorreason] do
+  defp do_set(ctx, prop, value)
+       when prop in [:lasterr, :currentstate, :laststate, :errorreason] do
     FSL.Context.put(ctx, prop, value)
   end
 

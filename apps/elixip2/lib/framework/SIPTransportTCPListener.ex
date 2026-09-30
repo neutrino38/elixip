@@ -59,8 +59,14 @@ defmodule SIP.Transport.TCPListener do
   def init({addr, port, opts}) do
     family = SIP.NetUtils.address_family(addr) || Keyword.get(opts, :family, :ipv4)
     localip = resolve_localip(addr, family)
-    max_conn = Keyword.get(opts, :max_connections,
-      Application.get_env(:elixip2, :tcp_max_connections, @default_max_connections))
+
+    max_conn =
+      Keyword.get(
+        opts,
+        :max_connections,
+        Application.get_env(:elixip2, :tcp_max_connections, @default_max_connections)
+      )
+
     bind_addr = wildcard_of(addr, family)
 
     # Socket.TCP.listen/2 binds passive and with SO_REUSEADDR on its own; the
@@ -75,35 +81,48 @@ defmodule SIP.Transport.TCPListener do
         {_bound_ip, actual_port} = Socket.local!(listen_socket)
         listener_pid = self()
         Task.start_link(fn -> accept_loop(listen_socket, listener_pid) end)
-        Logger.info([module: __MODULE__,
-                     message: "TCP listener started on #{SIP.NetUtils.sip_host(localip)}:#{actual_port}"])
+
+        Logger.info(
+          module: __MODULE__,
+          message: "TCP listener started on #{SIP.NetUtils.sip_host(localip)}:#{actual_port}"
+        )
+
         state = %{
-          localip:         localip,
-          localport:       actual_port,
-          socket:          listen_socket,
-          upperlayer:      nil,
+          localip: localip,
+          localport: actual_port,
+          socket: listen_socket,
+          upperlayer: nil,
           max_connections: max_conn,
-          connections:     %{}
+          connections: %{}
         }
+
         {:ok, state}
 
       nil ->
-        Logger.error([module: __MODULE__,
-                      message: "No local #{family} address to advertise. Check your network configuration"])
+        Logger.error(
+          module: __MODULE__,
+          message: "No local #{family} address to advertise. Check your network configuration"
+        )
+
         {:stop, :networkdown}
 
       {:error, reason} ->
-        Logger.error([module: __MODULE__,
-                      message: "Failed to bind TCP socket on port #{port}: #{inspect(reason)}"])
+        Logger.error(
+          module: __MODULE__,
+          message: "Failed to bind TCP socket on port #{port}: #{inspect(reason)}"
+        )
+
         {:stop, reason}
     end
   end
 
   @impl true
-  def handle_call({:setupperlayer, ul}, _from, state) when is_pid(ul) or is_function(ul, 2) or is_nil(ul) do
+  def handle_call({:setupperlayer, ul}, _from, state)
+      when is_pid(ul) or is_function(ul, 2) or is_nil(ul) do
     Enum.each(state.connections, fn {_ref, {_ip, _port, pid}} ->
       GenServer.call(pid, {:setupperlayer, ul})
     end)
+
     {:reply, :ok, %{state | upperlayer: ul}}
   end
 
@@ -117,7 +136,9 @@ defmodule SIP.Transport.TCPListener do
 
   def handle_call({:sendmsg, msg, dest_ip, dest_port}, _from, state) do
     case find_connection(state.connections, dest_ip, dest_port) do
-      nil -> {:reply, {:error, :no_connection}, state}
+      nil ->
+        {:reply, {:error, :no_connection}, state}
+
       pid ->
         result = GenServer.call(pid, {:sendmsg, msg, dest_ip, dest_port})
         {:reply, result, state}
@@ -129,15 +150,21 @@ defmodule SIP.Transport.TCPListener do
   # (the Listener closes the socket in that case).
   def handle_call({:spawn_connection, client_socket}, _from, state) do
     if map_size(state.connections) >= state.max_connections do
-      Logger.warning([module: __MODULE__,
-        message: "TCP connection limit (#{state.max_connections}) reached — rejecting inbound connection"])
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "TCP connection limit (#{state.max_connections}) reached — rejecting inbound connection"
+      )
+
       Socket.close(client_socket)
       {:reply, :rejected, state}
     else
       {:ok, {peer_ip, peer_port}} = Socket.remote(client_socket)
 
-      case GenServer.start_link(SIP.Transport.TCP,
-             {:inbound, client_socket, state.localip, state.localport, peer_ip, peer_port}) do
+      case GenServer.start_link(
+             SIP.Transport.TCP,
+             {:inbound, client_socket, state.localip, state.localport, peer_ip, peer_port}
+           ) do
         {:ok, conn_pid} ->
           unless is_nil(state.upperlayer) do
             GenServer.call(conn_pid, {:setupperlayer, state.upperlayer})
@@ -145,13 +172,21 @@ defmodule SIP.Transport.TCPListener do
 
           ref = Process.monitor(conn_pid)
           connections = Map.put(state.connections, ref, {peer_ip, peer_port, conn_pid})
-          Logger.debug([module: __MODULE__,
-            message: "Accepted TCP connection from #{SIP.NetUtils.ip2string(peer_ip)}:#{peer_port}"])
+
+          Logger.debug(
+            module: __MODULE__,
+            message:
+              "Accepted TCP connection from #{SIP.NetUtils.ip2string(peer_ip)}:#{peer_port}"
+          )
+
           {:reply, {:ok, conn_pid}, %{state | connections: connections}}
 
         {:error, reason} ->
-          Logger.error([module: __MODULE__,
-            message: "Failed to start TCP connection handler: #{inspect(reason)}"])
+          Logger.error(
+            module: __MODULE__,
+            message: "Failed to start TCP connection handler: #{inspect(reason)}"
+          )
+
           Socket.close(client_socket)
           {:reply, :rejected, state}
       end
@@ -184,15 +219,17 @@ defmodule SIP.Transport.TCPListener do
             GenServer.cast(conn_pid, :activate_socket)
 
           :rejected ->
-            :ok  # Listener already closed the socket.
+            # Listener already closed the socket.
+            :ok
         end
+
         accept_loop(listen_socket, listener_pid)
 
       {:error, :closed} ->
         :ok
 
       {:error, reason} ->
-        Logger.warning([module: __MODULE__, message: "TCP accept error: #{inspect(reason)}"])
+        Logger.warning(module: __MODULE__, message: "TCP accept error: #{inspect(reason)}")
         accept_loop(listen_socket, listener_pid)
     end
   end
@@ -220,7 +257,7 @@ defmodule SIP.Transport.TCPListener do
     connections
     |> Map.values()
     |> Enum.find_value(fn {ip, port, pid} ->
-         if ip == dest_ip and port == dest_port, do: pid
-       end)
+      if ip == dest_ip and port == dest_port, do: pid
+    end)
   end
 end
