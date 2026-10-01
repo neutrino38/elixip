@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid" xmlns:trix="urn:trix:params:xml:ns:pidf" entity="sip:emmanuel.buu@weshwesh.eu">
+<tuple id="5aceba67-4fc2-49e4-91cd-6e3506514954">
+<status><basic>open</basic></status>
+<timestamp>2026-10-01T19:22:46.964Z</timestamp>
+</tuple>
+</presence>
