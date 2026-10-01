@@ -198,6 +198,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # video sections beyond the first (UNIFIED-PLAN E1): section key (its
          # a=mid, or its position) → %{role:, source_id:}. A role is never reused.
          extra_videos: %{},
+         # one transport for every leg (BUNDLE, RFC 8843), decided on the first
+         # offer: the media server fixes it when the participant is created
+         bundle: false,
          # medias requested by the scenario, capped to what this increment answers
          # what this leg answers: what the scenario asked for, intersected with what the
          # conference serves (§8.4 `medias`). Dropping a media from the conference is
@@ -305,7 +308,8 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # a section offered with port 0 is declined or withdrawn (RFC 3264 §6,
          # §8.2): it opens nothing, and the answer rejects it with port 0
          descs = index_sections(descs),
-         live = Enum.reject(descs, &withdrawn?/1),
+         {:ok, state} <- adopt_bundle(state, conf, descs),
+         live = Enum.reject(descs, &withdrawn?(state, &1)),
          # video sections beyond the first are extra streams of this leg (E1)
          extras = extra_video_sections(state, live),
          primary = live -- extras,
@@ -318,20 +322,24 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       state = if renegotiation?, do: stop_withdrawn(state, negotiated), else: state
       state = delete_withdrawn_videos(state, extra_negs)
 
+      # RFC 3264 §6: one answer m= per offered m=, in order. What we cannot
+      # answer is declined with port 0 rather than omitted — except `m=text`
+      # sections, which are OMITTED entirely when we do not serve them (see
+      # omit_from_answer?/3).
+      medias =
+        descs
+        |> Enum.reject(&omit_from_answer?(state, negotiated, &1))
+        |> Enum.map(&answer_section(state, negotiated, {extras, extra_negs}, &1))
+
       answer =
         Sdp.build(%{
           ip: media_ip(state),
           # §6.3 rule 5: we advertise a=ice-lite and never gather reflexive
           # candidates. Session level, hence here rather than per media.
           ice_lite: state.local_ice != nil,
-          # RFC 3264 §6: one answer m= per offered m=, in order. What we cannot
-          # answer is declined with port 0 rather than omitted — except `m=text`
-          # sections, which are OMITTED entirely when we do not serve them (see
-          # omit_from_answer?/3).
-          medias:
-            descs
-            |> Enum.reject(&omit_from_answer?(state, negotiated, &1))
-            |> Enum.map(&answer_section(state, negotiated, {extras, extra_negs}, &1))
+          # RFC 8843 §7.3: every accepted section, in offer order
+          bundle: answered_bundle(state, medias),
+          medias: medias
         })
 
       state = %{state | negotiated: negotiated, status: :answered}
@@ -782,7 +790,8 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         # negotiate against an empty map and announce the server's defaults.
         push_local_codec_props(state, m, media, role_of(desc))
 
-        with {:ok, state, profile} <- leg_profile(state, desc),
+        with :ok <- push_bundle_props(state, m, desc),
+             {:ok, state, profile} <- leg_profile(state, desc),
              {:ok, [rec_port | returned]} <-
                rpc(
                  state,
@@ -1722,7 +1731,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       rtcp_fb: answered_rtcp_fb(desc),
       # RFC 8285 §5: the extension is confirmed with the offer's OWN id, never
       # renumbered. Empty unless transport-wide-cc is negotiated on this media.
-      extmaps: List.wrap(Sdp.transport_cc_extmap(desc)),
+      extmaps: List.wrap(Sdp.transport_cc_extmap(desc)) ++ bundle_extmaps(state, desc),
       crypto: answer_crypto(state, desc),
       crypto_tag: answer_crypto_tag(state, desc),
       ice: state.local_ice,
@@ -2080,7 +2089,82 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # Stop the planes then delete the participant. Best effort throughout: this runs
   # on the call-end path (and on a crash), where a failed RPC must not prevent the
   # rest of the cleanup.
-  defp withdrawn?(desc), do: Map.get(desc, :port) == 0
+  # Port 0 declines or withdraws a section (RFC 3264 §6, §8.2) — unless it is a
+  # bundle-only section of a group we take, which lives on the shared port. A
+  # bundled leg rejects an RTP or data channel section left out of the group: it
+  # would need a transport of its own (RFC 8843 §7.3.3). Text over a WebSocket is
+  # TCP, never bundled, and stays served.
+  defp withdrawn?(%{bundle: true}, desc) do
+    out_of_group? =
+      Map.get(desc, :transport, :rtp) in [:rtp, :sctp] and not Map.get(desc, :bundled, false)
+
+    out_of_group? or (Map.get(desc, :port) == 0 and not Map.get(desc, :bundle_only, false))
+  end
+
+  defp withdrawn?(_state, desc), do: Map.get(desc, :port) == 0
+
+  # The offer asks for BUNDLE: the participant created at init is replaced by one
+  # created with bundle=1, the new one first so that a media server refusing it
+  # leaves the call as it was — unbundled, its bundle-only sections declined.
+  defp adopt_bundle(%{status: :created, bundle: false} = state, conf, descs) do
+    if webrtc_allowed?(state) and Enum.any?(descs, &Map.get(&1, :bundled, false)) do
+      case Client.create(state.client, "CreateParticipant", [
+             conf.conf_id,
+             state.name,
+             @participant_rtp,
+             @default_mosaic,
+             @default_sidebar,
+             1
+           ]) do
+        {:ok, part_id} ->
+          void_rpc(state, "DeleteParticipant", [state.conf_id, state.part_id])
+          Mcu.bind_participant(conf.uid, state.part_ref, part_id, self())
+          {:ok, %{state | part_id: part_id, bundle: true}}
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "conference #{state.conf_uid}: media server refused BUNDLE (#{inspect(reason)}), " <>
+                "answering unbundled"
+          )
+
+          {:ok, state}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp adopt_bundle(state, _conf, _descs), do: {:ok, state}
+
+  defp answered_bundle(%{bundle: true}, medias),
+    do: for(%{port: port, mid: mid} <- medias, port != 0, mid != nil, do: mid)
+
+  defp answered_bundle(_state, _medias), do: []
+
+  # What the media server routes a bundled section by (API §6.5): its MID, the
+  # extension id that carries it, and the SSRC it announces. Before
+  # StartReceiving, so the first packet already finds its section.
+  defp push_bundle_props(%{bundle: true} = state, m, desc) do
+    props =
+      %{"mid" => desc.mid}
+      |> then(fn p ->
+        case Sdp.mid_extmap(desc) do
+          %{id: id} -> Map.put(p, Sdp.sdes_mid_uri(), Integer.to_string(id))
+          nil -> p
+        end
+      end)
+      |> then(fn p ->
+        if desc[:remote_ssrc],
+          do: Map.put(p, "remote-ssrc", Integer.to_string(desc.remote_ssrc)),
+          else: p
+      end)
+
+    void_rpc(state, "SetRTPProperties", [state.conf_id, state.part_id, m, props, role_of(desc)])
+  end
+
+  defp push_bundle_props(_state, _m, _desc), do: :ok
 
   defp role_of(desc), do: Map.get(desc, :role, @role_main)
 
@@ -2237,9 +2321,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
+  defp bundle_extmaps(%{bundle: true}, desc), do: List.wrap(Sdp.mid_extmap(desc))
+  defp bundle_extmaps(_state, _desc), do: []
+
   defp answer_section(state, negotiated, {extras, extra_negs}, desc) do
     cond do
-      withdrawn?(desc) ->
+      withdrawn?(state, desc) ->
         reject_spec(desc)
 
       Map.has_key?(extra_negs, desc.index) ->

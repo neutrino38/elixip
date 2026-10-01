@@ -1,7 +1,7 @@
 # Flux vidéo multiples et BUNDLE : ce qu'elixip doit faire
 
-> Statut : **en cours**. E0 (côté conférence) et E1 sont codés et testés ;
-> E2, E3 et E4 restent à faire. Branche `feat/unified-plan`.
+> Statut : **en cours**. E0 (côté conférence), E1 et E2 sont codés et testés ;
+> E3 et E4 restent à faire. Branche `feat/unified-plan`.
 >
 > Ce document est le lot 4 de la conception du serveur média :
 > `mediaserver/docs/conception/UNIFIED-PLAN/SPEC.md` (appelée « SPEC serveur »
@@ -298,7 +298,7 @@ appels et leur ordre, et la réponse SDP.
 |---|---|---|---|
 | **E0** | Corrections préalables côté conférence : défauts 1 (port 0), 2 (listes dupliquées), 6 (retrait en renégociation). **Fait.** | rien | `mcu_call_test.exs`, « sections withdrawn and renegotiated » |
 | **E1** | Conférence, N vidéos sans BUNDLE (§4.2) : `CreateVideoStream`, `recvonly`, slot épinglé en VAD, nom, mise en page par source, `DeleteVideoStream` en renégociation. **Fait.** | lot 1 (**fait**) | `mcu_webrtc_test.exs`, « a second video section is an extra stream » ; `mcu_call_test.exs`, « a leg with two videos counts as two tiles ». Recette : Chrome en `max-compat`, caméra + écran, deux slots (scénario 5 de la SPEC serveur §7) |
-| **E2** | Conférence, BUNDLE (§4.3) : SDP, `bundle=1`, `mid`, `remote-ssrc`, extmap `sdes:mid`. | lot 2 | tests SDP et bouchon ; recette : Chrome et Firefox par défaut (scénarios 1 à 3, 7, 8) |
+| **E2** | Conférence, BUNDLE (§4.3) : SDP, `bundle=1`, `mid`, `remote-ssrc`, extmap `sdes:mid`. **Fait**, actif dès que l'offre porte le groupe (décision du 2026-09-30). | lot 2 (**fait**) | `mcu_webrtc_test.exs`, « BUNDLE (UNIFIED-PLAN E2) ». Recette : Chrome et Firefox par défaut (scénarios 1 à 3, 7, 8) |
 | **E3** | JSR-309, N vidéos et BUNDLE (§4.4), défauts 4 et 5. | lots 2 et 3 | tests `jsr309_fake_server` ; recette : B2BUA Chrome ↔ Chrome (scénario 6) |
 | **E4** | BFCP pour endpoint SIP (§4.5). | lot 1b (**fait**) | tests bouchon ; recette réelle (scénarios 9 et 10) reportée faute d'endpoint |
 
@@ -313,6 +313,19 @@ Limites d'E1, à reprendre si le besoin se confirme :
   n'a pas encore de moyen de le remplacer ;
 - l'épinglage en VAD est posé par la jambe, pas par le registre : il n'est
   pas rejoué après un redémarrage du serveur média (`replay_slots/2`).
+
+Comment E2 est tenu :
+
+- le participant créé à `init` est **recréé** avec `bundle=1` à la première
+  offre groupée. Le nouveau est créé avant que l'ancien soit supprimé : un
+  serveur qui refuse `bundle=1` laisse l'appel tel quel, sans BUNDLE, ses
+  sections `bundle-only` déclinées ;
+- le BUNDLE s'active **dès que l'offre le porte** (décision du 2026-09-30),
+  donc pour tous les appels navigateur, avant la recette réelle du lot 5 ;
+- une section RTP ou data channel hors du groupe est déclinée ; le texte sur
+  WebSocket (TCP) reste servi ;
+- un BUNDLE offert seulement à une renégociation n'est pas pris : le serveur
+  le fixe à la création.
 
 Chaque lot met à jour la documentation qu'il rend fausse :
 `docs/design/DESIGN-MCU.md` (§ BUNDLE, hors périmètre BFCP),

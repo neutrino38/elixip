@@ -70,9 +70,9 @@ defmodule Kelix.Mod.McuWebrtcTest do
                      |> String.replace("a=mid:1", "a=mid:2")
                    end).()
 
-  @two_video_offer String.replace(@chrome_offer, "m=text", @screen_section <> "m=text",
-                     global: false
-                   )
+  @two_video_offer @chrome_offer
+                   |> String.replace("m=text", @screen_section <> "m=text", global: false)
+                   |> String.replace("a=group:BUNDLE 0 1", "a=group:BUNDLE 0 1 2")
 
   # The fmtp a media server that arbitrated the offer returns for the payload types it
   # keeps (§16.3, `StartReceiving`'s third return value). Nothing unproposed is ever
@@ -280,6 +280,19 @@ defmodule Kelix.Mod.McuWebrtcTest do
                else: %{}
              )
            )
+           |> Map.merge(
+             # a media server that predates BUNDLE refuses the sixth argument
+             if(context[:bundle_refused],
+               do: %{
+                 "CreateParticipant" => fn params ->
+                   if length(params) == 6,
+                     do: {:error, {:mcu_error, "bundle not supported"}},
+                     else: {:ok, [7]}
+                 end
+               },
+               else: %{}
+             )
+           )
          ),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
@@ -449,6 +462,106 @@ defmodule Kelix.Mod.McuWebrtcTest do
       conn = leg(ctx.did)
       assert {:ok, _answer} = Adapter.set_remote_offer(conn, @chrome_offer)
       refute_received {:rpc, "CreateVideoStream", _params}
+    end
+  end
+
+  describe "BUNDLE (UNIFIED-PLAN E2)" do
+    # Chrome's default `balanced` policy: the second video is bundle-only, port 0
+    @bundle_only_offer String.replace(@two_video_offer, "m=video 46095", "m=video 0")
+                       |> String.replace("a=mid:2\r\n", "a=mid:2\r\na=bundle-only\r\n")
+
+    test "a bundled offer re-creates the participant with bundle=1", ctx do
+      TestStub.rpc_order()
+      conn = leg(ctx.did)
+      assert {:ok, _answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+
+      lifecycle =
+        TestStub.rpc_calls()
+        |> Enum.filter(&(elem(&1, 0) in ["CreateParticipant", "DeleteParticipant"]))
+
+      # created at init unbundled, then the bundled one FIRST, the old one after
+      assert [
+               {"CreateParticipant", unbundled},
+               {"CreateParticipant", bundled},
+               {"DeleteParticipant", [_conf, 7]}
+             ] = lifecycle
+
+      assert length(unbundled) == 5
+      assert length(bundled) == 6
+      assert List.last(bundled) == 1
+    end
+
+    test "every section gets its mid before its StartReceiving", ctx do
+      conn = leg(ctx.did)
+      TestStub.rpc_order()
+      assert {:ok, _answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+      calls = TestStub.rpc_calls()
+
+      for media <- [0, 1] do
+        mid_at =
+          Enum.find_index(calls, fn
+            {"SetRTPProperties", [_c, _p, ^media, %{"mid" => _}, 0]} -> true
+            _ -> false
+          end)
+
+        start_at =
+          Enum.find_index(calls, fn
+            {"StartReceiving", [_c, _p, ^media | _]} -> true
+            _ -> false
+          end)
+
+        assert mid_at && start_at && mid_at < start_at
+      end
+
+      assert {"SetRTPProperties", [_c, _p, 1, props, 0]} =
+               Enum.find(calls, &match?({"SetRTPProperties", [_, _, 1, %{"mid" => _}, 0]}, &1))
+
+      assert props["mid"] == "1"
+      assert props["urn:ietf:params:rtp-hdrext:sdes:mid"] == "4"
+    end
+
+    # The shared port is the media server's to give (StartReceiving answers it
+    # for every leg of a bundled participant); what the answer adds is the group
+    # and the confirmed MID extension.
+    test "the answer states the group and confirms the MID extension", ctx do
+      answer = answer_for(ctx.did, @chrome_offer)
+      assert answer =~ "a=group:BUNDLE 0 1\r\n"
+
+      for section <- sections(answer),
+          do: assert("a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid" in section)
+    end
+
+    test "a bundle-only screen section is served, received only", ctx do
+      conn = leg(ctx.did)
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, @bundle_only_offer)
+
+      assert_received {:rpc, "StartReceiving", [_conf, _part, 1, _map, 2 | _rest]}
+      assert answer =~ "a=group:BUNDLE 0 1 2\r\n"
+
+      [_audio, _camera, screen] = sections(answer)
+      refute hd(screen) =~ ~r/^m=video 0 /
+      assert "a=recvonly" in screen
+      refute "a=bundle-only" in screen
+    end
+
+    test "an RTP section left out of the group is declined", ctx do
+      offer = String.replace(@chrome_offer, "a=group:BUNDLE 0 1", "a=group:BUNDLE 0")
+      answer = answer_for(ctx.did, offer)
+
+      [_audio, video] = sections(answer)
+      assert hd(video) =~ ~r/^m=video 0 /
+      assert answer =~ "a=group:BUNDLE 0\r\n"
+    end
+
+    @tag bundle_refused: true
+    test "a media server refusing BUNDLE leaves the call unbundled", ctx do
+      conn = leg(ctx.did)
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, @bundle_only_offer)
+
+      refute answer =~ "a=group:BUNDLE"
+      refute_received {:rpc, "DeleteParticipant", _params}
+      [_audio, _camera, screen] = sections(answer)
+      assert hd(screen) =~ ~r/^m=video 0 /
     end
   end
 
@@ -970,7 +1083,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert "a=rtcp-fb:109 transport-cc" in video
 
       # video only — there is no sender-side estimator behind an audio stream
-      refute Enum.any?(audio, &String.starts_with?(&1, "a=extmap"))
+      refute Enum.any?(audio, &(&1 =~ @transport_cc_uri))
       refute Enum.any?(audio, &(&1 =~ "transport-cc"))
 
       # the switch is the extmap property: keyed by URI, valued with the negotiated id
@@ -988,7 +1101,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       answer = answer_for(ctx.did, @chrome_offer)
       [_audio, video] = sections(answer)
 
-      refute answer =~ "a=extmap"
+      refute answer =~ @transport_cc_uri
       refute answer =~ "transport-cc"
 
       # the rest of the answered feedback is untouched
@@ -1005,7 +1118,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       offer = String.replace(@chrome_offer, ~r/a=extmap:3 [^\r\n]*\r?\n/, "")
       answer = answer_for(ctx.did, offer)
 
-      refute answer =~ "a=extmap"
+      refute answer =~ @transport_cc_uri
       refute answer =~ "transport-cc"
 
       refute Map.has_key?(rtp_props(1), @transport_cc_uri)
@@ -1023,7 +1136,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
       answer = answer_for(ctx.did, offer)
 
-      refute answer =~ "a=extmap"
+      refute answer =~ @transport_cc_uri
       refute answer =~ "transport-cc"
 
       refute Map.has_key?(rtp_props(1), @transport_cc_uri)
@@ -1156,6 +1269,8 @@ defmodule Kelix.Mod.McuWebrtcTest do
       |> Enum.reverse()
       |> Enum.join("\r\n")
       |> Kernel.<>("\r\n" <> @datachannel_section)
+      # what a browser does: the data channel is in the BUNDLE group
+      |> String.replace("a=group:BUNDLE 0 1", "a=group:BUNDLE 0 1 2")
     end
 
     @tag dc: :ok
