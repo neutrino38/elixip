@@ -35,6 +35,11 @@ defmodule Kelix.Mod.PresenceTest do
   defp doc(user, status, note \\ nil),
     do: SIP.Presence.Doc.new("sip:#{user}@#{@domain}", status, note: note)
 
+  # What a watcher is told is the composite (`SIP.Presence.Doc.compose/2`), whose
+  # tuple ids are the collection's: compared without them.
+  defp unnamed(%SIP.Presence.Doc{} = doc),
+    do: %{doc | tuples: Enum.map(doc.tuples, &%{&1 | id: nil})}
+
   # A subscription as `accept_subscription/1` hands it back: granted, active, and
   # naming the resource in `presentity_uri`.
   defp subscription(presentity, watcher, opts \\ []) do
@@ -119,7 +124,7 @@ defmodule Kelix.Mod.PresenceTest do
           publication("bob", operation: :refresh, etag: etag, doc: nil, body: nil)
         )
 
-      assert Presence.state_of(@domain, {"bob", @package}) == published
+      assert unnamed(Presence.state_of(@domain, {"bob", @package})) == unnamed(published)
     end
 
     test "a modification replaces it" do
@@ -129,12 +134,11 @@ defmodule Kelix.Mod.PresenceTest do
       {:ok, _, _} =
         Presence.publish(@domain, publication("bob", operation: :modify, etag: etag, doc: closed))
 
-      assert Presence.state_of(@domain, {"bob", @package}) == closed
+      assert unnamed(Presence.state_of(@domain, {"bob", @package})) == unnamed(closed)
     end
 
     # RFC 3903 §4.1: a handset and a desk phone may hold state for one presentity
-    # at the same time, each with a tag of its own. v1 emits the most recent
-    # rather than composing them — see the moduledoc.
+    # at the same time, each with a tag of its own.
     test "two publishers of one presentity each keep their own tag" do
       {:ok, phone, _} = Presence.publish(@domain, publication("bob", doc: doc("bob", :open)))
       {:ok, desk, _} = Presence.publish(@domain, publication("bob", doc: doc("bob", :closed)))
@@ -213,14 +217,19 @@ defmodule Kelix.Mod.PresenceTest do
       assert status(Presence.state_of(@domain, {"bob", @package})) == :closed
     end
 
-    # A refresh carries no state: the publisher that refreshes does not take over
-    # from the one that changed its state since.
-    test "a refresh does not make its publication the current state" do
+    # A refresh carries no state: it neither moves its publication's tuples nor
+    # touches the person another publisher stated since.
+    test "a refresh changes nothing in the composite" do
       {:ok, phone, _} =
         Presence.publish(@domain, publication("bob", flow: udp(5070), doc: doc("bob", :open)))
 
       {:ok, _, _} =
-        Presence.publish(@domain, publication("bob", flow: udp(5080), doc: doc("bob", :closed)))
+        Presence.publish(
+          @domain,
+          publication("bob", flow: udp(5080), doc: doc("bob", :closed, "desk"))
+        )
+
+      before = Presence.state_of(@domain, {"bob", @package})
 
       {:ok, _, _} =
         Presence.publish(
@@ -228,20 +237,181 @@ defmodule Kelix.Mod.PresenceTest do
           publication("bob", flow: udp(5070), operation: :refresh, etag: phone, doc: nil)
         )
 
-      assert status(Presence.state_of(@domain, {"bob", @package})) == :closed
+      assert Presence.state_of(@domain, {"bob", @package}) == before
+      assert %SIP.Presence.Doc{note: "desk"} = before
     end
 
-    # Two PUBLISHes in the same second: the second is the state.
-    test "the latest state change wins, within the same second too" do
-      for status <- [:open, :closed, :open, :closed] do
+    # Two PUBLISHes in the same second: the second states the person.
+    test "the latest person state wins, within the same second too" do
+      for note <- ["a", "b", "c", "d"] do
         {:ok, _, _} =
-          Presence.publish(@domain, publication("bob", flow: udp(5070), doc: doc("bob", status)))
+          Presence.publish(
+            @domain,
+            publication("bob", flow: udp(5070), doc: doc("bob", :open, note <> "1"))
+          )
 
         {:ok, _, _} =
-          Presence.publish(@domain, publication("bob", flow: udp(5080), doc: doc("bob", status)))
+          Presence.publish(
+            @domain,
+            publication("bob", flow: udp(5080), doc: doc("bob", :open, note <> "2"))
+          )
 
-        assert status(Presence.state_of(@domain, {"bob", @package})) == status
+        assert Presence.state_of(@domain, {"bob", @package}).note == note <> "2"
       end
+    end
+  end
+
+  # presence-composite-plan.md, PC3: one document per presentity, the tuples of
+  # every live publication under one person state.
+  describe "the composite state" do
+    defp activity(user, status, activity, stamp \\ nil),
+      do:
+        SIP.Presence.Doc.new("sip:#{user}@#{@domain}", status,
+          activity: activity,
+          timestamp: stamp
+        )
+
+    defp bob, do: Presence.state_of(@domain, {"bob", @package})
+
+    test "the tuples are the union: one open device makes the presentity open" do
+      {:ok, _, _} =
+        Presence.publish(@domain, publication("bob", flow: udp(5070), doc: doc("bob", :closed)))
+
+      {:ok, _, _} =
+        Presence.publish(@domain, publication("bob", flow: udp(5080), doc: doc("bob", :open)))
+
+      assert SIP.Presence.Doc.status(bob()) == :open
+      assert [%{status: :closed}, %{status: :open}] = bob().tuples
+      assert bob().entity == "sip:bob@#{@domain}"
+    end
+
+    # §1, first symptom: away on the phone, the phone closed — Bob is still away,
+    # not what the desk phone said two hours ago.
+    test "the person state outlives the device that set it" do
+      phone = connection()
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: udp(5070)))
+      assert_receive {:presence, :state, _, _desk}
+
+      {:ok, _, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", flow: phone, doc: activity("bob", :open, :away))
+        )
+
+      assert_receive {:presence, :state, _, %SIP.Presence.Doc{activity: :away}}
+
+      drop(phone)
+
+      assert_receive {:presence, :state, _, %SIP.Presence.Doc{activity: :away, tuples: [_desk]}}
+    end
+
+    # Decision 1: the field clients say "available" by publishing no person at
+    # all; a modification without an activity clears it, a refresh does not.
+    test "a modification with no activity clears the person state" do
+      {:ok, etag, _} =
+        Presence.publish(@domain, publication("bob", doc: activity("bob", :open, :busy)))
+
+      assert bob().activity == :busy
+
+      {:ok, etag, _} =
+        Presence.publish(@domain, publication("bob", operation: :refresh, etag: etag, doc: nil))
+
+      assert bob().activity == :busy
+
+      {:ok, _, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", operation: :modify, etag: etag, doc: doc("bob", :open))
+        )
+
+      assert bob().activity == nil
+    end
+
+    # §1, second symptom: a device subscribed to its own presentity is told the
+    # composite, its own tuple included, and has nothing to republish.
+    test "a device watching its own presentity follows its other device" do
+      desk = udp(5070)
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "bob"))
+
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: desk))
+      assert_receive {:presence, :state, _, _}
+
+      {:ok, phone, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", flow: udp(5080), doc: activity("bob", :open, :busy))
+        )
+
+      assert_receive {:presence, :state, _, %SIP.Presence.Doc{activity: :busy, tuples: [_, _]}}
+
+      {:ok, nil, 0} =
+        Presence.publish(@domain, publication("bob", operation: :remove, etag: phone, expires: 0))
+
+      assert_receive {:presence, :state, _, %SIP.Presence.Doc{activity: :busy, tuples: [_]}}
+    end
+
+    # Linphone stamps every PUBLISH anew and mints new tuple ids: neither is news.
+    test "republishing what the composite says notifies nobody" do
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+
+      {:ok, etag, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", doc: activity("bob", :open, :busy, ~U[2026-10-01 19:18:51Z]))
+        )
+
+      assert_receive {:presence, :state, _, _}
+
+      republished = %{
+        activity("bob", :open, :busy, ~U[2026-10-01 19:20:00Z])
+        | tuples: [
+            %{
+              hd(activity("bob", :open, :busy).tuples)
+              | id: "pkgmk2",
+                timestamp: ~U[2026-10-01 19:20:00Z]
+            }
+          ]
+      }
+
+      {:ok, etag, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", operation: :modify, etag: etag, doc: republished)
+        )
+
+      {:ok, _, _} =
+        Presence.publish(@domain, publication("bob", operation: :refresh, etag: etag, doc: nil))
+
+      refute_receive {:presence, :state, _, _}, 100
+    end
+
+    # The tuples are named after the publication's `ruid`, which outlives its
+    # entity-tags: a device that did not move keeps its ids.
+    test "a publication keeps its tuple ids across modifications" do
+      {:ok, etag, _} = Presence.publish(@domain, publication("bob"))
+      [%{id: id}] = bob().tuples
+
+      {:ok, _, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", operation: :modify, etag: etag, doc: activity("bob", :open, :away))
+        )
+
+      assert [%{id: ^id}] = bob().tuples
+      assert [%{ruid: ruid}] = Presence.presentities(@domain)
+      assert id == "t-#{ruid}-1"
+    end
+
+    # A client that lost its tag starts over from the same flow: same device,
+    # same tuples.
+    test "an initial PUBLISH replacing the publisher's own keeps its ruid" do
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: udp(5070)))
+      [%{id: id}] = bob().tuples
+
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", flow: udp(5070)))
+      assert [%{id: ^id}] = bob().tuples
     end
   end
 
@@ -303,7 +473,8 @@ defmodule Kelix.Mod.PresenceTest do
       published = doc("bob", :open, "Available")
       {:ok, _etag, _} = Presence.publish(@domain, publication("bob", doc: published))
 
-      assert {:ok, ^published} = Presence.watch(@domain, subscription("bob", "alice"))
+      assert {:ok, held} = Presence.watch(@domain, subscription("bob", "alice"))
+      assert unnamed(held) == unnamed(published)
     end
 
     test "a watcher of a resource nobody published gets nil, not an error" do
@@ -322,8 +493,9 @@ defmodule Kelix.Mod.PresenceTest do
       {:ok, _etag, _} = Presence.publish(@domain, publication("bob", doc: published))
 
       resource = {"bob", @domain, @package}
-      assert_receive {:presence, :state, ^resource, ^published}
-      assert_receive {:watcher_got, ^other, {:presence, :state, ^resource, ^published}}
+      assert_receive {:presence, :state, ^resource, pushed}
+      assert unnamed(pushed) == unnamed(published)
+      assert_receive {:watcher_got, ^other, {:presence, :state, ^resource, ^pushed}}
     end
 
     test "a watcher of another resource is not pushed to" do
@@ -433,11 +605,12 @@ defmodule Kelix.Mod.PresenceTest do
       sub = subscription("bob", "alice", presentity_domain: @other)
       {:ok, nil} = Presence.watch(@domain, sub)
 
-      published = doc("bob", :open, "Back")
+      published = SIP.Presence.Doc.new("sip:bob@#{@other}", :open, note: "Back")
       pub = %{publication("bob", doc: published) | domain: @other}
       {:ok, _etag, _} = Presence.publish(@other, pub)
 
-      assert_receive {:presence, :state, {"bob", @other, @package}, ^published}
+      assert_receive {:presence, :state, {"bob", @other, @package}, pushed}
+      assert unnamed(pushed) == unnamed(published)
     end
 
     test "and it is listed on that domain, under the presentity it actually watches" do
@@ -672,7 +845,10 @@ defmodule Kelix.Mod.PresenceTest do
 
       :unregistered = register(phone, 0)
 
-      assert_receive {:presence, :state, @magali, %SIP.Presence.Doc{note: "desk"}}
+      # the phone's tuple goes; the person it stated stays (see *The composite
+      # state*)
+      assert_receive {:presence, :state, @magali,
+                      %SIP.Presence.Doc{note: "phone", tuples: [%{note: "desk"}]}}
 
       assert [%{activity: _}] =
                Enum.filter(Presence.presentities("weshwesh.eu"), &(&1.source == "publish"))
@@ -1024,7 +1200,8 @@ defmodule Kelix.Mod.PresenceTest do
 
       published = doc("8001", :closed, "maintenance")
       {:ok, _etag, _} = Presence.publish(@domain, publication("8001", doc: published, expires: 1))
-      assert_receive {:presence, :state, @room, ^published}
+      assert_receive {:presence, :state, @room, pushed}
+      assert unnamed(pushed) == unnamed(published)
 
       # under a live publication, a report changes nothing a watcher can see
       :ok = report_from(reporter, "8001", doc("8001", :open))

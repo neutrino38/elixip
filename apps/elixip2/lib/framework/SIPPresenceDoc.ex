@@ -153,6 +153,23 @@ defmodule SIP.Presence.Doc do
   end
 
   @doc """
+  Whether two documents state the same thing — what decides that a watcher has
+  news.
+
+  The tuples' `timestamp` is left out: it says when a device last spoke, not what
+  it said, and a client stamps every PUBLISH anew. Everything else counts.
+
+      iex> a = SIP.Presence.Doc.new("sip:bob@ives.fr", :open, timestamp: ~U[2026-10-01 19:18:51Z])
+      iex> b = SIP.Presence.Doc.new("sip:bob@ives.fr", :open, timestamp: ~U[2026-10-01 19:20:00Z])
+      iex> {SIP.Presence.Doc.same_state?(a, b), SIP.Presence.Doc.same_state?(a, %{b | activity: :away})}
+      {true, false}
+  """
+  @spec same_state?(t(), t()) :: boolean()
+  def same_state?(%__MODULE__{} = a, %__MODULE__{} = b), do: untimed(a) == untimed(b)
+
+  defp untimed(doc), do: %{doc | tuples: Enum.map(doc.tuples, &%Tuple{&1 | timestamp: nil})}
+
+  @doc """
   The composite reachability: `:open` as soon as **one** tuple is open.
 
   RFC 3863 defines no document-wide status, and a watcher that wants "is Bob

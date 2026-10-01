@@ -1,7 +1,8 @@
 # presence-composite-plan.md — the composite state of a presentity, first slice
 
-**Status: planned 2026-09-30. PC0, PC1 and PC2 done 2026-10-01; decision 1
-taken on the traces.** The presence design is
+**Status: planned 2026-09-30. PC0, PC1 and PC2 done 2026-10-01, PC3 done
+2026-10-02; decision 1 taken on the traces. The third symptom of §1 is not
+fixed by composition: decision 3.** The presence design is
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md); this document is the order the first
 slice of objective 1 — *a composite state* — gets built in, what each phase
 delivers, and what proves it.
@@ -129,6 +130,22 @@ Proof: module tests for the three symptoms of §1, each failing before the phase
 the self-subscription case (Bob watching Bob, notified of his other device's
 change).
 
+As built: the `ruid` is `SIP.Publication.new_ruid/0`, minted by the collection
+on the initial PUBLISH, kept by refreshes and modifications, and kept too by an
+initial PUBLISH that replaces the same publisher's publication (same device,
+same tuples). Every publication carrying a document sets the person state —
+`activity` and `note` — and a refresh leaves it. Only `presence` documents are
+composed; any other package keeps the document of the last state change. "The
+composite changed" is `SIP.Presence.Doc.same_state?/2`, which ignores the tuples'
+timestamps (both clients stamp every PUBLISH). The expiry sweep cannot read back
+the state it replaces, so it pushes unconditionally, as before. `kelictl presence
+show` gains a `ruid` column.
+
+Proof: the first two symptoms, the union, decision 1, the silent republication
+and the stable tuple ids, in `presence_test.exs` (*the composite state*); four of
+them fail on the code before the phase. The third symptom is not among them —
+see decision 3.
+
 ### PC4 — the registration in the composite (decision 2)
 
 Today a registered device that publishes nothing counts only when **nothing** is
@@ -153,3 +170,10 @@ both follow.
    without `<rpid:activities>`) clears it; a **refresh** (RFC 3903 §4.4, no body)
    leaves it as it is.
 2. **Registration tuples** — PC4, with or without it.
+3. **Devices behind a proxy** — open, found in PC3. Composition does not fix the
+   third symptom of §1: the two devices are one publisher, so the initial
+   PUBLISH of the second replaces the first's publication before anything is
+   composed. Telling them apart takes a reading of the PUBLISH that names the
+   device beyond the flow — the bottom `Via` sent-by is the candidate — and that
+   reading belongs to `SIP.Msg.Ops`. Alternatively, accept it as a documented
+   limitation (it is one in `presence.md` today).

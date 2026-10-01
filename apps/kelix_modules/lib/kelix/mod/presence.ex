@@ -103,13 +103,31 @@ defmodule Kelix.Mod.Presence do
   was published over it goes and the watchers are told, as for a removal. A
   client that disconnects without unpublishing leaves nothing behind.
 
-  ## Composition is not done here
+  ## The composite state
 
-  v1 emits **full state from the most recent state change** rather than composing
-  the publishers' states: the composite state is its own phase, and a wrong
-  composition is worse than an honest "the last thing said about this resource".
-  A refresh changes nothing (it carries no state), so it does not make its
-  publication the most recent one.
+  What a watcher of the `presence` package is told is **one** document composed
+  of every live publication of the resource (`SIP.Presence.Doc.compose/2`, RFC
+  4479's two levels):
+
+    * the **tuples** are the union of the publications' tuples — Bob is open as
+      soon as one of his devices is. Each publication's tuples are named after
+      its `ruid`, minted on its initial PUBLISH and kept across its refreshes and
+      modifications, so a device that did not move keeps its tuple ids;
+    * the **person** — activity and note — is one state per resource, held here:
+      every publication that carries a document sets it, and a document with no
+      activity clears it (the field clients say "available" by saying nothing).
+      A refresh carries no document and leaves it. It survives the departure of
+      the device that set it, and goes with the resource's last publication.
+
+  A device subscribed to its own presentity is told the composite, and has
+  nothing to republish.
+
+  Watchers are pushed when the composite **changes**: a refresh, or a device
+  republishing what the composite already says, costs nobody a NOTIFY. The
+  tuples' timestamps do not count (`SIP.Presence.Doc.same_state?/2`).
+
+  Any other package is not composed: its state is the document of the
+  publication whose state changed last.
   """
   use GenServer
   @behaviour Kelix.Module
@@ -129,6 +147,8 @@ defmodule Kelix.Mod.Presence do
   #   reporters  %{pid => monitor_ref} of the processes that reported a state
   #   connections %{pid => monitor_ref} of the transport instances publications
   #              came in on (connection-oriented transports only)
+  #   persons    %{resource => %SIP.Presence.Doc{}}, the person state of a
+  #              `presence` resource (activity, note), see *The composite state*
   #   panel_subs %{domain => MapSet(pid)} subscribed via `subscribe_presentities/2`
   #   panel_mons %{monitor_ref => {domain, pid}}, dropped on death without an
   #              explicit `unsubscribe_presentities/2`
@@ -139,6 +159,7 @@ defmodule Kelix.Mod.Presence do
             reported: %{},
             reporters: %{},
             connections: %{},
+            persons: %{},
             panel_subs: %{},
             panel_mons: %{},
             sweep_ms: @sweep_ms
@@ -241,7 +262,7 @@ defmodule Kelix.Mod.Presence do
           fields: ~w(presentity_uri states watchers),
           nested: %{
             "states" => %{
-              columns: ~w(event source status activity etag expires sender content_type)
+              columns: ~w(event source status activity ruid etag expires sender content_type)
             },
             "watchers" => %{columns: ~w(watcher event status expires callid)}
           }
@@ -883,6 +904,7 @@ defmodule Kelix.Mod.Presence do
     tid = ensure_table(state.states, rdomain)
     state = %{state | states: Map.put(state.states, rdomain, tid)}
     held = live_publications(lookup_list(tid, resource))
+    before = known_state(state, resource)
 
     case plan_publication(pub, held) do
       {:error, 412} ->
@@ -899,13 +921,18 @@ defmodule Kelix.Mod.Presence do
 
       {:remove, previous} ->
         store(tid, resource, List.delete(held, previous))
-        {{:ok, nil, 0}, fan_out(state, resource, :removed)}
+        {{:ok, nil, 0}, fan_out(state, resource, :removed, before)}
 
       {:store, previous, stored} ->
         store(tid, resource, place(held, previous, stored))
 
-        {{:ok, stored.etag, SIP.Publication.remaining(stored)},
-         state |> monitor_connection(stored) |> fan_out(resource, :published)}
+        state =
+          state
+          |> hold_person(resource, stored)
+          |> monitor_connection(stored)
+          |> fan_out(resource, :published, before)
+
+        {{:ok, stored.etag, SIP.Publication.remaining(stored)}, state}
     end
   end
 
@@ -927,9 +954,12 @@ defmodule Kelix.Mod.Presence do
   # What a PUBLISH asks of the collection, RFC 3903 §4.1 read against what is
   # held. The four operations are `check_publish/1`'s reading of the request; what
   # is added here is the only thing it could not know — whether we hold the tag.
-  # An initial PUBLISH from a publisher that already holds a state replaces it.
-  defp plan_publication(%SIP.Publication{operation: :initial} = pub, held),
-    do: {:store, Enum.find(held, &SIP.Publication.same_publisher?(&1, pub)), issue(pub)}
+  # An initial PUBLISH from a publisher that already holds a state replaces it,
+  # and keeps its `ruid`: it is the same device, starting over.
+  defp plan_publication(%SIP.Publication{operation: :initial} = pub, held) do
+    previous = Enum.find(held, &SIP.Publication.same_publisher?(&1, pub))
+    {:store, previous, issue(%{pub | ruid: ruid_of(previous)})}
+  end
 
   defp plan_publication(%SIP.Publication{} = pub, held) do
     case Enum.find(held, &(&1.etag == pub.etag)) do
@@ -948,12 +978,43 @@ defmodule Kelix.Mod.Presence do
       {:store, previous,
        issue(%{previous | expires: pub.expires, flow: pub.flow, operation: :refresh})}
 
-  defp replace(%SIP.Publication{} = pub, previous), do: {:store, previous, issue(pub)}
+  defp replace(%SIP.Publication{} = pub, previous),
+    do: {:store, previous, issue(%{pub | ruid: previous.ruid})}
 
   # Every successful publication gets a NEW tag (RFC 3903 §4.1): the one the
-  # publisher presented is spent, and the next refresh must present this one.
-  defp issue(%SIP.Publication{} = pub),
-    do: %{pub | etag: SIP.Publication.new_etag(), received_time: SIP.Publication.now()}
+  # publisher presented is spent, and the next refresh must present this one. The
+  # `ruid` is minted once, on the initial PUBLISH, and kept: it names the
+  # publication's tuples in the composite, which must not move with the tag.
+  defp issue(%SIP.Publication{} = pub) do
+    %{
+      pub
+      | etag: SIP.Publication.new_etag(),
+        ruid: pub.ruid || SIP.Publication.new_ruid(),
+        received_time: SIP.Publication.now()
+    }
+  end
+
+  defp ruid_of(nil), do: nil
+  defp ruid_of(%SIP.Publication{ruid: ruid}), do: ruid
+
+  # Decision 1 of presence-composite-plan.md: every publication that carries a
+  # document states the person — a document with no activity states "none",
+  # which is how the field clients say "available". A refresh carries none.
+  defp hold_person(state, {user, rdomain, _event} = resource, %SIP.Publication{
+         operation: operation,
+         doc: %SIP.Presence.Doc{} = doc
+       })
+       when operation != :refresh do
+    person = %SIP.Presence.Doc{
+      entity: "sip:#{user}@#{rdomain}",
+      activity: doc.activity,
+      note: doc.note
+    }
+
+    %{state | persons: Map.put(state.persons, resource, person)}
+  end
+
+  defp hold_person(state, _resource, _pub), do: state
 
   # ── the connections publications came in on ─────────────────────────────────
 
@@ -980,8 +1041,9 @@ defmodule Kelix.Mod.Presence do
             acc
 
           kept ->
+            before = known_state(acc, resource)
             store(tid, resource, kept)
-            fan_out(acc, resource, :disconnected)
+            fan_out(acc, resource, :disconnected, before)
         end
       end)
     end)
@@ -1002,8 +1064,9 @@ defmodule Kelix.Mod.Presence do
                 acc
 
               kept ->
+                before = known_state(acc, resource)
                 store(tid, resource, kept)
-                fan_out(acc, resource, :removed)
+                fan_out(acc, resource, :removed, before)
             end
 
           _other, acc ->
@@ -1115,17 +1178,38 @@ defmodule Kelix.Mod.Presence do
   # which sends the NOTIFY from its own state (plan decision 1): a NOTIFY sent
   # from here would be invisible to `kelictl monitor` and to the sequence diagram,
   # and a scenario parked in a state would no longer describe what the node does.
-  defp fan_out(state, {_user, rdomain, _event} = resource, event) do
+  #
+  # `before` is the state the watchers were last told, read before the change;
+  # they are pushed only when the state now differs (see *The composite state*).
+  # `:unknown` when it cannot be read back — the sweep finds the lapsed
+  # publications already out of the state — and the push is then made.
+  defp fan_out(state, {_user, rdomain, _event} = resource, event, before) do
+    state = settle_person(state, resource)
     watchers = watchers_of(state, resource)
 
     # Nothing to compute for nobody. When the last publication goes, the
     # presentity published, so it exists — the subscriber base is not asked.
-    if map_size(watchers) > 0, do: push(watchers, resource, known_state(state, resource))
+    if map_size(watchers) > 0 do
+      now = known_state(state, resource)
+      if before == :unknown or not same_state?(before, now), do: push(watchers, resource, now)
+    end
 
     broadcast_panel(state, resource)
     Kelix.Metrics.Emit.presence_event(rdomain, event)
     state
   end
+
+  # The person state goes with the resource's last publication.
+  defp settle_person(state, resource) do
+    if Map.has_key?(state.persons, resource) and current_doc(state, resource) == nil,
+      do: %{state | persons: Map.delete(state.persons, resource)},
+      else: state
+  end
+
+  defp same_state?(%SIP.Presence.Doc{} = a, %SIP.Presence.Doc{} = b),
+    do: SIP.Presence.Doc.same_state?(a, b)
+
+  defp same_state?(a, b), do: a == b
 
   defp push(watchers, resource, doc) do
     for {pid, _sub} <- watchers, do: send(pid, {:presence, :state, resource, doc})
@@ -1327,9 +1411,10 @@ defmodule Kelix.Mod.Presence do
     end
   end
 
-  # The state of a resource: the document of the live publication whose state
-  # changed last — the last of the list, see `place/3` — (the moduledoc:
-  # composition is its own phase), `nil` when nothing is published.
+  # The state of a resource, `nil` when nothing is published: on `presence`, the
+  # composite of its live publications under the person state held (see *The
+  # composite state*); on any other package, the document of the publication
+  # whose state changed last — the last of the list, see `place/3`.
   defp current_doc(state, {_user, rdomain, _event} = resource) do
     case Map.get(state.states, rdomain) do
       nil ->
@@ -1338,8 +1423,19 @@ defmodule Kelix.Mod.Presence do
       tid ->
         case live_publications(lookup_list(tid, resource)) do
           [] -> nil
-          pubs -> List.last(pubs).doc
+          pubs -> composite(state, resource, pubs)
         end
+    end
+  end
+
+  defp composite(state, {user, rdomain, _event} = resource, pubs) do
+    if Enum.all?(pubs, &match?(%SIP.Presence.Doc{}, &1.doc)) do
+      person =
+        Map.get(state.persons, resource, %SIP.Presence.Doc{entity: "sip:#{user}@#{rdomain}"})
+
+      SIP.Presence.Doc.compose(person, for(pub <- pubs, do: {pub.ruid, pub.doc}))
+    else
+      List.last(pubs).doc
     end
   end
 
@@ -1358,8 +1454,9 @@ defmodule Kelix.Mod.Presence do
           resources ->
             state =
               Enum.reduce(resources, state, fn resource, st ->
+                before = known_state(st, resource)
                 :ets.delete(tid, resource)
-                fan_out(st, resource, :removed)
+                fan_out(st, resource, :removed, before)
               end)
 
             {:ok, state}
@@ -1380,7 +1477,7 @@ defmodule Kelix.Mod.Presence do
 
         live ->
           store(tid, resource, live)
-          fan_out(st, resource, :expired)
+          fan_out(st, resource, :expired, :unknown)
       end
     end)
   end
@@ -1517,6 +1614,7 @@ defmodule Kelix.Mod.Presence do
       source: "publish",
       status: doc_field(pub.doc, :status),
       activity: doc_field(pub.doc, :activity),
+      ruid: pub.ruid,
       etag: pub.etag,
       expires: SIP.Publication.remaining(pub),
       sender: pub.sender,
@@ -1537,6 +1635,7 @@ defmodule Kelix.Mod.Presence do
         source: "registrar",
         status: "open",
         activity: nil,
+        ruid: nil,
         etag: nil,
         expires: nil,
         sender: nil,
@@ -1557,6 +1656,7 @@ defmodule Kelix.Mod.Presence do
         source: to_string(source),
         status: doc_field(entry.doc, :status),
         activity: doc_field(entry.doc, :activity),
+        ruid: nil,
         etag: nil,
         expires: nil,
         sender: nil,

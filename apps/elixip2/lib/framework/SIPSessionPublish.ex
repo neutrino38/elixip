@@ -173,6 +173,18 @@ defmodule SIP.Publication do
   @spec new_etag() :: binary()
   def new_etag, do: SIP.Msg.Ops.generate_from_or_to_tag()
 
+  @doc """
+  A fresh `ruid`: the publication's own identifier, minted once on its initial
+  PUBLISH and kept across its refreshes and modifications — where the entity-tag
+  changes every time.
+
+  It names the publication's tuples in a composite document
+  (`SIP.Presence.Doc.compose/2`), so it is spelt with characters an XML `NCName`
+  accepts after a prefix: lower-case hexadecimal.
+  """
+  @spec new_ruid() :: binary()
+  def new_ruid, do: :crypto.strong_rand_bytes(6) |> Base.encode16(case: :lower)
+
   @doc "The epoch second, the way kamailio counts it (`time(NULL)`)."
   @spec now() :: integer()
   defdelegate now(), to: SIP.Subscription
