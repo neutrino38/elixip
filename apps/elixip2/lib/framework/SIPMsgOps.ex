@@ -245,19 +245,26 @@ defmodule SIP.Msg.Ops do
   `{:error, reason}` is a disposition that says "recipient-list" over something
   that is not one: the request asked for a list subscription and did not supply a
   readable list, which is a **400**, not a subscription to nothing.
+
+  A disposition over no body at all is `:none`: the disposition describes a body,
+  and there is none to describe. Linphone sends exactly that when it ends a list
+  subscription — `Expires: 0`, the list headers of the initial SUBSCRIBE copied
+  over, no body (RFC 5367 lets a refresh omit the list).
   """
   @spec recipient_list(map()) :: {:ok, [binary()]} | :none | {:error, term()}
   def recipient_list(msg) when is_map(msg) do
-    if content_disposition(msg) == "recipient-list" do
-      case {body_content_type(msg), body_string(msg)} do
-        {"application/resource-lists+xml", body} when is_binary(body) ->
-          SIP.Presence.ResourceLists.parse(body)
+    case {content_disposition(msg), body_content_type(msg), body_string(msg)} do
+      {"recipient-list", "application/resource-lists+xml", body} when is_binary(body) ->
+        SIP.Presence.ResourceLists.parse(body)
 
-        {type, _body} ->
-          {:error, {:not_a_resource_list, type}}
-      end
-    else
-      :none
+      {"recipient-list", nil, nil} ->
+        :none
+
+      {"recipient-list", type, _body} ->
+        {:error, {:not_a_resource_list, type}}
+
+      _not_a_list ->
+        :none
     end
   end
 

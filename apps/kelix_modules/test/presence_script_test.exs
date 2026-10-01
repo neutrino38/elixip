@@ -636,6 +636,28 @@ defmodule Kelix.PresenceScriptTest do
       assert [_watcher] = Presence.watchers(@domain, @presentity)
     end
 
+    # How Linphone 6.2 ends its buddy list: `Expires: 0`, no body, but the
+    # `Content-Disposition: recipient-list` and `Require` of the initial SUBSCRIBE
+    # copied over. Read as a list it failed to supply, it was answered 400 and the
+    # subscription lingered until it expired.
+    test "an unsubscribe without the list, keeping its headers, is a 200", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri()])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      unsubscribe =
+        req
+        |> Map.drop([:body, :contenttype])
+        |> Map.merge(%{ruri: our_contact(), expires: 0})
+
+      submit(pid, dialog, unsubscribe)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+    end
+
     # The same refresh as a UA that repeats its list sends it: the list URI is
     # still the initial Request-URI, not our Contact.
     test "a refresh repeating the list keeps the list URI", %{rls: m} do
