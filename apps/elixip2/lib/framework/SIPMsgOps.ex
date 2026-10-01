@@ -719,6 +719,28 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  Who is at the other end of `flow` (`arrival_flow/1`'s shape): the connection,
+  over a connection-oriented transport (`SIP.Transport.connection_oriented?/1`) —
+  `{:connection, pid}` — else the source address and port — `{:address,
+  received}` — else `nil`, which is nobody in particular.
+
+  Two requests that answer the same came from the same device, as far as the
+  network can tell: what tells apart the devices of one user when the request
+  names none, as a PUBLISH does. A UDP transport's pid names nobody: one instance
+  serves every peer.
+  """
+  @spec flow_peer(map() | nil) :: {:connection, pid()} | {:address, tuple()} | nil
+  def flow_peer(%{tp_pid: pid, tp_module: mod} = flow) when is_pid(pid) do
+    if SIP.Transport.connection_oriented?(mod), do: {:connection, pid}, else: flow_address(flow)
+  end
+
+  def flow_peer(%{} = flow), do: flow_address(flow)
+  def flow_peer(_none), do: nil
+
+  defp flow_address(%{received: {_proto, _ip, _port} = received}), do: {:address, received}
+  defp flow_address(_flow), do: nil
+
+  @doc """
   The Request-URI that reaches `contact` — a Contact header value — over `flow`
   (`arrival_flow/1`'s shape): the contact as a Request-URI, stamped with the
   destination and the transport instance `SIP.Transport.Selector` short-circuits

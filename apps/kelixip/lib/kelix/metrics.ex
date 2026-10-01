@@ -95,7 +95,7 @@ defmodule Kelix.Metrics do
         event_name: [:kelix, :presence, :event],
         measurement: :count,
         tags: [:domain, :event],
-        description: "Presence events (published / removed / expired)"
+        description: "Presence events (published / removed / expired / disconnected)"
       ),
 
       # Gauges (emitted by the poller).
