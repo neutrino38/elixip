@@ -44,6 +44,10 @@
 #  event-package = "presence"
 #  subscribe     = "presence-subscribe.exs"
 #  publish       = "presence-publish.exs"
+#  # A client whose list URI is a setting can use one on this domain: a SUBSCRIBE
+#  # to sip:rls@example.com then reaches the list script below.
+#  #lists          = ["rls"]
+#  #list-subscribe = "presence-rls.exs"
 #
 #  # Chat (page-mode MESSAGE, RFC 3428): the dial-plan's shape, on the R-URI
 #  # user-part. One instance serves a conversation — same sender, same recipient,

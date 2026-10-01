@@ -39,7 +39,7 @@ defmodule Kelix.Domains do
     "min_expires" => :pos_integer,
     "keepalive_period" => :pos_integer
   }
-  @presence_keys ~w(event-package subscribe publish)
+  @presence_keys ~w(event-package subscribe publish lists list-subscribe)
 
   # ── GenServer API ────────────────────────────────────────────────────────────
 
@@ -213,12 +213,16 @@ defmodule Kelix.Domains do
       for block <- List.wrap(d.registrar),
           do: {block.script, "domain #{d.name} [domain.registrar]"}
 
-    # Both scripts of every block: a node whose `publish` script is missing serves
+    # Every script of every block: a node whose `publish` script is missing serves
     # SUBSCRIBE and dies on the first PUBLISH, which is exactly what the load-time
     # contract exists to catch.
     presence_refs =
       for block <- d.presence,
-          {key, script} <- [subscribe: block.subscribe, publish: block.publish],
+          {key, script} <- [
+            subscribe: block.subscribe,
+            publish: block.publish,
+            "list-subscribe": block.list_subscribe
+          ],
           is_binary(script),
           do:
             {script,
@@ -478,14 +482,17 @@ defmodule Kelix.Domains do
     with :ok <- reject_keys(block, @presence_keys, ctx),
          {:ok, package} <- req_string(block, "event-package", ctx),
          {:ok, subscribe} <- req_string(block, "subscribe", ctx),
-         {:ok, publish} <- opt_script(block, "publish", ctx) do
+         {:ok, publish} <- opt_script(block, "publish", ctx),
+         {:ok, lists, list_subscribe} <- parse_lists(block, ctx) do
       {:ok,
        %PresenceBlock{
          # The package name is matched against `Event`, which is case-insensitive
          # (RFC 6665 §8.2.1) — folded once here so nothing downcases at lookup.
          event_package: String.downcase(package),
          subscribe: subscribe,
-         publish: publish
+         publish: publish,
+         lists: lists,
+         list_subscribe: list_subscribe
        }}
     end
   end
@@ -507,6 +514,33 @@ defmodule Kelix.Domains do
         {:error,
          "domain #{inspect(domain)}: event package #{inspect(package)} is served by " <>
            "more than one [[domain.presence]] block"}
+    end
+  end
+
+  # `lists` and `list-subscribe` go together: list URIs with no script to serve
+  # them, or a script no URI reaches, is a block the operator has half written.
+  defp parse_lists(block, ctx) do
+    case {Map.get(block, "lists"), opt_script(block, "list-subscribe", ctx)} do
+      {_, {:error, _} = err} ->
+        err
+
+      {nil, {:ok, nil}} ->
+        {:ok, [], nil}
+
+      {nil, {:ok, _}} ->
+        {:error, "#{ctx}: `list-subscribe` needs `lists`, the list URIs it serves"}
+
+      {lists, {:ok, script}} ->
+        cond do
+          not (is_list(lists) and lists != [] and Enum.all?(lists, &(is_binary(&1) and &1 != ""))) ->
+            {:error, "#{ctx}: `lists` must be a non-empty list of R-URI user parts"}
+
+          script == nil ->
+            {:error, "#{ctx}: `lists` needs `list-subscribe`, the script serving them"}
+
+          true ->
+            {:ok, Enum.uniq(lists), script}
+        end
     end
   end
 

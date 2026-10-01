@@ -379,6 +379,12 @@ arriving. And the watcher is authenticated on the realm of its **own `From`**
 (`realm: :from_domain`) — challenging on the routed domain asks for credentials
 that exist nowhere.
 
+A client whose list URI is a setting can point it at its own domain instead
+(`sip:rls@example.com`). The domain's `[[domain.presence]]` block then names it in
+`lists`, and the Router sends a SUBSCRIBE to it to `list-subscribe` rather than to
+`subscribe`: a domain has one ordinary subscription script per package, and a list
+is not one of its users. Both forms serve the same script.
+
 **A resource belongs to the domain of its own URI.** The three entries of one
 buddy list routinely sit on three domains, none of which has to be the routed one.
 `Kelix.Mod.Presence` therefore keys every resource on the domain its URI names,

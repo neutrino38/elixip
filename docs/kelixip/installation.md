@@ -613,8 +613,12 @@ package is the key.
 | `event-package` | string | **yes** | Matched against the request's `Event`, case-insensitively. Two blocks claiming one package reject the file |
 | `subscribe` | string | **yes** | Scenario script serving `SUBSCRIBE` for this package |
 | `publish` | string | no | Scenario script serving `PUBLISH`; absent ⇒ a `PUBLISH` for this package is answered `405` |
+| `lists` | array of strings | no | R-URI user parts that are resource lists (RFC 4662), compared exactly. Requires `list-subscribe` |
+| `list-subscribe` | string | no | Scenario script serving a `SUBSCRIBE` whose R-URI user part is in `lists` (`presence-rls.exs`). Requires `lists` |
 
-Both scripts go through the load-time contract check, so a missing `publish`
+A `PUBLISH` is never routed to `list-subscribe`.
+
+Every script goes through the load-time contract check, so a missing `publish`
 script is caught by `kelictl domain reload-all` rather than by the first PUBLISH.
 
 The expiry bounds of a subscription belong to the event package, so there is no

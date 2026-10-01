@@ -304,6 +304,36 @@ defmodule Kelix.DomainsTest do
       assert msg =~ "unknown key(s): notify"
     end
 
+    test "lists and list-subscribe are declared together" do
+      base =
+        ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence"\nsubscribe = "s.exs"\n)
+
+      assert {:ok, snap} =
+               Domains.parse(base <> ~s(lists = ["rls", "rls"]\nlist-subscribe = "l.exs"))
+
+      assert [%{lists: ["rls"], list_subscribe: "l.exs"}] = Domains.lookup(snap, "a").presence
+
+      assert {:error, msg} = Domains.parse(base <> ~s(lists = ["rls"]))
+      assert msg =~ "`lists` needs `list-subscribe`"
+
+      assert {:error, msg} = Domains.parse(base <> ~s(list-subscribe = "l.exs"))
+      assert msg =~ "`list-subscribe` needs `lists`"
+
+      assert {:error, msg} = Domains.parse(base <> ~s(lists = []\nlist-subscribe = "l.exs"))
+      assert msg =~ "non-empty list"
+
+      assert {:error, msg} = Domains.parse(base <> ~s(lists = "rls"\nlist-subscribe = "l.exs"))
+      assert msg =~ "non-empty list"
+    end
+
+    test "a presence block without lists has none" do
+      toml =
+        ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence"\nsubscribe = "s.exs")
+
+      assert {:ok, snap} = Domains.parse(toml)
+      assert [%{lists: [], list_subscribe: nil}] = Domains.lookup(snap, "a").presence
+    end
+
     # The shape this key had before it carried the event package. An operator
     # upgrading a node has the old form under their eyes, so the message names the
     # new one rather than "must be an array of tables".
@@ -360,6 +390,24 @@ defmodule Kelix.DomainsTest do
                {"user2user.exs", ~s(domain mydomain.de call rule "XXXX")},
                {"user2pstn.exs", ~s(domain mydomain.de call rule "0[1-9]XXXXXXXX")},
                {"catchall.exs", "domain mydomain.de call rule default = true"}
+             ]
+    end
+
+    test "the list script is a reference of its block" do
+      {:ok, snap} =
+        Domains.parse("""
+        [[domain]]
+        name = "a"
+        [[domain.presence]]
+        event-package = "presence"
+        subscribe = "s.exs"
+        lists = ["rls"]
+        list-subscribe = "l.exs"
+        """)
+
+      assert Domains.script_refs(snap) == [
+               {"s.exs", "domain a [[domain.presence]] subscribe (event-package presence)"},
+               {"l.exs", "domain a [[domain.presence]] list-subscribe (event-package presence)"}
              ]
     end
 

@@ -448,12 +448,15 @@ defmodule Kelix.Router do
   # its `Event` header. Read through `SIP.Msg.Ops` like every other header
   # (CLAUDE.md, *Message Layer*) — a second reading here is how two answers to one
   # question start, and the instance's own `accept_subscription/1` is the first.
+  #
+  # Within the block, a SUBSCRIBE to one of its `lists` reaches `list-subscribe`:
+  # the R-URI names a resource list, not one of the domain's users.
   defp pick_script(%Domain{} = domain, :presence, req) do
     method = Map.get(req, :method)
 
     case presence_block(domain, req) do
       %PresenceBlock{} = block ->
-        case PresenceBlock.script_for(block, method) do
+        case PresenceBlock.script_for(block, method, ruri_user(req)) do
           script when is_binary(script) ->
             {:ok, script, nil}
 

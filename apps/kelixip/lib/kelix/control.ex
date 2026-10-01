@@ -470,11 +470,14 @@ defmodule Kelix.Control do
   # because they answer two different methods: an operator reading "SUBSCRIBE goes
   # here, PUBLISH goes there" off this view is reading the router's own decision.
   # `publish` absent = the package is subscribed to and published by nothing (405).
+  # `list_subscribe` absent = no R-URI of this domain is a resource list.
   defp render_presence_block(%Kelix.PresenceBlock{} = block, loaded) do
     %{
       event_package: block.event_package,
       subscribe: with_module(%{script: block.subscribe}, loaded),
-      publish: block.publish && with_module(%{script: block.publish}, loaded)
+      publish: block.publish && with_module(%{script: block.publish}, loaded),
+      lists: block.lists,
+      list_subscribe: block.list_subscribe && with_module(%{script: block.list_subscribe}, loaded)
     }
   end
 

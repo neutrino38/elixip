@@ -1214,14 +1214,26 @@ defmodule Kelix.Control.CLI do
   # One line per event package, naming the script each method is routed to. Not
   # numbered, unlike the dial-plan: the package is an exact key, so declaration
   # order decides nothing.
+  #
+  # A block with `lists` gets a third line: a SUBSCRIBE to one of them reaches the
+  # list script, and the line says which R-URIs do.
   defp format_presence(blocks) do
     pw = blocks |> Enum.map(&String.length(&1.event_package)) |> Enum.max(fn -> 0 end)
 
     for b <- blocks,
-        {method, script} <- [{"SUBSCRIBE", b.subscribe}, {"PUBLISH", b.publish}],
+        {method, script, suffix} <- presence_rows(b),
         do:
           "  #{String.pad_trailing(b.event_package, pw)} #{String.pad_trailing(method, 9)} -> " <>
-            format_presence_script(script)
+            format_presence_script(script) <> suffix
+  end
+
+  defp presence_rows(b) do
+    rows = [{"SUBSCRIBE", b.subscribe, ""}, {"PUBLISH", b.publish, ""}]
+
+    case Map.get(b, :list_subscribe) do
+      nil -> rows
+      script -> rows ++ [{"SUBSCRIBE", script, "  (lists: #{Enum.join(b.lists, ", ")})"}]
+    end
   end
 
   # A package with no `publish` script: the method is not served on it, and the

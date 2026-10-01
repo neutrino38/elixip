@@ -50,20 +50,36 @@ defmodule Kelix.PresenceBlock do
   the domain does not serve. `publish` is optional: the `dialog` package (RFC
   4235) is published by nothing, and a domain serving it answers **405** to a
   PUBLISH rather than naming a script that would have to refuse it.
+
+  `lists` names the Request-URI user parts that are resource lists (RFC 4662) on
+  this domain, and `list_subscribe` the script serving a SUBSCRIBE to one of them.
+  A list is not a presentity: its subscription is challenged, answered and
+  notified differently, so it gets a script of its own while the domain's own
+  users keep `subscribe`. Both are set or neither (`lists` is then `[]`). A
+  PUBLISH is never routed to a list.
   """
 
   @type t :: %__MODULE__{
           event_package: String.t(),
           subscribe: String.t(),
-          publish: String.t() | nil
+          publish: String.t() | nil,
+          lists: [String.t()],
+          list_subscribe: String.t() | nil
         }
 
-  defstruct event_package: nil, subscribe: nil, publish: nil
+  defstruct event_package: nil, subscribe: nil, publish: nil, lists: [], list_subscribe: nil
 
-  @doc "The script serving `method` on this block, or nil when it serves none."
-  @spec script_for(t, atom) :: String.t() | nil
-  def script_for(%__MODULE__{subscribe: s}, :SUBSCRIBE), do: s
-  def script_for(%__MODULE__{publish: p}, :PUBLISH), do: p
+  @doc """
+  The script serving `method` addressed to the Request-URI user part `user` on this
+  block, or nil when it serves none.
+
+  The user part is compared exactly: it is case-sensitive (RFC 3261 §19.1.4).
+  """
+  @spec script_for(t, atom, String.t() | nil) :: String.t() | nil
+  def script_for(%__MODULE__{lists: lists, list_subscribe: ls, subscribe: s}, :SUBSCRIBE, user),
+    do: if(user in lists, do: ls, else: s)
+
+  def script_for(%__MODULE__{publish: p}, :PUBLISH, _user), do: p
 end
 
 defmodule Kelix.DialRule do

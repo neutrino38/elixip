@@ -97,6 +97,26 @@ name = "sip.linphone.org"
   subscribe     = "presence-rls.exs"
 ```
 
+When the list URI is on the account's own domain — Linphone's `rls_uri` is a
+setting, `sip:rls@example.com` — name it in that domain's block instead. A
+SUBSCRIBE to one of `lists` reaches `list-subscribe`; every other SUBSCRIBE
+reaches `subscribe`:
+
+```toml
+# domains.toml
+[[domain]]
+name = "example.com"
+
+  [[domain.presence]]
+  event-package  = "presence"
+  subscribe      = "presence-subscribe.exs"
+  publish        = "presence-publish.exs"
+  lists          = ["rls"]
+  list-subscribe = "presence-rls.exs"
+```
+
+The two forms can coexist on one node.
+
 The script authenticates the watcher on the realm of its own `From`, then watches
 every entry of the list on the entry's own domain. The answer is one NOTIFY
 carrying an RLMI manifest and one PIDF part per buddy; state changes that follow
@@ -179,6 +199,8 @@ Per-domain block — `[[domain.presence]]` (activates the function for a domain)
 | `event-package` | string | **required** | The package this block serves (`presence`, `dialog`, …) |
 | `subscribe` | string | **required** | Script serving SUBSCRIBE for this package |
 | `publish` | string | — | Script serving PUBLISH; absent ⇒ `405` |
+| `lists` | array of strings | — | R-URI user parts that are resource lists; requires `list-subscribe` |
+| `list-subscribe` | string | — | Script serving a SUBSCRIBE to one of `lists`; requires `lists` |
 
 ## Facades
 
