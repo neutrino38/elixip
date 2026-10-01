@@ -213,14 +213,22 @@ defmodule Kelix.PresenceSubscribe do
     end
   end
 
-  # One line per NOTIFY: to whom, about whom, on which package, saying what.
+  # One line per NOTIFY: to whom, about whom, on which package, saying what. An
+  # accepted un-SUBSCRIBE sends no state — `notify/1` skips it, and the final
+  # NOTIFY is the dialog's — so the line says that instead of a state never sent.
   defp trace_notify(sub, doc) do
+    what =
+      case SIP.Subscription.status(sub) do
+        :terminated -> "un-SUBSCRIBE accepted, the dialog sends the final NOTIFY"
+        _active when is_nil(doc) -> "no state, ending (noresource)"
+        _active -> SIP.EventPackage.summary(doc)
+      end
+
     Logger.info(
       module: __MODULE__,
       message:
         "NOTIFY #{sub.event} to #{SIP.Subscription.watcher_uri(sub)} " <>
-          "about #{sub.presentity_uri}: " <>
-          if(doc, do: SIP.EventPackage.summary(doc), else: "no state, ending (noresource)")
+          "about #{sub.presentity_uri}: #{what}"
     )
   end
 

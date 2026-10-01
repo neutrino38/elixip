@@ -340,6 +340,27 @@ defmodule Kelix.PresenceScriptTest do
       assert log =~ "NOTIFY presence to sip:alice@example.com about sip:bob@example.com: closed"
     end
 
+    # An accepted un-SUBSCRIBE sends no state: the line logged "open" for a NOTIFY
+    # that never left (Trix → kelixip, 2026-10-01).
+    test "an un-SUBSCRIBE logs no state", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+      submit(pid, dialog, subscribe())
+      assert_receive {:notified, _body, _}, 1000
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          submit(pid, dialog, subscribe(expires: 0))
+          assert_receive {:replied, 200, "OK", _, _}, 1000
+          Process.sleep(100)
+        end)
+
+      assert log =~
+               "about sip:bob@example.com: un-SUBSCRIBE accepted, the dialog sends the final NOTIFY"
+
+      refute log =~ "about sip:bob@example.com: closed"
+    end
+
     test "one PUBLISH becomes one NOTIFY on the watcher's dialog", %{subscribe: sub, publish: pub} do
       {:ok, dialog} = MockDialog.start_link(self())
       watcher = spawn_instance(sub, dialog, subscribe())
