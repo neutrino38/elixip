@@ -69,12 +69,12 @@ defmodule Kelix.DomainsTest do
       assert ex.presence == [
                %PresenceBlock{
                  event_package: "presence",
-                 subscribe: "presence-subscribe.exs",
+                 subscribe: [%Kelix.DialRule{default?: true, script: "presence-subscribe.exs"}],
                  publish: "presence-publish.exs"
                },
                %PresenceBlock{
                  event_package: "dialog",
-                 subscribe: "dialog-subscribe.exs",
+                 subscribe: [%Kelix.DialRule{default?: true, script: "dialog-subscribe.exs"}],
                  publish: nil
                }
              ]
@@ -293,7 +293,7 @@ defmodule Kelix.DomainsTest do
 
       no_script = ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence")
       assert {:error, msg2} = Domains.parse(no_script)
-      assert msg2 =~ "missing required `subscribe`"
+      assert msg2 =~ "`subscribe` is required"
     end
 
     test "an unknown key in a presence block" do
@@ -304,34 +304,64 @@ defmodule Kelix.DomainsTest do
       assert msg =~ "unknown key(s): notify"
     end
 
-    test "lists and list-subscribe are declared together" do
-      base =
-        ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence"\nsubscribe = "s.exs"\n)
+    # SUBSCRIBE is routed like a call: rules on the R-URI user part, first match
+    # wins, the catch-all last. `subscribe = "s.exs"` is the one-rule shorthand.
+    test "SUBSCRIBE rules are read like the dial-plan" do
+      toml = ~s"""
+      [[domain]]
+      name = "a"
+      [[domain.presence]]
+      event-package = "presence"
+        [[domain.presence.subscribe]]
+        pattern = "rls"
+        script = "l.exs"
+        [[domain.presence.subscribe]]
+        default = true
+        script = "s.exs"
+      """
 
-      assert {:ok, snap} =
-               Domains.parse(base <> ~s(lists = ["rls", "rls"]\nlist-subscribe = "l.exs"))
-
-      assert [%{lists: ["rls"], list_subscribe: "l.exs"}] = Domains.lookup(snap, "a").presence
-
-      assert {:error, msg} = Domains.parse(base <> ~s(lists = ["rls"]))
-      assert msg =~ "`lists` needs `list-subscribe`"
-
-      assert {:error, msg} = Domains.parse(base <> ~s(list-subscribe = "l.exs"))
-      assert msg =~ "`list-subscribe` needs `lists`"
-
-      assert {:error, msg} = Domains.parse(base <> ~s(lists = []\nlist-subscribe = "l.exs"))
-      assert msg =~ "non-empty list"
-
-      assert {:error, msg} = Domains.parse(base <> ~s(lists = "rls"\nlist-subscribe = "l.exs"))
-      assert msg =~ "non-empty list"
+      assert {:ok, snap} = Domains.parse(toml)
+      assert [%{subscribe: [list, catch_all]}] = Domains.lookup(snap, "a").presence
+      assert %Kelix.DialRule{raw: "rls", script: "l.exs", default?: false} = list
+      assert %Kelix.DialRule{default?: true, script: "s.exs"} = catch_all
     end
 
-    test "a presence block without lists has none" do
+    test "a script string is a single catch-all rule" do
       toml =
         ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence"\nsubscribe = "s.exs")
 
       assert {:ok, snap} = Domains.parse(toml)
-      assert [%{lists: [], list_subscribe: nil}] = Domains.lookup(snap, "a").presence
+
+      assert [%{subscribe: [%Kelix.DialRule{default?: true, script: "s.exs"}]}] =
+               Domains.lookup(snap, "a").presence
+    end
+
+    test "SUBSCRIBE rules are checked as the dial-plan's are" do
+      head = ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence"\n)
+
+      catch_all_first =
+        head <>
+          ~s([[domain.presence.subscribe]]\ndefault = true\nscript = "s.exs"\n) <>
+          ~s([[domain.presence.subscribe]]\npattern = "rls"\nscript = "l.exs"\n)
+
+      assert {:error, msg} = Domains.parse(catch_all_first)
+      assert msg =~ "must be the last presence.subscribe rule"
+
+      no_pattern = head <> ~s([[domain.presence.subscribe]]\nscript = "s.exs"\n)
+      assert {:error, msg} = Domains.parse(no_pattern)
+      assert msg =~ "[[domain.presence.subscribe]] needs `pattern"
+    end
+
+    # `lists` / `list-subscribe` were the way to route a resource list before
+    # SUBSCRIBE had rules; a file still carrying them is told what replaces them.
+    test "lists and list-subscribe are refused with their replacement" do
+      base =
+        ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence"\nsubscribe = "s.exs"\n)
+
+      for extra <- [~s(lists = ["rls"]\nlist-subscribe = "l.exs"), ~s(lists = ["rls"])] do
+        assert {:error, msg} = Domains.parse(base <> extra)
+        assert msg =~ "[[domain.presence.subscribe]] pattern = \"rls\""
+      end
     end
 
     # The shape this key had before it carried the event package. An operator
@@ -381,11 +411,11 @@ defmodule Kelix.DomainsTest do
       assert Domains.script_refs(snap) == [
                {"registrar-example.exs", "domain example.com [domain.registrar]"},
                {"presence-subscribe.exs",
-                "domain example.com [[domain.presence]] subscribe (event-package presence)"},
+                "domain example.com [[domain.presence]] subscribe rule default = true (event-package presence)"},
                {"presence-publish.exs",
                 "domain example.com [[domain.presence]] publish (event-package presence)"},
                {"dialog-subscribe.exs",
-                "domain example.com [[domain.presence]] subscribe (event-package dialog)"},
+                "domain example.com [[domain.presence]] subscribe rule default = true (event-package dialog)"},
                {"registrar-common.exs", "domain mydomain.de [domain.registrar]"},
                {"user2user.exs", ~s(domain mydomain.de call rule "XXXX")},
                {"user2pstn.exs", ~s(domain mydomain.de call rule "0[1-9]XXXXXXXX")},
@@ -393,21 +423,28 @@ defmodule Kelix.DomainsTest do
              ]
     end
 
-    test "the list script is a reference of its block" do
+    test "every SUBSCRIBE rule's script is a reference of its block" do
       {:ok, snap} =
         Domains.parse("""
         [[domain]]
         name = "a"
         [[domain.presence]]
         event-package = "presence"
-        subscribe = "s.exs"
-        lists = ["rls"]
-        list-subscribe = "l.exs"
+        publish = "p.exs"
+          [[domain.presence.subscribe]]
+          pattern = "rls"
+          script = "l.exs"
+          [[domain.presence.subscribe]]
+          default = true
+          script = "s.exs"
         """)
 
       assert Domains.script_refs(snap) == [
-               {"s.exs", "domain a [[domain.presence]] subscribe (event-package presence)"},
-               {"l.exs", "domain a [[domain.presence]] list-subscribe (event-package presence)"}
+               {"l.exs",
+                ~s{domain a [[domain.presence]] subscribe rule "rls" (event-package presence)}},
+               {"s.exs",
+                "domain a [[domain.presence]] subscribe rule default = true (event-package presence)"},
+               {"p.exs", "domain a [[domain.presence]] publish (event-package presence)"}
              ]
     end
 

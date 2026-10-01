@@ -39,7 +39,7 @@ defmodule Kelix.Domains do
     "min_expires" => :pos_integer,
     "keepalive_period" => :pos_integer
   }
-  @presence_keys ~w(event-package subscribe publish lists list-subscribe)
+  @presence_keys ~w(event-package subscribe publish)
 
   # ── GenServer API ────────────────────────────────────────────────────────────
 
@@ -218,11 +218,9 @@ defmodule Kelix.Domains do
     # contract exists to catch.
     presence_refs =
       for block <- d.presence,
-          {key, script} <- [
-            subscribe: block.subscribe,
-            publish: block.publish,
-            "list-subscribe": block.list_subscribe
-          ],
+          {key, script} <-
+            Enum.map(block.subscribe, &{"subscribe rule #{rule_label(&1)}", &1.script}) ++
+              [{"publish", block.publish}],
           is_binary(script),
           do:
             {script,
@@ -479,20 +477,18 @@ defmodule Kelix.Domains do
   defp parse_presence_block(%{} = block, domain) do
     ctx = "domain #{domain} [[domain.presence]]"
 
-    with :ok <- reject_keys(block, @presence_keys, ctx),
+    with :ok <- reject_lists(block, ctx),
+         :ok <- reject_keys(block, @presence_keys, ctx),
          {:ok, package} <- req_string(block, "event-package", ctx),
-         {:ok, subscribe} <- req_string(block, "subscribe", ctx),
-         {:ok, publish} <- opt_script(block, "publish", ctx),
-         {:ok, lists, list_subscribe} <- parse_lists(block, ctx) do
+         {:ok, subscribe} <- parse_subscribe(Map.get(block, "subscribe"), domain, ctx),
+         {:ok, publish} <- opt_script(block, "publish", ctx) do
       {:ok,
        %PresenceBlock{
          # The package name is matched against `Event`, which is case-insensitive
          # (RFC 6665 §8.2.1) — folded once here so nothing downcases at lookup.
          event_package: String.downcase(package),
          subscribe: subscribe,
-         publish: publish,
-         lists: lists,
-         list_subscribe: list_subscribe
+         publish: publish
        }}
     end
   end
@@ -517,30 +513,31 @@ defmodule Kelix.Domains do
     end
   end
 
-  # `lists` and `list-subscribe` go together: list URIs with no script to serve
-  # them, or a script no URI reaches, is a block the operator has half written.
-  defp parse_lists(block, ctx) do
-    case {Map.get(block, "lists"), opt_script(block, "list-subscribe", ctx)} do
-      {_, {:error, _} = err} ->
-        err
+  # The SUBSCRIBE rules are the dial-plan's reading, on the R-URI of a SUBSCRIBE:
+  # a resource list, a conference room range and the domain's users are three
+  # rules of one list. A plain string is the one-rule shorthand, a catch-all.
+  defp parse_subscribe(script, _domain, _ctx) when is_binary(script) and script != "",
+    do: {:ok, [%DialRule{default?: true, script: script}]}
 
-      {nil, {:ok, nil}} ->
-        {:ok, [], nil}
+  defp parse_subscribe([_ | _] = rules, domain, _ctx),
+    do: parse_dial_plan(rules, domain, "presence.subscribe")
 
-      {nil, {:ok, _}} ->
-        {:error, "#{ctx}: `list-subscribe` needs `lists`, the list URIs it serves"}
+  defp parse_subscribe(_other, _domain, ctx),
+    do:
+      {:error,
+       "#{ctx}: `subscribe` is required — a script, or [[domain.presence.subscribe]] " <>
+         "rules (`pattern` or `default = true`, and `script`)"}
 
-      {lists, {:ok, script}} ->
-        cond do
-          not (is_list(lists) and lists != [] and Enum.all?(lists, &(is_binary(&1) and &1 != ""))) ->
-            {:error, "#{ctx}: `lists` must be a non-empty list of R-URI user parts"}
-
-          script == nil ->
-            {:error, "#{ctx}: `lists` needs `list-subscribe`, the script serving them"}
-
-          true ->
-            {:ok, Enum.uniq(lists), script}
-        end
+  # `lists` / `list-subscribe` routed a resource list before SUBSCRIBE had rules.
+  # Named, rather than refused as two unknown keys, so the operator reads what
+  # replaces them.
+  defp reject_lists(block, ctx) do
+    if Map.has_key?(block, "lists") or Map.has_key?(block, "list-subscribe") do
+      {:error,
+       "#{ctx}: `lists` / `list-subscribe` are gone — declare the list as a SUBSCRIBE " <>
+         "rule: [[domain.presence.subscribe]] pattern = \"rls\" script = \"presence-rls.exs\""}
+    else
+      :ok
     end
   end
 

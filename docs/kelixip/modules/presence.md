@@ -98,9 +98,8 @@ name = "sip.linphone.org"
 ```
 
 When the list URI is on the account's own domain — Linphone's `rls_uri` is a
-setting, `sip:rls@example.com` — name it in that domain's block instead. A
-SUBSCRIBE to one of `lists` reaches `list-subscribe`; every other SUBSCRIBE
-reaches `subscribe`:
+setting, `sip:rls@example.com` — route it with a SUBSCRIBE rule of that domain's
+block instead. Every other SUBSCRIBE reaches the catch-all:
 
 ```toml
 # domains.toml
@@ -108,11 +107,16 @@ reaches `subscribe`:
 name = "example.com"
 
   [[domain.presence]]
-  event-package  = "presence"
-  subscribe      = "presence-subscribe.exs"
-  publish        = "presence-publish.exs"
-  lists          = ["rls"]
-  list-subscribe = "presence-rls.exs"
+  event-package = "presence"
+  publish       = "presence-publish.exs"
+
+    [[domain.presence.subscribe]]
+    pattern = "rls"
+    script  = "presence-rls.exs"
+
+    [[domain.presence.subscribe]]
+    default = true
+    script  = "presence-subscribe.exs"
 ```
 
 The two forms can coexist on one node.
@@ -197,10 +201,8 @@ Per-domain block — `[[domain.presence]]` (activates the function for a domain)
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `event-package` | string | **required** | The package this block serves (`presence`, `dialog`, …) |
-| `subscribe` | string | **required** | Script serving SUBSCRIBE for this package |
+| `subscribe` | string, or rules | **required** | Script serving SUBSCRIBE for this package, or `[[domain.presence.subscribe]]` rules: `pattern` (or `default = true`, last) and `script`, first match wins, no match ⇒ `404` |
 | `publish` | string | — | Script serving PUBLISH; absent ⇒ `405` |
-| `lists` | array of strings | — | R-URI user parts that are resource lists; requires `list-subscribe` |
-| `list-subscribe` | string | — | Script serving a SUBSCRIBE to one of `lists`; requires `lists` |
 
 ## Facades
 

@@ -5,8 +5,9 @@ defmodule Kelix.Router do
   Three steps: **domain** (R-URI host, else To host → `name`/`aliases`) →
   **function** (method → registrar/calls/presence/chat, must be enabled) →
   **script** (the function's script, the first-match of the dial-plan for `calls`
-  or of the `[[domain.chat]]` rules for `chat`, or the `[[domain.presence]]` block
-  naming the request's event package). No global
+  or of the `[[domain.chat]]` rules for `chat`, or — in the `[[domain.presence]]`
+  block naming the request's event package — the first-match of its SUBSCRIBE
+  rules, or its `publish` script). No global
   routing script — runtime-data routing lives inside the selected script.
 
   Step 3 is where the **489 Bad Event** is raised, before any script runs: a
@@ -347,8 +348,8 @@ defmodule Kelix.Router do
   @doc """
   Resolve a request against a domains snapshot.
 
-  Returns `{:route, %{domain, function, script, rule}}` — `rule` the dial-plan or
-  chat rule that matched, `nil` for the other functions — or a `{:reject, code, reason}`:
+  Returns `{:route, %{domain, function, script, rule}}` — `rule` the dial-plan,
+  chat or SUBSCRIBE rule that matched, `nil` for the other functions — or a `{:reject, code, reason}`:
   `404` (no domain / no dial-plan match), `405` (method's function not enabled, or
   no script declared for it on the package asked for). An event package the domain
   does not serve is `{:reject, 489, reason, [{"Allow-Events", …}]}` — the one
@@ -449,30 +450,29 @@ defmodule Kelix.Router do
   # (CLAUDE.md, *Message Layer*) — a second reading here is how two answers to one
   # question start, and the instance's own `accept_subscription/1` is the first.
   #
-  # Within the block, a SUBSCRIBE to one of its `lists` reaches `list-subscribe`:
-  # the R-URI names a resource list, not one of the domain's users.
+  # Within the block, a SUBSCRIBE goes through the block's rules exactly as an
+  # INVITE goes through the dial-plan: first match on the R-URI user part, 404
+  # when none. A PUBLISH has one script, or none (405).
   defp pick_script(%Domain{} = domain, :presence, req) do
-    method = Map.get(req, :method)
+    case {presence_block(domain, req), Map.get(req, :method)} do
+      {%PresenceBlock{subscribe: rules}, :SUBSCRIBE} ->
+        first_match(rules, domain, "presence.subscribe", req)
 
-    case presence_block(domain, req) do
-      %PresenceBlock{} = block ->
-        case PresenceBlock.script_for(block, method, ruri_user(req)) do
-          script when is_binary(script) ->
-            {:ok, script, nil}
+      {%PresenceBlock{publish: script}, :PUBLISH} when is_binary(script) ->
+        {:ok, script, nil}
 
-          nil ->
-            # The package is served, this method on it is not: a `dialog` block
-            # with no `publish` script is subscribed to and published by nobody.
-            log_reject(
-              req,
-              "event package #{inspect(block.event_package)} is served on domain " <>
-                "#{domain.name}, but no #{method} script is declared for it"
-            )
+      {%PresenceBlock{} = block, method} ->
+        # The package is served, this method on it is not: a `dialog` block
+        # with no `publish` script is subscribed to and published by nobody.
+        log_reject(
+          req,
+          "event package #{inspect(block.event_package)} is served on domain " <>
+            "#{domain.name}, but no #{method} script is declared for it"
+        )
 
-            method_not_allowed()
-        end
+        method_not_allowed()
 
-      nil ->
+      {nil, _method} ->
         refuse_event_package(domain, req)
     end
   end

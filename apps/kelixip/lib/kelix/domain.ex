@@ -43,43 +43,28 @@ end
 
 defmodule Kelix.PresenceBlock do
   @moduledoc """
-  One `[[domain.presence]]` block: an event package, and the script serving each
-  of the two methods that carry it.
+  One `[[domain.presence]]` block: an event package, and the scripts serving the
+  two methods that carry it.
 
-  `subscribe` is required — a package nothing can be subscribed to is a package
-  the domain does not serve. `publish` is optional: the `dialog` package (RFC
-  4235) is published by nothing, and a domain serving it answers **405** to a
-  PUBLISH rather than naming a script that would have to refuse it.
+  `subscribe` is a list of rules read like the dial-plan (`Kelix.DialRule`): an
+  Asterisk pattern on the R-URI user part, first match wins, `default = true`
+  last. It is never empty — a package nothing can be subscribed to is a package
+  the domain does not serve — and `subscribe = "script.exs"` is the one-rule
+  shorthand for a catch-all. A resource list (RFC 4662) is one rule among them:
+  `pattern = "rls"` naming the list script.
 
-  `lists` names the Request-URI user parts that are resource lists (RFC 4662) on
-  this domain, and `list_subscribe` the script serving a SUBSCRIBE to one of them.
-  A list is not a presentity: its subscription is challenged, answered and
-  notified differently, so it gets a script of its own while the domain's own
-  users keep `subscribe`. Both are set or neither (`lists` is then `[]`). A
-  PUBLISH is never routed to a list.
+  `publish` is optional: the `dialog` package (RFC 4235) is published by
+  nothing, and a domain serving it answers **405** to a PUBLISH rather than
+  naming a script that would have to refuse it.
   """
 
   @type t :: %__MODULE__{
           event_package: String.t(),
-          subscribe: String.t(),
-          publish: String.t() | nil,
-          lists: [String.t()],
-          list_subscribe: String.t() | nil
+          subscribe: [Kelix.DialRule.t()],
+          publish: String.t() | nil
         }
 
-  defstruct event_package: nil, subscribe: nil, publish: nil, lists: [], list_subscribe: nil
-
-  @doc """
-  The script serving `method` addressed to the Request-URI user part `user` on this
-  block, or nil when it serves none.
-
-  The user part is compared exactly: it is case-sensitive (RFC 3261 §19.1.4).
-  """
-  @spec script_for(t, atom, String.t() | nil) :: String.t() | nil
-  def script_for(%__MODULE__{lists: lists, list_subscribe: ls, subscribe: s}, :SUBSCRIBE, user),
-    do: if(user in lists, do: ls, else: s)
-
-  def script_for(%__MODULE__{publish: p}, :PUBLISH, _user), do: p
+  defstruct event_package: nil, subscribe: [], publish: nil
 end
 
 defmodule Kelix.DialRule do

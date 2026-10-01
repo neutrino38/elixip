@@ -466,18 +466,16 @@ defmodule Kelix.Control do
 
   defp with_module(cfg, _loaded), do: cfg
 
-  # One row per event package the domain serves. The two scripts are shown apart
-  # because they answer two different methods: an operator reading "SUBSCRIBE goes
-  # here, PUBLISH goes there" off this view is reading the router's own decision.
+  # One entry per event package the domain serves. The two methods are shown apart
+  # because they are routed apart: an operator reading "SUBSCRIBE goes here,
+  # PUBLISH goes there" off this view is reading the router's own decision.
+  # `subscribe` is a rule list, rendered as the dial-plan is: first match wins.
   # `publish` absent = the package is subscribed to and published by nothing (405).
-  # `list_subscribe` absent = no R-URI of this domain is a resource list.
   defp render_presence_block(%Kelix.PresenceBlock{} = block, loaded) do
     %{
       event_package: block.event_package,
-      subscribe: with_module(%{script: block.subscribe}, loaded),
-      publish: block.publish && with_module(%{script: block.publish}, loaded),
-      lists: block.lists,
-      list_subscribe: block.list_subscribe && with_module(%{script: block.list_subscribe}, loaded)
+      subscribe: Enum.map(block.subscribe, &render_rule(&1, loaded)),
+      publish: block.publish && with_module(%{script: block.publish}, loaded)
     }
   end
 

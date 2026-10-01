@@ -134,8 +134,12 @@ keeps serving) or `"unknown"` (it could not be stat'ed at load).
   "presence": [
     {
       "event_package": "presence",
-      "subscribe": {"script": "presence-subscribe.exs",
-                    "module": "Kelix.PresenceSubscribe.V1", "version": 1},
+      "subscribe": [
+        {"pattern": "rls", "default": false, "script": "presence-rls.exs",
+         "module": "Kelix.PresenceRls.V1", "version": 1},
+        {"pattern": null, "default": true, "script": "presence-subscribe.exs",
+         "module": "Kelix.PresenceSubscribe.V1", "version": 1}
+      ],
       "publish": {"script": "presence-publish.exs",
                   "module": "Kelix.PresencePublish.V1", "version": 1}
     }

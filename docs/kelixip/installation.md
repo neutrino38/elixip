@@ -611,12 +611,34 @@ package is the key.
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `event-package` | string | **yes** | Matched against the request's `Event`, case-insensitively. Two blocks claiming one package reject the file |
-| `subscribe` | string | **yes** | Scenario script serving `SUBSCRIBE` for this package |
+| `subscribe` | string, or rules | **yes** | Scenario script serving `SUBSCRIBE` for this package, or `[[domain.presence.subscribe]]` rules (below) |
 | `publish` | string | no | Scenario script serving `PUBLISH`; absent ⇒ a `PUBLISH` for this package is answered `405` |
-| `lists` | array of strings | no | R-URI user parts that are resource lists (RFC 4662), compared exactly. Requires `list-subscribe` |
-| `list-subscribe` | string | no | Scenario script serving a `SUBSCRIBE` whose R-URI user part is in `lists` (`presence-rls.exs`). Requires `lists` |
 
-A `PUBLISH` is never routed to `list-subscribe`.
+`SUBSCRIBE` can be routed on the R-URI user part, exactly as `[[domain.call]]`
+routes an INVITE: each `[[domain.presence.subscribe]]` rule has a `pattern` (or
+`default = true`, last) and a `script`, and the first match wins. A `SUBSCRIBE`
+matching no rule is answered `404`. `subscribe = "script.exs"` is the same as a
+single `default = true` rule.
+
+```toml
+  [[domain.presence]]
+  event-package = "presence"
+  publish       = "presence-publish.exs"
+
+    [[domain.presence.subscribe]]
+    pattern = "rls"                      # a resource list (RFC 4662)
+    script  = "presence-rls.exs"
+
+    [[domain.presence.subscribe]]
+    pattern = "9XXX"                     # conference rooms
+    script  = "conf-subscribe.exs"
+
+    [[domain.presence.subscribe]]
+    default = true
+    script  = "presence-subscribe.exs"
+```
+
+The rules route `SUBSCRIBE` only: a `PUBLISH` always reaches `publish`.
 
 Every script goes through the load-time contract check, so a missing `publish`
 script is caught by `kelictl domain reload-all` rather than by the first PUBLISH.

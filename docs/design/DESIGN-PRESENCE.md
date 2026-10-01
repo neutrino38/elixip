@@ -380,10 +380,12 @@ arriving. And the watcher is authenticated on the realm of its **own `From`**
 that exist nowhere.
 
 A client whose list URI is a setting can point it at its own domain instead
-(`sip:rls@example.com`). The domain's `[[domain.presence]]` block then names it in
-`lists`, and the Router sends a SUBSCRIBE to it to `list-subscribe` rather than to
-`subscribe`: a domain has one ordinary subscription script per package, and a list
-is not one of its users. Both forms serve the same script.
+(`sip:rls@example.com`). The domain's `[[domain.presence]]` block then routes it
+with a SUBSCRIBE rule — `pattern = "rls"`, the list script — ahead of the
+catch-all serving the domain's users. SUBSCRIBE rules are the dial-plan's reading
+on the R-URI user part, first match wins: a list is not one of the domain's users,
+and neither is a range of conference rooms, so each gets a rule of its own. Both
+forms serve the same script.
 
 **A resource belongs to the domain of its own URI.** The three entries of one
 buddy list routinely sit on three domains, none of which has to be the routed one.

@@ -42,12 +42,19 @@
 #  # 405 to a PUBLISH. Both scripts need kelixip-mod-presence installed.
 #  [[domain.presence]]
 #  event-package = "presence"
-#  subscribe     = "presence-subscribe.exs"
 #  publish       = "presence-publish.exs"
+#  # SUBSCRIBE is routed like a call: rules on the R-URI user part, first match
+#  # wins, no match is a 404. `subscribe = "presence-subscribe.exs"` alone is the
+#  # same as the catch-all rule.
 #  # A client whose list URI is a setting can use one on this domain: a SUBSCRIBE
-#  # to sip:rls@example.com then reaches the list script below.
-#  #lists          = ["rls"]
-#  #list-subscribe = "presence-rls.exs"
+#  # to sip:rls@example.com then reaches the list script.
+#    #[[domain.presence.subscribe]]
+#    #pattern = "rls"
+#    #script  = "presence-rls.exs"
+#
+#    [[domain.presence.subscribe]]
+#    default = true
+#    script  = "presence-subscribe.exs"
 #
 #  # Chat (page-mode MESSAGE, RFC 3428): the dial-plan's shape, on the R-URI
 #  # user-part. One instance serves a conversation — same sender, same recipient,
