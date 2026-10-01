@@ -636,6 +636,29 @@ defmodule Kelix.PresenceScriptTest do
       assert [_watcher] = Presence.watchers(@domain, @presentity)
     end
 
+    # A refused refresh ends the request, not the list subscription (RFC 6665
+    # §4.1.2.2): the states of its entries are still pushed.
+    test "a refused refresh leaves the list notifying", %{rls: m, publish: pub} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri(), @outsider])
+      watcher = spawn_instance(m, dialog, req)
+
+      submit(watcher, dialog, req)
+      assert_receive {:notified, _full_state, _}, 1000
+
+      submit(watcher, dialog, Map.merge(req, %{ruri: our_contact(), expires: 30}))
+      assert_receive {:replied, 423, _, _, _}, 1000
+
+      publisher = spawn_instance(pub, dialog, publish())
+      submit(publisher, dialog, publish())
+      assert_receive {:replied, 200, _, _, _}, 1000
+
+      assert_receive {:notified, body, content_type}, 2000
+      {manifest, _parts} = read_list(body, content_type)
+      assert [%{uri: uri}] = manifest.resources
+      assert uri == bob_uri()
+    end
+
     # How Linphone 6.2 ends its buddy list: `Expires: 0`, no body, but the
     # `Content-Disposition: recipient-list` and `Require` of the initial SUBSCRIBE
     # copied over. Read as a list it failed to supply, it was answered 400 and the
@@ -1064,6 +1087,34 @@ defmodule Kelix.PresenceScriptTest do
       assert fields[:expires] == 1800
       assert_receive {:notified, _, _}, 1000
       assert [_watcher] = Presence.watchers(@domain, @presentity)
+    end
+  end
+
+  # A refused refresh ends the request, not the subscription (RFC 6665 §4.1.2.2).
+  # The instance went back to waiting for a first SUBSCRIBE, where a state change
+  # is not handled: the watcher stopped being notified (Trix → kelixip, 2026-10-01).
+  describe "a refused refresh" do
+    setup do
+      serve_registrar_domain()
+    end
+
+    test "leaves the subscription notifying", %{subscribe: sub, publish: pub} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      watcher = spawn_instance(sub, dialog, subscribe())
+
+      submit(watcher, dialog, subscribe())
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      submit(watcher, dialog, subscribe(expires: 30))
+      assert_receive {:replied, 423, _, _, _}, 1000
+
+      publisher = spawn_instance(pub, dialog, publish())
+      submit(publisher, dialog, publish())
+      assert_receive {:replied, 200, _, _, _}, 1000
+
+      assert_receive {:notified, body, "application/pidf+xml"}, 1000
+      assert body =~ "open"
     end
   end
 

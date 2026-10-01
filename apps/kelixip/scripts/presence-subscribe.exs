@@ -102,7 +102,7 @@ defmodule Kelix.PresenceSubscribe do
       goto(subscribe, "presentity exists")
     else
       reject_subscription(404, "Not Found")
-      goto(wait_subscribe, "404 no such presentity")
+      goto(refused, "404 no such presentity")
     end
   end
 
@@ -136,7 +136,19 @@ defmodule Kelix.PresenceSubscribe do
       # 406 / 423 have already gone out; the watcher may ask again with what the
       # refusal told it. (The 489 never reaches here — the router raised it.)
       {:error, code} ->
-        goto(wait_subscribe, "#{code}")
+        goto(refused, "#{code}")
+    end
+  end
+
+  # A refusal ends the request, not the subscription. A refused REFRESH leaves
+  # the one it refreshes running until its last granted lifetime (RFC 6665
+  # §4.1.2.2): the state still has to be pushed and its end still has to be
+  # handled, and `wait_subscribe` does neither — a watcher parked there missed
+  # every change until the 32 s timer failed the instance.
+  state refused do
+    case last_subscription() do
+      nil -> goto(wait_subscribe, "no subscription yet")
+      _running -> goto(subscribed, "the subscription runs on")
     end
   end
 
