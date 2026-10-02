@@ -1,7 +1,7 @@
 # Reference kelixip call script: Alice calls Bob — after proving she is Alice.
 #
 # `direct-call.exs` plus digest authentication of the INVITE (design
-# docs/design/evolution-auth-db.md §2): kamailio's
+# docs/design/DESIGN-AUTH.md): kamailio's
 # `proxy_authenticate(); lookup("location"); t_relay()`, done as a B2BUA.
 #
 # Separation of concerns (§11.1): `Kelix.Mod.AuthDb` DECIDES — challenge, accept or

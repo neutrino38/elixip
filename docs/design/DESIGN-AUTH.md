@@ -5,8 +5,7 @@ kelixip performs — which realm, which identity, which code, which requests. Wh
 is still open is marked **OPEN** in place.
 
 Making the backend replaceable — MariaDB today, LDAP / HTTP / Diameter tomorrow —
-is a separate thread, still unbuilt:
-[evolution-auth-db.md](evolution-auth-db.md).
+is not built: [kelixip_roadmap.md](kelixip_roadmap.md#a-replaceable-authentication-backend).
 
 Reference: [`Kelix.Mod.AuthDb`](../kelixip/modules/auth_db.md) is the module that
 holds the verdict, `Kelix.Auth` the challenge params, `SIP.Auth` the digest and

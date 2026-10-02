@@ -66,7 +66,7 @@ Three candidates:
 
 - **(a) in `Kelix.Mod.AuthDb`** — it knows the verdict. But it is a *loadable module*:
   a host without the package gets no protection, and a second backend (see
-  [evolution-auth-db.md](evolution-auth-db.md)) would have to re-implement the
+  [kelixip_roadmap.md](kelixip_roadmap.md#a-replaceable-authentication-backend)) would have to re-implement the
   logging. Also, the module does not see the transport (it gets `req`, which does
   carry the IP — so this is workable but duplicated).
 - **(b) in the scenario** — worst option. Every script author must remember to log,

@@ -205,7 +205,7 @@ defmodule Kelix.Control do
 
   @doc """
   Subscribe `pid` to the live calls of a served domain's users, as the
-  `dialog_state` module follows them (docs/design/dialog-state-plan.md §2 — the
+  `dialog_state` module follows them (docs/design/DESIGN-PRESENCE.md, "Call occupancy": the
   ACD's feed). Returns the rows as they stand; `pid` then receives
   `{:kelix_dialogs, domain, {:upsert, row}}` on every transition of a dialog and
   `{:kelix_dialogs, domain, {:remove, id}}` once it ended, no polling needed.

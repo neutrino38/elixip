@@ -67,7 +67,7 @@ defmodule Kelix.Mod.Presence do
   and, for a subscriber `Kelix.Mod.AuthDb` knows, an **empty** document when
   nothing is: an idle phone has no dialog, which is what its BLF key displays,
   and `noresource` would end the subscription of every idle phone at subscribe
-  time (docs/design/dialog-state-plan.md, decision 7). Any other package has no
+  time (docs/design/DESIGN-PRESENCE.md, "Call occupancy"). Any other package has no
   state.
 
   A registration that changes what a watcher is told — a resource nobody

@@ -27,7 +27,7 @@ defmodule Kelix.AuthSbbTest do
       {:reply, :ok, test}
     end
 
-    # The stamp of dialog-state-plan.md DS3: who the digest proved the far end
+    # The stamp (DESIGN-PRESENCE.md, "Call occupancy"): who the digest proved the far end
     # of this leg to be.
     def handle_call({:set_remote_aor, aor}, _from, test) do
       send(test, {:stamped, aor})

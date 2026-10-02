@@ -31,13 +31,11 @@ The user-facing counterparts live at the repository root —
 |---|---|
 | [kelixip_roadmap.md](kelixip_roadmap.md) | `queue()` and its objects (trunks, agents, `queue_log`), `Path` generation, usrloc persistence, HA, `radius_billing` |
 | [mcu_server_evolutions.md](mcu_server_evolutions.md) | media-server increments the conferencing module waits on |
-| [evolution-auth-db.md](evolution-auth-db.md) | a replaceable authentication backend (LDAP, HTTP, Diameter) |
 | [sbb_evolutions.md](sbb_evolutions.md) | service building blocks: the catalogue, the published view, the TypeScript side |
 | [integration-fail2ban.md](integration-fail2ban.md) | making kelixip trivially protectable |
 | [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
 | [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
-| [dialog-state-plan.md](dialog-state-plan.md) | call occupancy of a served AOR: the `dialog` package (RFC 4235), the stamp auth_db and the registrar put on a leg, the `dialog_state` module and its push for the ACD |
 | [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
 | [chat-basic-plan.md](chat-basic-plan.md) | the build order of basic chat: the `chat` function, the page relay, the Silo, phase by phase |
 | [debug-improvments.md](debug-improvments.md) | scenario debugging: the sequence diagram drawn from the real SIP messages — what is built, its limits, what comes next (in French) |

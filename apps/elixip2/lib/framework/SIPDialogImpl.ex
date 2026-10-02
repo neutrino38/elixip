@@ -114,7 +114,7 @@ defmodule SIP.DialogImpl do
     destport: 0,
     # The AOR of a served domain the far end of this dialog is PROVEN to be —
     # set by the module that proved it, never derived from a header (design
-    # docs/design/dialog-state-plan.md §1). A stamped INVITE dialog pushes its
+    # docs/design/DESIGN-PRESENCE.md, "Call occupancy"). A stamped INVITE dialog pushes its
     # call state through SIP.Dialog.Events; the fields below are that state.
     remote_aor: nil,
     call_state: :trying,

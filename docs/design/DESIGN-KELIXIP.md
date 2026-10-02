@@ -295,11 +295,11 @@ Its `[module.registrar]` block lives in `domains.toml` rather than
 
 ### 8.2 `auth_db`
 
-Credential lookup against MariaDB, exposed as a facade the script calls when it
-decides to challenge. Today it authenticates REGISTER; extending it to INVITE
-and to other backends (LDAP, HTTP, Diameter) behind an `Auth` behaviour is
-designed but not built — see `docs/design/evolution-auth-db.md`; what is built is
-[DESIGN-AUTH.md](DESIGN-AUTH.md).
+Credential lookup against MariaDB. It authenticates every initial request a
+script challenges — REGISTER through its facade, INVITE, SUBSCRIBE, PUBLISH and
+OPTIONS through the `authenticate` block — and stamps the identity it proved
+([DESIGN-AUTH.md](DESIGN-AUTH.md)). Other backends (LDAP, HTTP, Diameter) are
+not built ([kelixip_roadmap.md](kelixip_roadmap.md#a-replaceable-authentication-backend)).
 
 ### 8.3 `mcu` — conferencing
 

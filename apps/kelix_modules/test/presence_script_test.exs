@@ -415,7 +415,7 @@ defmodule Kelix.PresenceScriptTest do
 
     # RFC 4235 through the same script: the package is the block's, injected by
     # the router as the domain is. An idle subscriber is an EMPTY document, not
-    # noresource (dialog-state-plan.md, decision 7): the BLF key shows "no call".
+    # noresource (DESIGN-PRESENCE.md, "Call occupancy"): the BLF key shows "no call".
     test "Event: dialog for a subscriber is 200 + an empty dialog-info", %{subscribe: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       req = subscribe(event: "dialog")

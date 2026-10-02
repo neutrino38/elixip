@@ -5,8 +5,6 @@ when they were consolidated into [`DESIGN-KELIXIP.md`](DESIGN-KELIXIP.md),
 which keeps only what is built and running.
 
 Related open designs, each with its own document:
-[`evolution-auth-db.md`](evolution-auth-db.md) (replaceable backend) is to be implemented — the
-authentication it would sit under is [`DESIGN-AUTH.md`](DESIGN-AUTH.md) — 
 [`integration-fail2ban.md`](integration-fail2ban.md),
 [`liveview-adapter.md`](liveview-adapter.md) (a web admin console),
 [`mcu_server_evolutions.md`](mcu_server_evolutions.md) (media-server increments
@@ -23,10 +21,25 @@ for the conferencing module).
 | **High availability (2-3 node cluster)** | §HA below |
 | **`radius_billing` module** | designed as a `Kelix.Module` (P6b), never written |
 | **`queue()` and its objects** | §Call control below |
+| **replaceable authentication backend** | §A replaceable authentication backend below |
 | **`Kelix.InstanceSupervisor`** | instances are `spawn_monitor`ed by `Kelix.InstancePool`, which owns quota and drain. A `DynamicSupervisor` would add observability and lifecycle, and needs an opt-in option on `spawn_uas_instance/2`; functionally not required |
 
 > Les renvois `§n` de cette section pointent vers le document de conception
 > retiré ; l'équivalent implémenté est dans [`DESIGN-KELIXIP.md`](DESIGN-KELIXIP.md).
+
+## A replaceable authentication backend
+
+`auth_db` (MariaDB) is the only backend. Its verdict logic already isolates the
+secret: `Kelix.Mod.AuthDb.fetch_credential/3` returns `{:ha1, algorithm, hex}`,
+and a rejection carries `:unknown_user` or `:bad_password`. What is left, to do
+the day a second backend (LDAP, HTTP, Diameter) is actually asked for:
+
+- a `Kelix.Auth.Backend` behaviour in the core, with a generic digest
+  implementation, so a credential-shaped backend writes `fetch_credential` only;
+- Diameter Cx MAR/MAA with `Digest-MD5` returns H(A1) and fits that shape. AKA
+  returns a challenge vector (RAND/AUTN/XRES), so it needs a backend owning the
+  whole verdict, not just the credential. SAR/SAA is registration state, not
+  authentication.
 
 ## Call control: `queue()`
 

@@ -47,7 +47,7 @@ end
 defmodule SIP.Test.DialogEvents do
   @moduledoc """
   The call state of a STAMPED dialog reaches whoever subscribed to
-  `SIP.Dialog.Events` (docs/design/dialog-state-plan.md, DS1); an unstamped one
+  `SIP.Dialog.Events` (docs/design/DESIGN-PRESENCE.md, "Call occupancy"); an unstamped one
   says nothing to anyone.
   """
   use ExUnit.Case

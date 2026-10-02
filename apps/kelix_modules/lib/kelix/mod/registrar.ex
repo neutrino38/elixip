@@ -267,7 +267,7 @@ defmodule Kelix.Mod.Registrar do
   The peer also names the AOR it was built for (`aor`, folded to the served
   domain and lower-cased as the store keys it): the leg dialled with it is
   stamped as that AOR's, and its call state pushed to whoever watches it
-  (docs/design/dialog-state-plan.md §1).
+  (docs/design/DESIGN-PRESENCE.md, "Call occupancy").
 
   Returns `{:ok, peer}`, or one of three atoms, each mapping to one SIP answer:
   `:notfound` (no live binding — 480), `:no_aor` (the request carries no usable

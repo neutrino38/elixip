@@ -659,8 +659,7 @@ publication), location, devices registered for push, partial state (RFC 5262).
 
 Whether a user is on the phone is one fact read through three doors: a BLF key
 (`Event: dialog`, RFC 4235), the composite presence (`on-the-phone`), and the
-ACD's feed. `dialog_state` produces it; the build order is
-[dialog-state-plan.md](dialog-state-plan.md).
+ACD's feed. `dialog_state` produces it.
 
 **Invariant: a dialog is reported under a user only when a module proved its far
 end is that user.** A dialog does not know who is at the other end. Its `From` is
@@ -690,6 +689,58 @@ subscription of every idle phone at subscribe time.
 Neither `presence` nor the B2BUA depends on `dialog_state`. It holds the link, as
 `mcu_presence` does, and its package is named so the `Presence*` glob of the
 presence package does not take it.
+
+**The stamp.** `SIP.Dialog.set_remote_aor/2` sets `remote_aor` on the dialog and
+dispatches its current state at once (the inbound stamp arrives after the INVITE,
+from the authentication state). The outbound stamp travels in
+`%SIP.B2bua.Peer{aor:}`, filled by `Registrar.targets/2` and applied by
+`b2bua_forward` when the leg is created. Only stamped dialogs dispatch, on the
+`:duplicate` registry `Registry.SIPDialogEvents` (`SIP.Dialog.Events.subscribe/0`),
+as `{:sip_dialog, pid, info}`; `SIP.Dialog.info/1` gives the same map.
+
+| Dialog event | RFC 4235 state | `event` on `terminated` |
+|---|---|---|
+| INVITE received or sent | `trying` | |
+| 1xx without to-tag | `proceeding` | |
+| 18x, dialog not yet established | `early` | |
+| 2xx | `confirmed` | |
+| BYE either way | `terminated` | `local-bye` / `remote-bye` |
+| CANCEL, 4xx–6xx, timer, crash | `terminated` | `cancelled` / `rejected` / `timeout` / `error` |
+
+**The `dialog` package.** `SIP.EventPackage.Dialog` is built into elixip2:
+`application/dialog-info+xml`, `SIP.DialogInfo.Doc` with one
+`SIP.DialogInfo.Dialog` per live dialog of the AOR, always `full` state. Its
+`version` is the subscription's, stamped at each NOTIFY. Nothing publishes it: a
+PUBLISH on `dialog` is 405. A domain enables it with a `[[domain.presence]]` block
+(`event-package = "dialog"`, `subscribe = "presence-subscribe.exs"`).
+`Kelix.Mod.Presence.report/5` takes the package; on `dialog` the resolution is the
+reported document, else an empty one for a subscriber `auth_db` knows, else none.
+
+**The module** (`Kelix.Mod.DialogState`, no SIP function, no script) subscribes
+to the dialog events, then resyncs from `SIP.Dialog.pids/0` and monitors each
+stamped dialog — a `:DOWN` is a `terminated` with `error`. Per AOR touched it
+reports, each only when its document changed: on `dialog`, the live dialogs (or
+`nil`); on `presence`, `open` + `on-the-phone` while one dialog is `confirmed`
+(a ringing user is not on the phone). It re-reports after a presence restart.
+`[module.dialog_state] domains` restricts it; `validate_config/1` refuses the block
+without `presence`. `kelictl dialog_state list` shows the live dialogs.
+
+**The ACD feed.** `Kelix.Control.subscribe_dialogs(domain, pid)` returns the
+snapshot, then pushes `{:kelix_dialogs, domain, {:upsert, row} | {:remove, id}}`;
+the last upsert of a call is its `terminated` row:
+
+```elixir
+%{domain:, aor:, id: call_id,
+  direction: :initiator | :recipient,      # from the AOR's point of view
+  state: :trying | :proceeding | :early | :confirmed | :terminated,
+  event: nil | :local_bye | :remote_bye | :cancelled | :rejected | :timeout | :error,
+  remote:, since:}
+```
+
+Not built: RFC 7463 shared appearances (built on this package and module, no
+terminal asks for it); forked branches reported as separate early dialogs (a
+parallel fork is one dialog here); `include-session-description`; a UA publishing
+its own dialog state.
 
 ## The data model is kamailio's
 

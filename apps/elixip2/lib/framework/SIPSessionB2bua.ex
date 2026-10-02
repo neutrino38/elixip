@@ -54,7 +54,7 @@ defmodule SIP.B2bua.Peer do
       are, set by the module that grouped them (`Kelix.Mod.Registrar.targets/2`)
       and `nil` for every other peer. The outbound leg is stamped with it at
       creation (`SIP.Dialog.set_remote_aor/2`), so the call state of that AOR
-      is pushed to whoever watches it (docs/design/dialog-state-plan.md §1).
+      is pushed to whoever watches it (docs/design/DESIGN-PRESENCE.md, "Call occupancy").
   """
   defstruct uris: [],
             use_srv: false,

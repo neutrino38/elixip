@@ -513,7 +513,7 @@ defmodule Kelix.Mod.RegistrarTest do
     end
 
     # The peer says WHOSE contacts these are: the leg dialled with it is stamped
-    # as that AOR's (dialog-state-plan.md §1), in the form the store keys it.
+    # as that AOR's (DESIGN-PRESENCE.md, "Call occupancy"), in the form the store keys it.
     test "names the AOR the contacts belong to, lower-cased" do
       Registrar.save(register("alice", "10.0.0.9"), @domain)
 
