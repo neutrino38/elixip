@@ -1,8 +1,8 @@
 # presence-composite-plan.md — the composite state of a presentity, first slice
 
 **Status: planned 2026-09-30. PC0, PC1 and PC2 done 2026-10-01, PC3 and PC4
-done 2026-10-02; decisions 1 and 2 taken. The third symptom of §1 is not
-fixed by composition: decision 3.** The presence design is
+done 2026-10-02; decisions 1, 2 and 3 taken. The third symptom of §1 is not
+fixed by composition: it stays a documented limitation (decision 3).** The presence design is
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md); this document is the order the first
 slice of objective 1 — *a composite state* — gets built in, what each phase
 delivers, and what proves it.
@@ -173,13 +173,17 @@ published activity is kept beside a registered device; the tests of the former
 precedence (registration ignored under a publication, a departing device
 unnoticed) are rewritten to the rule.
 
-### PC5 — documentation and field test
+### PC5 — documentation and field test — documentation done 2026-10-02
 
 `DESIGN-PRESENCE.md` (the composition rule replaces "the most recent state
 change"), `docs/kelixip/modules/presence.md` (Limitations: *No composition*
 goes), release notes. Field test: Bob on Trix and Linphone at once — away on one,
 close it, the watcher and the other device both show away; back to available,
 both follow.
+
+As built: DESIGN-PRESENCE.md gains *The composite state*; `presence.md` gains
+the section of the same name and loses *No composition*; the release note is
+`docs/releases/RELEASE-1.6.2.md`. The field test is pending.
 
 ## 5. Open decisions
 
@@ -189,7 +193,8 @@ both follow.
    leaves it as it is.
 2. **Registration tuples** — taken 2026-10-02: with. A registered device that
    publishes nothing is one open tuple of the composite.
-3. **Devices behind a proxy** — open, found in PC3. Composition does not fix the
+3. **Devices behind a proxy** — taken 2026-10-02: a documented limitation for
+   now (`presence.md`, *Devices behind a proxy*), the fix deferred. Found in PC3. Composition does not fix the
    third symptom of §1: the two devices are one publisher, so the initial
    PUBLISH of the second replaces the first's publication before anything is
    composed. Telling them apart takes a reading of the PUBLISH that names the
