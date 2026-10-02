@@ -826,7 +826,7 @@ defmodule SIP.Msg.Ops do
   package names.
 
   It is composed from what the **domain** enables, never from what the node has
-  compiled in (docs/design/presence-basic-plan.md, decision 3), so the caller
+  compiled in (docs/design/DESIGN-PRESENCE.md, "Who registers a package"), so the caller
   passes the names and this only writes them out.
   """
   @spec allow_events([binary()]) :: binary()

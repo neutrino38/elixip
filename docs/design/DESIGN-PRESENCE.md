@@ -4,9 +4,6 @@ Registration state, published state, consent, and the composite state a
 subscriber presents to the others. Instant messaging is its neighbour and lives
 in [DESIGN-CHAT.md](DESIGN-CHAT.md), which also holds the Silo.
 
-The order this gets built in — the scope of *basic* presence, the phases, and what
-each one proves — is [presence-basic-plan.md](presence-basic-plan.md).
-
 ## Objectives
 
 Implement RFC 3856 and use it creatively, as follows.
@@ -103,10 +100,18 @@ The B2BUA's hunt function is obviously what is used here.
 
 ```toml
 [[domain.presence]]
-event-package=<event package>
-publish=publish-<event package>.exs
-subscribe=subscribe-<event package>.exs
+event-package = "presence"
+subscribe = "presence-subscribe.exs"
+publish = "presence-publish.exs"
 ```
+
+One block per event package; two blocks claiming one package are refused at
+parse time. `subscribe` is required, `publish` optional: a PUBLISH for a package
+with no `publish` script is answered **405**. The Router reads `Event` to pick
+the block and answers **489** itself, with an `Allow-Events` naming the packages
+the domain serves. `Allow-Events` goes on the 2xx to a SUBSCRIBE and on the 489,
+never on the node's OPTIONS answer. `[module.presence]` carries `call_timeout_ms`
+only.
 
 MESSAGE is dispatched by its own `[[domain.chat]]` blocks — see
 [DESIGN-CHAT.md](DESIGN-CHAT.md#dispatch-chat-is-a-function-of-its-own).
@@ -248,9 +253,11 @@ would be forgotten in three scripts out of four, and the subscription would leak
 on the watcher's side — the same failure mode `requested_expires/2` was written
 to end.
 
-**5. The watcher refreshes by itself.** Symmetric with `RegisterUAC`: the
-framework re-SUBSCRIBEs before expiry, and an `app_drives_…` control hands the
-refresh back to the scenario when it wants it.
+**5. The watcher refreshes by itself.** The **dialog** sends the refresh before
+expiry — it holds the timer, the `Event`, the `id`, the route set and the granted
+lifetime — and its response surfaces to the scenario like any other.
+`SIP.Dialog.app_drives_refresh/1` hands the schedule back, symmetric with
+`app_drives_keepalive/1`.
 
 **6. Two concrete defects this layer must close:**
 
@@ -271,8 +278,55 @@ to the application, with the RFC 6665 reasons — `deactivated`, `probation`,
 `rejected`, `timeout`, `giveup`, `noresource`, `invariant`. "Exactly one" is the
 contract, as it is for `{:dialog_terminated, …}`
 ([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#55-the-termination-contract)).
-`deactivated` and `probation` mean *subscribe again*, and the framework does it
-without waking the scenario; the other five are terminal and surface.
+`deactivated` and `probation` mean *subscribe again*; they surface like the other
+five, because re-subscribing opens a new dialog and only the scenario can open
+one (`send_SUBSCRIBE/3`).
+
+A subscription granted 0 (an un-SUBSCRIBE) is marked terminated at acceptance,
+and `notify/1` on a terminated subscription sends nothing: the final NOTIFY is
+the dialog's. The 2xx to a SUBSCRIBE carries a `Contact`, and a NOTIFY arriving
+before the 200 is matched on Call-ID plus the local tag.
+
+### The verbs and the readings
+
+The notifier half is `SIP.Session.Notifier` (`accept_subscription/1`,
+`reject_subscription/2`, `notify/2`, `terminate_subscription/1`, refusals **423**,
+**406**, **489**, and **420** with `Unsupported` for a `Require` it does not
+implement); the watcher half is `SIP.Session.SubscribeUAC` (`send_SUBSCRIBE/3`,
+`send_auth_SUBSCRIBE/4`, the automatic 200 to a NOTIFY,
+`notified_document/1`). `%SIP.Subscription{}` is keyed
+`{callid, local_tag, remote_tag, package, id}` and carries the columns of a
+kamailio `active_watchers` row, the watcher and presentity identities included.
+
+Every header is read once, in `SIP.Msg.Ops`: `event_package/1`,
+`accepted_content_types/1`, `subscription_expires/2` (a reading of its own: no
+Contact `expires`, the default is the package's), `subscription_state/1`,
+`publish_etag/1`, `entity_tag/1`, `publish_operation/2`, `allow_events/1`,
+`required_extensions/1`, `supported_extensions/1`, `recipient_list/1`.
+
+**PUBLISH** (RFC 3903) is `SIP.Session.Publish`. `check_publish/1` reads the
+request against the package registry, answers **489**, **400** (neither tag nor
+body), **415** (with `Accept`) and **423** (with `Min-Expires`) itself, and hands
+the collection a `%SIP.Publication{}` — a kamailio `presentity` row: the
+operation (initial, refresh, modify, remove), the entity-tag presented, the parsed
+document, an absolute `expires`. The collection answers the **412** and mints the
+new entity-tag (`SIP.Publication.new_etag/0`); a 200 to a removal carries no
+`SIP-ETag`. A PUBLISH instance lives as long as its transaction.
+
+**PIDF** is `SIP.Presence.Doc` and `SIP.Presence.Pidf`, parsed with `:erlsom`: a
+body over 64 kB or carrying a `<!DOCTYPE` is refused. Tuples carry reachability
+per device; the RPID `activity` and `note` sit on the person. A known RFC 4480
+activity is an atom, anything else stays a string. `SIP.EventPackage.Presence`
+has `default_expires` 3600 and `content_types ["application/pidf+xml"]`;
+`register_builtins/0` installs it from `SIP.FSL.Host.bootstrap/0` and
+`Kelix.Application`.
+
+**Without a node.** `uas :presence` makes a scenario a presence server for
+`elixipp --listen`; `config event_package: "presence"` makes
+`Elixip.ScenarioUAS` answer 489 to any other package. SUBSCRIBE and PUBLISH reach
+the same scenario. `scenarios/uac_subscribe.exs` and `scenarios/uas_presence.exs`
+are the reference watcher and notifier. A `:uas_presence` scenario cannot be a
+sub-FSM.
 
 ### What this leaves to the module
 
@@ -515,8 +569,20 @@ created.
 other — both are optional packages, and a node running one without the other must
 not change. `mcu_presence` follows the MCU's live push and reports each room
 (`sip:<did>@<domain>`): open, open with the RPID activity `busy` when full, closed
-while its media server is lost. Its plan is
-[mcu-presence-plan.md](mcu-presence-plan.md).
+while its media server is lost:
+
+| The conference | The state reported for `sip:<did>@<domain>` |
+|---|---|
+| live, not full | `open` |
+| live, full (the next caller would get 486) | `open` + RPID `busy` |
+| `stale` (its media server went away) | `closed` |
+| does not exist | none — `noresource` |
+
+It follows `Kelix.Mod.Mcu.subscribe_conferences/1`, reports a room only when its
+document changes, and resyncs fully after an MCU or a presence restart.
+`[module.mcu_presence] domains` restricts it (default: every domain the MCU holds
+rooms on); its `validate_config/1` refuses the block when `mcu` or `presence` is
+not loaded. `kelictl mcu_presence list` shows what was reported.
 
 The registrar keeps its own path (`registration_changed/1`); moving it onto
 `report/4` is possible, and not done.
@@ -588,7 +654,6 @@ of the publication whose state changed last.
 Out of the composite, each its own work: call occupancy overriding the published
 activity (`on-the-phone` from `dialog_state`, a reported state ranked below a
 publication), location, devices registered for push, partial state (RFC 5262).
-The order it was built in is [presence-composite-plan.md](presence-composite-plan.md).
 
 ### Call occupancy
 

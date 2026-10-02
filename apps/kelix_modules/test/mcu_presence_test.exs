@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.McuPresenceTest do
   @moduledoc """
-  Conference rooms as presentities (`docs/design/mcu-presence-plan.md`, MP3): the
+  Conference rooms as presentities (`docs/design/DESIGN-PRESENCE.md`, "Reported states"): the
   row → document mapping, a report only when the state changed, and the resync
   after either half restarts.
 

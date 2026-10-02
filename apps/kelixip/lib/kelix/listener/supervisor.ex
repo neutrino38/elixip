@@ -28,8 +28,8 @@ defmodule Kelix.Listener.Supervisor do
   a half-deaf server.
 
   **One UDP socket per family**: a datagram leaves only through a socket of its
-  destination's family, and the two share a port (step 4 of
-  docs/design/multi-interface.md). A second `udp` entry of a family already bound
+  destination's family, and the two share a port
+  (docs/design/DESIGN-SIPSTACK.md, "Addressing"). A second `udp` entry of a family already bound
   is logged and skipped.
 
   The `:elixip2` app env keys `:udp_local_port` / `:udp_local_addr` still name the
@@ -84,8 +84,8 @@ defmodule Kelix.Listener.Supervisor do
 
   # A `[[listen]]` entry stating no `addr` is every interface of every family the
   # host carries, which is one socket each: two families cannot share one, and a
-  # dual-stack v6 socket would hand out `::ffff:` mapped addresses (step 4 of
-  # docs/design/multi-interface.md).
+  # dual-stack v6 socket would hand out `::ffff:` mapped addresses
+  # (docs/design/DESIGN-SIPSTACK.md, "Addressing").
   #
   # Only families the host actually carries an advertisable address of. A listener
   # has to write a local address into its Via and its Contact, so binding a family

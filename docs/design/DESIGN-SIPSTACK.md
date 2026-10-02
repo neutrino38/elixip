@@ -334,9 +334,87 @@ gone and `notify_transport_down/2` broadcasts it to the dialogs once, from
 | `:udp_family` | `:ipv4` | the node's family when `:udp_local_addr` is unset. Read through `SIP.NetUtils.preferred_family/0`, which the resolver reads too |
 | `:tcp_max_connections` / `:tls_max_connections` / `:wss_max_connections` | 100 | accepted connections per listener |
 | `:tls_certfile` / `:tls_keyfile` | see `TLS_WSS.md` | listener certificate, overridable per listener |
+| `:tls_verify` / `:tls_cacertfile` | `false` / — | the outbound TLS/WSS leg verifies the certificate it is offered, against that CA (§3.10) |
+| `:internal_networks` | `[]` | `{address, prefix_length}` list: the node's internal side, read by `SIP.NetUtils.net_side/1` (§3.10) |
+| `:advertise_map` | `%{}` | bound address → public alias, read by `SIP.Transport.publish_ip/2` (§3.10) |
 | `:sip_timer_T1` | 500 ms | base of timers B, F, H |
 | `:optionkeepaliveperiod` | 15 s | OPTIONS keep-alive interval (§5.6) |
 | `:unittest_transport` | — | mockup module, set by `test_helper.exs` only |
+
+### 3.10 Addressing: IPv6, dual stack, network sides
+
+A node speaks IPv4, IPv6 or both, and may sit on two networks — an internal one and
+a public one, possibly through a 1:1 NAT. A call carries a network profile **per
+leg**, and the two legs may differ (IPv4 ↔ IPv6, internal ↔ public).
+
+**Writing an address.** `SIP.NetUtils.sip_host/1` is the one place an address
+becomes the RFC 3261 §25.1 `host`: an IPv6 literal goes out in brackets, anything
+else unchanged. `SIP.Uri.serialize_addr_spec/1`, `SIP.Msg.Ops.build_via_addr/3`
+and therefore the Request-URI and the digest all go through it.
+
+**Reading an address.** `SIP.Uri.parse_host_port/1` recognises the `[…]` form
+first and stores the domain without brackets. An IPv6 literal without brackets is
+refused, and so is a zone identifier (`fe80::1%eth0`, RFC 6874): a link-local
+address in a Via or a Contact is not reachable from another link. The parser
+never raises on malformed input — it answers an error atom — and
+`SIP.Transport.ImplHelpers.process_sip_message/7` wraps inbound processing in a
+`try/rescue`, so a peer cannot kill a shared transport.
+
+**Choosing a local address.** `SIP.NetUtils.address_scope/1` classifies an address
+`:loopback`, `:link_local`, `:private` (RFC 1918, ULA `fc00::/7`) or `:global`.
+`get_local_ips/1` returns `:global` and `:private` addresses only (the others on
+request), IPv6 before IPv4, and within a family `:global` before `:private`. The
+node's family is `SIP.NetUtils.preferred_family/0`: the family of
+`:udp_local_addr` when set, else `:udp_family`. The UDP socket and the resolver
+both read it.
+
+**Listeners and families.** A listener's family is the family of its `addr`.
+`0.0.0.0` and `::` are the wildcards of one family; a kelixip `[[listen]]` block
+with no `addr` is expanded into one child per family the host can announce. UDP
+keeps **one socket per family**, both on the same port (`ipv6_v6only`), never a
+dual-stack v6 socket. Its instance name carries the family — `"UDP_ipv4"`,
+`"UDP_ipv6"` — written only by `SIP.Transport.Selector.unreliable_instance_name/2`;
+the Selector picks the socket from the family of the resolved destination.
+`SIP.Transport.UDP` opens its socket with `:gen_udp.open/2` directly and accepts
+an explicit `{:bind, ip, port, opts}` init form.
+
+**Resolution.** `SIP.Resolver.resolve/2` asks for the record of the node's
+preferred family first and tries the other only on `:nxdomain`. Without a
+configured nameserver it uses the system resolver.
+
+**The network side.** `SIP.NetUtils.net_side/1` answers `:internal` or `:public`
+for an address, from the node's internal prefixes (`:internal_networks`; empty
+makes everything public). In kelixip these come from the `[[listen]]` blocks
+tagged `internal`: the subnet of the listener's interface, auto-detected through
+`:inet.getifaddrs/0`, or the block's `networks` list, which replaces the detection.
+The node takes the union.
+
+**`%SIP.Uri{}.net_side`** (`:public | :internal | nil`) marks a resolved target,
+beside `destip`, `destport` and `tp_pid`. It never reaches the wire. The family is
+not stored: it is read from `destip` through `SIP.NetUtils.address_family/1`.
+
+**Advertised address (1:1 NAT).** `SIP.Transport.publish_ip/2` is the one place a
+local address is substituted when published, from `:advertise_map` (bound
+address → public alias). The transport keeps reporting the address it really
+binds; the substitution happens when a Contact or a Via `sent-by` is written:
+
+| The peer is | It receives |
+|---|---|
+| public | the alias |
+| internal | the bound address |
+| unknown | the alias |
+
+Route and Record-Route need nothing: elixip reads them and never writes its own
+address into them. In kelixip, `advertise` requires an explicit `addr` of the same
+family.
+
+**Outbound TLS verification.** The outbound TLS/WSS leg verifies the peer's
+certificate when `:tls_verify` is set, against `:tls_cacertfile` (kelixip:
+`[tls] verify`, `ca`). It is off by default. Listener-side client certificates
+(mTLS) are not implemented.
+
+No STUN client: `SIP.Stun` only recognises and decodes an inbound message header,
+and the public address is configured (`advertise`), not discovered.
 
 ---
 
@@ -512,7 +590,8 @@ backend, is application policy — see
   where all the logic is, and testing it must not need a DNS server. The lookup
   around it does the I/O and nothing else.
 - **`SIP.NetUtils`** — interface enumeration, IPv4/IPv6 parsing and formatting
-  (`ip2string/1`, `parse_address/1`), and `pick_free_port/2` (a free port ≥ 5000,
+  (`ip2string/1`, `parse_address/1`, `sip_host/1`), address scope, family and
+  network side (§3.10), and `pick_free_port/2` (a free port ≥ 5000,
   used when no local port is imposed so two instances coexist on one host).
 - **`SIP.Stun`** — enough of RFC 5389 to tell a STUN message from a SIP one on a
   shared port and decode its header (§3.2). Demultiplexing is unambiguous, by the

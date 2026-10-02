@@ -117,7 +117,7 @@ Design: [DESIGN-AUTH.md](../design/DESIGN-AUTH.md#3-the-authentication-block).
 
 - `FSL.md` gains a service-building-block section and hands "Under the hood" over
   to [DESIGN-FSL.md](../design/DESIGN-FSL.md).
-- [kelixip-b2bua.md](../design/kelixip-b2bua.md) keeps `queue()` as future work;
+- [kelixip_roadmap.md](../design/kelixip_roadmap.md#call-control-queue) keeps `queue()` as future work;
   its FSL prerequisite and its `call()` are delivered.
 - [DESIGN-AUTH.md](../design/DESIGN-AUTH.md) gains the authentication block and
   the `P-Asserted-Identity` rule; `evolution-auth-db.md` goes back to being about

@@ -1,6 +1,6 @@
 defmodule SIP.Test.UASPresence do
   @moduledoc """
-  Presence end to end with no node (docs/design/presence-basic-plan.md, P6): the
+  Presence end to end with no node (docs/design/DESIGN-PRESENCE.md, "Without a node"): the
   `elixipp` factory that routes an inbound SUBSCRIBE or PUBLISH to a
   `uas :presence` scenario, and the two reference scenarios it runs.
 

@@ -245,4 +245,5 @@ invariant; the `dialog` package in `docs/kelixip/administration.md` next to
 - **A UA publishing its own dialog state** (RFC 3903 on the `dialog` package).
   The stamp answers the question for calls that cross this node; a call that does
   not, does not exist here.
-- **The registrar on `report/4`** — see mcu-presence-plan.md MP1.
+- **The registrar on `report/4`** — it keeps its own path (`registration_changed/1`),
+  see [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md#reported-states).

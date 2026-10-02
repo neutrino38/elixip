@@ -384,8 +384,8 @@ defmodule SIP.NetUtils do
 
   This orders the two queries of a name resolution — which record is asked for
   first — and nothing else. It does not decide what a datagram may leave by: a
-  node binds one UDP socket per family (step 4 of
-  docs/design/multi-interface.md), and `SIP.Transport.Selector` picks between
+  node binds one UDP socket per family
+  (docs/design/DESIGN-SIPSTACK.md, "Addressing"), and `SIP.Transport.Selector` picks between
   them on the family of the **resolved destination**, not on this. So a name
   that only has an AAAA record is reached from a node whose primary socket is
   IPv4; the order cost one extra query, not the call.

@@ -1032,7 +1032,7 @@ defmodule Kelix.Mod.Presence do
   defp ruid_of(nil), do: nil
   defp ruid_of(%SIP.Publication{ruid: ruid}), do: ruid
 
-  # Decision 1 of presence-composite-plan.md: every publication that carries a
+  # DESIGN-PRESENCE.md, "The composite state": every publication that carries a
   # document states the person — a document with no activity states "none",
   # which is how the field clients say "available". A refresh carries none.
   defp hold_person(state, {user, rdomain, _event} = resource, %SIP.Publication{

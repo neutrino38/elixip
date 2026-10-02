@@ -353,6 +353,61 @@ The stack-level resilience behaviours (R1–R6) are in
 [DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md) §5.7. The media server as a failure
 domain (R8) is §6.7 below.
 
+### 5.10 Network profiles
+
+The media server carries up to four addresses — `publicv4`, `publicv6`,
+`internalv4`, `internalv6` — and each media endpoint is created on one of them.
+The profile is fixed **once per leg**, not per session: an IPv4 ↔ IPv6 or
+internal ↔ public call relays media through one server holding both profiles,
+one per leg. A call across two families always relays media.
+
+**The profile of a leg** is two halves, assembled in one place,
+`MediaServer.leg_profile_name/1`:
+
+| Half | Source |
+|---|---|
+| family | `local_ip` — the local address the peer reached, or the family of the resolved target for a leg we place |
+| side | `peer_ip` — the peer's source address, through `SIP.NetUtils.net_side/1`; without it, `local_ip` |
+
+The side comes from the peer because one interface may have two faces: behind a
+1:1 NAT a private and a public UA reach the same socket. The family × side →
+server name mapping is written once, in `MediaServer.profile_name/2`. A leg the
+node places carries the profile of its target as the `address_profile:` connect
+option, which the adapters prefer to anything they would derive.
+
+**Resolving before choosing the server.** The server must carry the profiles of
+every leg, so it is chosen once the targets are known:
+
+```elixir
+b2bua_resolve(peer)                         # resolve and mark every target
+media_connect()                             # a server carrying all the profiles
+b2bua_forward(req, b2bua_resolved_peer(), @media)
+```
+
+`b2bua_resolve/1` resolves each URI of the peer through `SIP.Resolver` (DNS only —
+no transport is started) and marks it with its `net_side`. `media_connect/0` then
+reads `SIP.Session.B2bua.resolved_profiles/1` and asks the selector injected as
+`:elixip2, :mediaserver_selector` (`{module, function}`, called with
+`{family, side}` pairs) for a server; kelixip sets it to
+`Kelix.Router.media_for_profiles/1`, which calls `Kelix.MediaPool.checkout/2`.
+Without a selector, or with nothing resolved, the server is chosen as before.
+
+The verb is optional. `b2bua_forward/4` on an unresolved peer adopts a resolution
+of the same targets, or resolves at each attempt; it logs a warning when other
+targets were resolved, since the server was then chosen for another call.
+
+**One endpoint per profile along a hunt.** The `c=` address is fixed when an
+endpoint is created. When the next rung of a hunt has another address profile,
+`restart_ladder/3` rebuilds the endpoint, the same mechanism as an offer-ladder
+restart; the `%Leg{}` records the profile it was built on (`addr_profile`). A rung
+is one offer: targets of different profiles in one parallel rung are offered on
+the first one's profile, with a warning — targets on different interfaces belong
+in different rungs.
+
+No fallback anywhere: a target whose profile no server carries is skipped, and a
+call with no eligible server fails. Media sent through the wrong interface would
+fail silently.
+
 ---
 
 ## 6. Media
@@ -426,6 +481,17 @@ modules, one process shape:
 Events are correlated by **tag**: every resource is created with a name the
 adapter chose, so an event names the object it belongs to and the server needs no
 per-object subscription.
+
+**Address profiles.** The adapter asks the server which profiles it carries
+(`GetNetworkProfiles`) at connection, and passes the leg's profile (§5.10) as the
+last parameter of `EndpointStartReceiving` and `EndpointStartSending` — the same on
+both, before the port is published. A server that refuses the profile fails the
+call; a server that does not know the method is called without one. The
+WebSocket text path calls `GetMediaCandidates` after `EndpointStartReceiving`, so
+the URL it publishes carries the leg's address.
+
+`MediaServer.SdpTools.blackholed?/1` is the single reading of a held stream:
+`c=` `0.0.0.0` or `::` (RFC 6157 §4).
 
 The poller is the fragile part by nature — a long-poll over HTTP — so its policy
 is explicit configuration rather than a constant: `poller_retry_ms` between

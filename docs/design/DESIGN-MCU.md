@@ -490,10 +490,13 @@ Three rules hold the rest:
   `GetNetworkProfiles`, no profile parameter, the server's own default — the same
   rolling-upgrade path the codec verdict has.
 
-Only the public profiles are asked for. Which side of the network a correspondent
-sits on is step 6 of [multi-interface.md](multi-interface.md), where a node learns
-to classify an address; until then a conference reached through an `internal`
-listener announces the public address.
+The side of the network — public or internal — is the side of the caller's
+address, else of the local address it reached (`MediaServer.leg_profile_name/1`,
+[DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md#510-network-profiles)), crossed with each
+offered family through `MediaServer.profile_name/2`. The module
+opens its own control channels and does not go through `Kelix.MediaPool.checkout/2`;
+its `:httpc` profile uses `ipfamily: :inet6fb4`, so a pool `url` may name an IPv6
+literal.
 
 ---
 

@@ -131,7 +131,7 @@ defmodule SIP.Test.Pidf do
   # ── The refusals ────────────────────────────────────────────────────────────
 
   # Captured from Linphone-Desktop 6.2.3 and Trix (JsSIP 3.13.8) on 2026-10-01
-  # (presence-composite-plan.md, PC0). Both say "available" by sending NO
+  # (DESIGN-PRESENCE.md, "The composite state"). Both say "available" by sending NO
   # `<dm:person>` at all, never an empty one: a document with no activity is how
   # a client clears the person state, and it must read as exactly that.
   describe "parse/1 on field captures" do

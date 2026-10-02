@@ -357,7 +357,7 @@ defmodule Kelix.Router do
   @doc """
   A media server carrying every addressing profile this call needs, as
   `media_connect/0` asks for it once `b2bua_resolve/1` has resolved the targets
-  (step 5 of docs/design/multi-interface.md).
+  (docs/design/DESIGN-FRAMEWORK.md, "Network profiles").
 
   Declared to the framework as `:elixip2, :mediaserver_selector` — the framework
   cannot reach `Kelix.MediaPool`, which is a kelixip surface, so the selection is

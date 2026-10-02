@@ -40,8 +40,8 @@ defmodule SBB.Call do
 
       The block resolves an unresolved peer itself, so nothing breaks without
       that; what is lost is the choice of a media server carrying an interface
-      the callee can reach, which only the resolved target names (step 5 of
-      `docs/design/multi-interface.md`). The order matters, not the verb: the
+      the callee can reach, which only the resolved target names
+      (`docs/design/DESIGN-FRAMEWORK.md`, "Network profiles"). The order matters, not the verb: the
       media server is chosen inside `media_connect/0`;
     * `:request` — the INVITE to forward, defaulting to `last_uas_req()`, which
       is what a UAS instance always has;

@@ -261,7 +261,7 @@ defmodule Kelix.Mod.PresenceTest do
     end
   end
 
-  # presence-composite-plan.md, PC3: one document per presentity, the tuples of
+  # DESIGN-PRESENCE.md, "The composite state": one document per presentity, the tuples of
   # every live publication under one person state.
   describe "the composite state" do
     defp activity(user, status, activity, stamp \\ nil),

@@ -191,7 +191,7 @@ tout de suite. Le nœud garde le **journal**, pas un dessin : `Kelix.Traces`
 conserve les événements et les métadonnées, et chaque lecteur dessine.
 `kelictl debug show <id>` trace une échelle à la sngrep, `--full` y ajoute le
 texte des messages, `--format-puml` donne le PlantUML ; kelescope dessine une
-popup ([kelescope-debug-scenario.md](kelescope-debug-scenario.md)) ; REST
+popup ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md#111-scenario-journals)) ; REST
 renvoie le journal en JSON. Guide opérateur :
 [administration.md](../kelixip/administration.md#the-journal-of-a-live-scenario).
 

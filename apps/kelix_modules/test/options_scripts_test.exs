@@ -1,7 +1,7 @@
 defmodule Kelix.OptionsScriptsTest do
   @moduledoc """
   The reference OPTIONS scripts (`apps/kelixip/scripts/options-keepalive.exs` and
-  `options-probe-ua.exs`), served on an OPTIONS dialog (docs/design/options-plan.md).
+  `options-probe-ua.exs`), served on an OPTIONS dialog (docs/design/DESIGN-KELIXIP.md, "Dispatch").
 
   Tested here for the reason every reference script is: this is the only app where
   both halves exist — the script, and the `auth_db` / `registrar` modules it calls.

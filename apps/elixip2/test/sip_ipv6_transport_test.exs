@@ -1,6 +1,6 @@
 defmodule SIP.Test.IPv6Transport do
   @moduledoc """
-  Step 3 of docs/design/multi-interface.md: a listener binds the family of the
+  docs/design/DESIGN-SIPSTACK.md, "Addressing": a listener binds the family of the
   address it was given, and an outbound leg resolves a name in the family the
   node can source from.
 

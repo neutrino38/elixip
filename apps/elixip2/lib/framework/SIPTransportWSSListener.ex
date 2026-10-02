@@ -89,7 +89,7 @@ defmodule SIP.Transport.WSSListener do
 
     # listen/2 binds passive and with SO_REUSEADDR on its own. No `version:`: the
     # bind address carries its family, and `:all` still binds 0.0.0.0 (see
-    # SIP.Transport.TCPListener, and step 4 of docs/design/multi-interface.md).
+    # SIP.Transport.TCPListener, and docs/design/DESIGN-SIPSTACK.md, "Addressing").
     ssl_opts =
       [
         packet: :raw,
