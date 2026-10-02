@@ -702,6 +702,21 @@ defmodule SIP.Uri do
     {:ok, addr_spec}
   end
 
+  @doc """
+  The Request-URI as text, for a log line or a reason phrase: what
+  `serialize_ruri/1` puts on the Request-Line, so a log never shows a display
+  name or a header parameter the request did not carry. Anything else than a
+  `%SIP.Uri{}` (a URI that failed to resolve) is printed as it is.
+  """
+  @spec ruri_string(term()) :: binary()
+  def ruri_string(uri = %SIP.Uri{}) do
+    {:ok, ruri} = serialize_ruri(uri)
+    ruri
+  end
+
+  def ruri_string(other) when is_binary(other), do: other
+  def ruri_string(other), do: inspect(other)
+
   # `is_integer/1` before the comparison, and not for tidiness: an atom sorts
   # ABOVE every number in Elixir, so `nil > 0` is true — a URI stamped with an
   # address but no port passed for fully routed.

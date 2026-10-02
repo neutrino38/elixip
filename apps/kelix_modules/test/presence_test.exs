@@ -976,7 +976,8 @@ defmodule Kelix.Mod.PresenceTest do
       assert {:ok, [%{aor: "magali.buu", status: "open", sources: "publish, registrar"}]} =
                Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
 
-      assert {:ok, %{states: states}} =
+      # show heads its states with the same composite
+      assert {:ok, %{status: "open", activity: nil, calls: nil, states: states}} =
                Presence.handle_control("show", %{"domain" => "weshwesh.eu", "aor" => "magali.buu"})
 
       assert [%{source: "publish", status: "closed"}, %{source: "registrar", status: "open"}] =
@@ -1507,6 +1508,22 @@ defmodule Kelix.Mod.PresenceTest do
 
       assert [_state] = detail.states
       assert [_watcher] = detail.watchers
+    end
+
+    # `kelictl presence list D bob` listed every presentity of D: the surplus
+    # token was dropped, so the operator read the result as filtered.
+    test "a token no argument takes is refused, not dropped" do
+      assert {:error, "unexpected argument: bob"} =
+               Presence.handle_control("list", %{
+                 "domain" => @domain,
+                 "args" => ["domain=#{@domain}", "bob"]
+               })
+
+      assert {:ok, [_row]} =
+               Presence.handle_control("list", %{
+                 "domain" => @domain,
+                 "args" => ["domain=#{@domain}"]
+               })
     end
 
     test "show of an AOR nothing is held about is a 404" do

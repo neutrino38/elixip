@@ -283,6 +283,9 @@ defmodule SIP.Test.Uri do
     refute String.contains?(ruri, "\"")
     refute String.contains?(ruri, "<")
     refute String.contains?(ruri, " ")
+
+    # what the transaction logs is what went on the Request-Line
+    assert SIP.Uri.ruri_string(uri) == ruri
   end
 
   # §19.1.5: "Unknown URI parameters MUST be placed in the message's Request-URI."

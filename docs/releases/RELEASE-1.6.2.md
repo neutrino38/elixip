@@ -32,6 +32,8 @@ presence of a user with several devices.
 - **`[[domain.presence.subscribe]]` rules** route a SUBSCRIBE by user part, so a
   buddy list on the account's own domain (`sip:rls@example.com`) reaches
   `presence-rls.exs`.
+- **`kelictl presence show`** heads a presentity with its composite state
+  (status, activity, note, calls), then the states it is composed of.
 - Limitation: devices relayed by a proxy over one connection count as one.
 
 ## Dependency
@@ -45,3 +47,7 @@ FSL **0.5.0** (`finite_state_language` on hex).
 - A buddy-list un-SUBSCRIBE without a body (Linphone) is no longer answered 400.
 - A refused SUBSCRIBE refresh leaves the subscription notified.
 - `GET /scenarios` no longer answers 500.
+- `kelictl presence` refuses an argument its command does not take
+  (`presence list D bob` listed the whole domain).
+- Transaction logs show the Request-URI as sent, without the display name and
+  header parameters of the Contact it came from.

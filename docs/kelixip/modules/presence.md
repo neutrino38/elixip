@@ -399,7 +399,7 @@ subscribing.
 | Command | REST | Description |
 |---|---|---|
 | `kelictl presence list D` | `GET /modules/presence/presentities` | One row per presentity: what its watchers are told, and who says so |
-| `kelictl presence show bob@D` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
+| `kelictl presence show bob@D` | `GET /modules/presence/presentities/bob` | One presentity: its composite state, the states it is composed of, its watchers |
 | `kelictl presence watchers bob@D` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
 | `kelictl presence remove bob@D` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
 
@@ -417,6 +417,24 @@ magali.buu    open    on_the_phone  1      1         publish, dialog_state, regi
 the composite, which wins over a reported state. `calls` counts the dialogs a
 watcher of the `dialog` package is told of, `watchers` the live subscriptions, and
 `sources` names who states something about the presentity.
+
+`show` heads the detail of one presentity with the same composite, then lists
+every state it is composed of:
+
+```
+Presentity uri: sip:bob@weshwesh.eu
+Status:         open
+Activity:       away
+Note:           -
+Calls:          -
+States:
+  event     source     status  activity  ruid          etag              expires  sender                       content_type
+  presence  publish    open    away      5e6951922044  3743925564391211  3525     "Bob" <sip:bob@weshwesh.eu>  application/pidf+xml
+  presence  registrar  open    -         rd77570d604b1 -                 -        sip:bob@192.0.2.10           -
+Watchers:
+  watcher                     event     status  expires  callid
+  sip:magali.buu@weshwesh.eu  presence  active  3364     7spik6itdff9ode3hi13
+```
 
 `show` and `watchers` give the detail, under kamailio's column names —
 `presentity_uri`, `event`, `etag`, `expires`, `status`, `callid`.

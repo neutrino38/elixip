@@ -267,7 +267,7 @@ defmodule Kelix.Mod.Presence do
         args: [%{name: "domain", required: true}, %{name: "aor", required: true}],
         render: %{
           kind: :detail,
-          fields: ~w(presentity_uri states watchers),
+          fields: ~w(presentity_uri status activity note calls states watchers),
           nested: %{
             "states" => %{
               columns: ~w(event source status activity ruid etag expires sender content_type)
@@ -308,20 +308,26 @@ defmodule Kelix.Mod.Presence do
   this view and quite different on the wire.
   """
   @impl Kelix.Module
+  def handle_control(command, %{"args" => tokens} = args) when is_list(tokens) do
+    # The core binds the bare tokens to the declared arguments and hands back
+    # the ones left over; none of these commands takes more, so a surplus token
+    # is refused rather than silently dropped (`list D bob` is not a filter).
+    case Enum.reject(tokens, &String.contains?(&1, "=")) do
+      [] -> handle_control(command, Map.delete(args, "args"))
+      surplus -> {:error, "unexpected argument: #{Enum.join(surplus, " ")}"}
+    end
+  end
+
   def handle_control("list", %{"domain" => domain}), do: {:ok, overview(domain)}
 
   def handle_control("watchers", %{"domain" => domain, "aor" => aor}),
     do: {:ok, watchers(domain, aor)}
 
   def handle_control("show", %{"domain" => domain, "aor" => aor}) do
-    states = Enum.filter(presentities(domain), &(aor_of(&1.presentity_uri) == downcase(aor)))
-    watchers = watchers(domain, aor)
-
-    if states == [] and watchers == [] do
-      {:error, :not_found}
-    else
-      {:ok,
-       %{presentity_uri: "sip:#{downcase(aor)}@#{domain}", states: states, watchers: watchers}}
+    case presentity(domain, aor) do
+      nil -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+      detail -> {:ok, detail}
     end
   end
 
@@ -339,15 +345,6 @@ defmodule Kelix.Mod.Presence do
       _ -> {:error, {:unknown_command, command}}
     end
   end
-
-  defp aor_of(uri) when is_binary(uri) do
-    case SIP.Uri.parse(uri) do
-      {:ok, %SIP.Uri{userpart: user}} -> downcase(user)
-      _ -> nil
-    end
-  end
-
-  defp aor_of(_uri), do: nil
 
   # ── facades ─────────────────────────────────────────────────────────────────
 
@@ -704,6 +701,16 @@ defmodule Kelix.Mod.Presence do
   def overview(domain),
     do: Kelix.Module.safe_call(__MODULE__, {:overview, served_domain(domain)})
 
+  @doc """
+  One presentity (`kelictl presence show`): what a watcher of its `presence`
+  package is told (`status`, `activity`, `note` — the composite state), the dialogs
+  of its resolved `dialog` document (`calls`), then every state it is composed of
+  and its watchers. `nil` when nothing is held about the AOR.
+  """
+  @spec presentity(String.t(), String.t()) :: map | nil | {:error, :down | :timeout}
+  def presentity(domain, aor),
+    do: Kelix.Module.safe_call(__MODULE__, {:presentity, served_domain(domain), downcase(aor)})
+
   @doc "The live watchers of an AOR, as rendered rows (`kelictl presence watchers`)."
   @spec watchers(String.t(), String.t()) :: [map] | {:error, :down | :timeout}
   def watchers(domain, aor),
@@ -811,6 +818,21 @@ defmodule Kelix.Mod.Presence do
       end
 
     {:reply, rows, state}
+  end
+
+  def handle_call({:presentity, domain, aor}, _from, state) do
+    detail =
+      case panel_row(state, domain, aor) do
+        nil ->
+          nil
+
+        row ->
+          row
+          |> Map.take([:presentity_uri, :status, :activity, :note, :states, :watchers])
+          |> Map.put(:calls, calls(state, domain, aor))
+      end
+
+    {:reply, detail, state}
   end
 
   def handle_call({:watchers, domain, aor}, _from, state) do

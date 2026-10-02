@@ -35,7 +35,7 @@ defmodule SIP.NICT do
         Logger.info(
           transid: sipmsg.transid,
           module: __MODULE__,
-          message: "Sent #{sipmsg.method} #{sipmsg.ruri}"
+          message: "Sent #{sipmsg.method} #{SIP.Uri.ruri_string(sipmsg.ruri)}"
         )
 
         state =

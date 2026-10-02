@@ -165,7 +165,7 @@ defmodule SIP.Session do
   # the wire, so it is free to say more than the §21.5.4 text; `lasterr` keeps
   # the same cause as an atom, for a scenario deciding on it.
   defp unsent_request(sip_ctx = %SIP.Context{}, req, reason) do
-    cause = "#{inspect(reason)} sending #{req.method} to #{req.ruri}"
+    cause = "#{inspect(reason)} sending #{req.method} to #{SIP.Uri.ruri_string(req.ruri)}"
 
     Logger.error(
       module: __MODULE__,
