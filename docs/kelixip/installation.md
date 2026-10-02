@@ -291,6 +291,27 @@ ssl_ca_cert_file   = ""             # with a CA the server cert is verified; wit
 
 `[module.registrar]` lives in **`domains.toml`**, not here (see below).
 
+#### `[database]` — defaults for the SQL modules
+
+Where the SQL server is and how to reach it, inherited key by key by every
+module that keeps data in SQL (`auth_db`, `silo`). A key set in the module's own
+block wins. Optional; absent, each module block says everything itself.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `driver` | `mysql` \| `postgres` | SQL engine |
+| `host` | string | Database host |
+| `port` | 1..65535 | Database port |
+| `ssl` | bool | `false` asks for cleartext outright |
+| `ssl_ca_cert_file` | path | CA that must sign the server certificate |
+| `allow_insecure_db_connection` | bool | Accept a cleartext link when the server refuses TLS |
+| `connect_timeout_ms` | integer, > 0 | Upper bound on establishing one connection |
+
+`database`, `username` and `password` are refused here: every module connects
+with an account of its own. `pool_size` is refused too — it sizes one module's
+load. See [auth_db.md](modules/auth_db.md#parameters) for how the transport is
+negotiated.
+
 #### `[mediaserver]` — the node's media settings
 
 | Key | Type | Default | Meaning |
@@ -518,20 +539,19 @@ wrong path.
 |---|---|---|---|
 | `name` | string | **yes** | Nominal domain name. **This is also the digest `realm`** |
 | `aliases` | list of strings | no | Other hosts routed to this domain (case-insensitive). An entry written `*.suffix` routes **every** host below that suffix. A name/alias used twice rejects the file |
-| `max_calls` | int > 0 | no | Per-domain concurrent-instance cap (`503` beyond) |
+| `max_calls` | int > 0 | no | Per-domain concurrent-instance cap (`503` beyond). An OPTIONS served by a script counts in it like a call |
 
 A request is routed by its R-URI host (falling back to the `To` host); no match
 ⇒ `404`. Then the method selects the **function** — `REGISTER` → `registrar`,
-`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH` → `presence` — and a function with no
-block on that domain is **not enabled** ⇒ `405`.
+`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH` → `presence`, an out-of-dialog
+`MESSAGE` → `chat` — and a function with no block on that domain is **not
+enabled** ⇒ `405`.
 
 For presence there is one more step: the request's `Event` header selects which
 `[[domain.presence]]` block serves it, and a package the domain declares none for
 is answered `489 Bad Event` — before any script runs, and carrying `Allow-Events`
 with the packages it does serve.
 
-An out-of-dialog `MESSAGE` is answered `405`: page-mode chat is a function of its
-own and its dispatch is not implemented yet.
 
 ##### Wildcard aliases
 
@@ -591,10 +611,36 @@ package is the key.
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `event-package` | string | **yes** | Matched against the request's `Event`, case-insensitively. Two blocks claiming one package reject the file |
-| `subscribe` | string | **yes** | Scenario script serving `SUBSCRIBE` for this package |
+| `subscribe` | string, or rules | **yes** | Scenario script serving `SUBSCRIBE` for this package, or `[[domain.presence.subscribe]]` rules (below) |
 | `publish` | string | no | Scenario script serving `PUBLISH`; absent ⇒ a `PUBLISH` for this package is answered `405` |
 
-Both scripts go through the load-time contract check, so a missing `publish`
+`SUBSCRIBE` can be routed on the R-URI user part, exactly as `[[domain.call]]`
+routes an INVITE: each `[[domain.presence.subscribe]]` rule has a `pattern` (or
+`default = true`, last) and a `script`, and the first match wins. A `SUBSCRIBE`
+matching no rule is answered `404`. `subscribe = "script.exs"` is the same as a
+single `default = true` rule.
+
+```toml
+  [[domain.presence]]
+  event-package = "presence"
+  publish       = "presence-publish.exs"
+
+    [[domain.presence.subscribe]]
+    pattern = "rls"                      # a resource list (RFC 4662)
+    script  = "presence-rls.exs"
+
+    [[domain.presence.subscribe]]
+    pattern = "9XXX"                     # conference rooms
+    script  = "conf-subscribe.exs"
+
+    [[domain.presence.subscribe]]
+    default = true
+    script  = "presence-subscribe.exs"
+```
+
+The rules route `SUBSCRIBE` only: a `PUBLISH` always reaches `publish`.
+
+Every script goes through the load-time contract check, so a missing `publish`
 script is caught by `kelictl domain reload-all` rather than by the first PUBLISH.
 
 The expiry bounds of a subscription belong to the event package, so there is no
@@ -620,6 +666,68 @@ Pattern syntax (Asterisk-style, matching the **whole** user-part):
 | `.` | one or more of any character |
 | `!` | zero or more of any character |
 | anything else | itself, literally |
+
+#### `[[domain.chat]]` — page-mode chat
+
+The dial-plan's shape — ordered, first match wins on the R-URI user-part, a
+`pattern` or `default = true`, the catch-all last — for out-of-dialog
+`MESSAGE` requests (RFC 3428). No rule matches ⇒ `404`.
+
+```toml
+  [[domain.chat]]
+  default      = true
+  script       = "p2p-chat.exs"
+  idle_timeout = 300
+```
+
+| Key | Type | Required | Meaning |
+|---|---|---|---|
+| `pattern` / `default` | string / `true` | **one of them** | As in `[[domain.call]]` |
+| `script` | string | **yes** | Scenario script serving the conversation |
+| `idle_timeout` | int > 0 | no | Seconds of silence that end a conversation (default `300`) |
+
+One instance serves a **conversation**: the MESSAGEs of one sender to one
+recipient over one connection. The reference `p2p-chat.exs` authenticates the
+first one, relays each to every device of the recipient, and stores what nobody
+took ([silo.md](modules/silo.md)); pair it with `registrar-chat.exs` as the
+domain's registrar script.
+
+#### `[[domain.options]]` — OPTIONS served by scripts
+
+Without any of these blocks the node answers every out-of-dialog OPTIONS itself:
+`200` with its `Allow`, or `503` while it drains. A rule hands the OPTIONS to a
+script instead. Three kinds of rule, each with a `script`:
+
+| Rule | Serves |
+|---|---|
+| `keepalive = true` | an R-URI with **no user-part** (`sip:example.com`): the ping of an upstream proxy or load balancer. At most one per domain, anywhere in the list |
+| `pattern = "…"` | an R-URI whose user-part matches, with the `[[domain.call]]` syntax below |
+| `default = true` | any other user-part. Must be the last rule |
+
+Ordered, **first match wins**, as for the dial-plan. What the node still answers
+itself, whatever the rules say:
+
+- a draining node answers `503` before any script is asked;
+- an R-URI host matching no domain gets `200`, not `404`: a load balancer pinging
+  an address asks whether the node is up;
+- an R-URI with no user-part and no `keepalive` rule gets `200`. The `default`
+  rule never serves it: a probe script would answer the load balancer `480`.
+
+A user-part no rule matches is answered `404`.
+
+The script gets the OPTIONS on a dialog of its own. It lasts 32 s after the last
+OPTIONS on it, so the re-submission after a `407` reaches the instance that
+challenged it. Each instance takes a `max_calls` slot for as long as it lives.
+
+Two reference scripts:
+
+- `options-keepalive.exs` answers `200` with the node's `Allow`, then ends;
+- `options-probe-ua.exs` challenges the sender with a `407`, then relays the
+  OPTIONS to the registered UA and relays its answer back — `480` when the UA is
+  not registered. It needs kelixip-mod-registrar and kelixip-mod-auth_db.
+
+`*` is a literal character in a pattern: `conf-*` matches only `conf-*`. Write
+`conf-.` for "`conf-` then at least one character".
 
 #### `[module.registrar]`
 
@@ -672,6 +780,14 @@ aliases = ["sip.example.com", "203.0.113.10"]
   [[domain.call]]
   default = true                    # catch-all, must be last
   script  = "default_call.exs"
+
+  [[domain.options]]
+  keepalive = true                  # sip:example.com — the load balancer's ping
+  script    = "options-keepalive.exs"
+
+  [[domain.options]]
+  default = true                    # sip:bob@example.com — probe the registered UA
+  script  = "options-probe-ua.exs"
 
 [module.registrar]
 max_contacts_per_aor = 5

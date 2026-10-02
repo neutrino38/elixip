@@ -203,8 +203,10 @@ defmodule SIP.Session.CallUAC do
       timeout = Keyword.get(options, :timeout, 20)
       webrtc_support = Keyword.get(options, :webrtc, :no)
       medias = Keyword.get(options, :media, :tc)
+
       {sip_ctx, sdp_offer} =
         SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias, options)
+
       # Cache the offer so an authenticated retry (auth_invite) reuses the exact
       # same SDP instead of rebuilding it — see auth_invite/5 for the rationale.
       sip_ctx = SIP.Context.appdata_set(sip_ctx, :localsdpoffer, sdp_offer)
@@ -438,6 +440,9 @@ defmodule SIP.Session.CallUAS do
   from, and a slot filled by the framework is one thing a script cannot forget
   to carry.
 
+  An out-of-dialog MESSAGE is stored for PUBLISH's reason: `reply_message/2`
+  answers from the slot. One sent inside a dialog is not — see the clause.
+
   REGISTER is stored for the same reason the others are: a registrar instance
   serves a *succession* of REGISTERs on one dialog — the unauthenticated one, the
   digest replay, then every refresh — and each state has to act on the last one
@@ -446,26 +451,25 @@ defmodule SIP.Session.CallUAS do
   fallback to `:inbound_request` made that omission silent AND wrong: the
   scenario would authenticate the refresh but save the contacts of the very first
   request.
+
+  OPTIONS is stored for the REGISTER reason: an instance serving an OPTIONS
+  (SIP.Session.Options, `:dispatch`) challenges it and authenticates its
+  re-submission. Only an inbound OPTIONS dialog delivers one to the application —
+  an INVITE dialog answers its keepalives itself — so no other slot is overwritten.
   """
-  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER, :SUBSCRIBE, :PUBLISH]
+  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER, :SUBSCRIBE, :PUBLISH, :OPTIONS]
+
+  # An out-of-dialog MESSAGE is what a page-mode instance serves, and
+  # `reply_message/2` answers it from this slot. One sent INSIDE a dialog is not
+  # stored: it reaches a call instance, whose slot holds the INVITE its
+  # `reply_invite*` still answer, and `reply_request/4` takes it explicitly.
+  def auto_store(sip_ctx, {:MESSAGE, req, trans_pid, dlg}) when is_map(req) do
+    if SIP.Msg.Ops.in_dialog?(req), do: sip_ctx, else: store(sip_ctx, req, trans_pid, dlg)
+  end
 
   def auto_store(sip_ctx, {m, req, trans_pid, dlg})
-      when m in @uas_stored_methods and is_map(req) and is_pid(dlg) do
-    sip_ctx
-    |> SIP.Context.set(:dialogpid, dlg)
-    |> SIP.Context.appdata_set(:last_uas_req, req)
-    |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
-  end
-
-  # Same, minus the dialog pid: it is not one (a scenario driven from a test, a
-  # dialog that is already in the context). Storing the request still matters —
-  # SIP.Context.set/3 would raise on a non-pid and take the instance down.
-  def auto_store(sip_ctx, {m, req, trans_pid, _dlg})
-      when m in @uas_stored_methods and is_map(req) do
-    sip_ctx
-    |> SIP.Context.appdata_set(:last_uas_req, req)
-    |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
-  end
+      when m in @uas_stored_methods and is_map(req),
+      do: store(sip_ctx, req, trans_pid, dlg)
 
   # A tagged event belongs to another B2BUA leg (`{:outbound, {…}}`). It must NOT
   # land in the inbound slot: the slot is what `reply_invite*` answers, and
@@ -475,6 +479,21 @@ defmodule SIP.Session.CallUAS do
   def auto_store(sip_ctx, {tag, inner}) when is_atom(tag) and is_tuple(inner), do: sip_ctx
 
   def auto_store(sip_ctx, _evt), do: sip_ctx
+
+  defp store(sip_ctx, req, trans_pid, dlg) when is_pid(dlg) do
+    sip_ctx
+    |> SIP.Context.set(:dialogpid, dlg)
+    |> store(req, trans_pid, nil)
+  end
+
+  # Same, minus the dialog pid: it is not one (a scenario driven from a test, a
+  # dialog that is already in the context). Storing the request still matters —
+  # SIP.Context.set/3 would raise on a non-pid and take the instance down.
+  defp store(sip_ctx, req, trans_pid, _dlg) do
+    sip_ctx
+    |> SIP.Context.appdata_set(:last_uas_req, req)
+    |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
+  end
 
   @doc """
   Reply to the stored INVITE/UPDATE with a code that carries NO SDP. Raises for

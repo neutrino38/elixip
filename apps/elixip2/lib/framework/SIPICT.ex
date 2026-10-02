@@ -9,7 +9,7 @@ defmodule SIP.ICT do
   # Callbacks
 
   @impl true
-  def init({ sipmsg, app_pid, ring_timeout }) do
+  def init({sipmsg, app_pid, ring_timeout}) do
     t_mod = sipmsg.ruri.tp_module
     t_pid = sipmsg.ruri.tp_pid
 
@@ -25,30 +25,52 @@ defmodule SIP.ICT do
         sipmsg
       end
 
-    initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,
-                       t_isreliable: apply(t_mod, :is_reliable, []), destip: sipmsg.ruri.destip,
-                       destport: sipmsg.ruri.destport, state: :sending }
+    initial_state = %SIP.Transac{
+      msg: sipmsg,
+      tmod: t_mod,
+      tpid: t_pid,
+      app: app_pid,
+      timeout: ring_timeout,
+      t_isreliable: apply(t_mod, :is_reliable, []),
+      destip: sipmsg.ruri.destip,
+      destport: sipmsg.ruri.destport,
+      state: :sending
+    }
 
     case sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->
-        Logger.info([ transid: sipmsg.transid, module: __MODULE__,
-                     message: "Sent INVITE to #{sipmsg.ruri}"])
-        state = if not state.t_isreliable do
-          schedule_timer_A(state) |> schedule_timer_B(ring_timeout * 1000)
-        else
-          schedule_timer_B(state, ring_timeout * 1000)
-        end
-        { :ok,  state }
+        Logger.info(
+          transid: sipmsg.transid,
+          module: __MODULE__,
+          message: "Sent INVITE to #{SIP.Uri.ruri_string(sipmsg.ruri)}"
+        )
 
-      { :invalid_sip_msg, _state } ->
-        Logger.error([ transid: sipmsg.transid, module: __MODULE__,
-                        message: "Fail to serialize SIP message."])
-        { :stop, "Fail to serialize message" }
+        state =
+          if not state.t_isreliable do
+            schedule_timer_A(state) |> schedule_timer_B(ring_timeout * 1000)
+          else
+            schedule_timer_B(state, ring_timeout * 1000)
+          end
 
-      { code, _state } ->
-          Logger.error([ transid: sipmsg.transid, module: __MODULE__,
-          message: "Transport error. Fail to send SIP request  #{code}"])
-          { :stop, "Fail to send SIP request" }
+        {:ok, state}
+
+      {:invalid_sip_msg, _state} ->
+        Logger.error(
+          transid: sipmsg.transid,
+          module: __MODULE__,
+          message: "Fail to serialize SIP message."
+        )
+
+        {:stop, "Fail to serialize message"}
+
+      {code, _state} ->
+        Logger.error(
+          transid: sipmsg.transid,
+          module: __MODULE__,
+          message: "Transport error. Fail to send SIP request  #{code}"
+        )
+
+        {:stop, "Fail to send SIP request"}
     end
   end
 
@@ -70,8 +92,8 @@ defmodule SIP.ICT do
     cancel(state)
   end
 
-  def handle_call(:gettransport, _from, state ) do
-    { :reply, { state.tmod, state.tpid }, state }
+  def handle_call(:gettransport, _from, state) do
+    {:reply, {state.tmod, state.tpid}, state}
   end
 
   @doc "ACK the transaction (only needed in case of 200 OK received)"
@@ -80,26 +102,30 @@ defmodule SIP.ICT do
   end
 
   @impl true
-   # Process SIP response from transport layer
-  def handle_cast({ :onsipmsg, siprsp, remoteip, remoteport }, state) do
+  # Process SIP response from transport layer
+  def handle_cast({:onsipmsg, siprsp, remoteip, remoteport}, state) do
     SIP.Scenario.SipTrace.received(state, siprsp, remoteip, remoteport)
+
     cond do
       siprsp.method != false ->
-        Logger.warning([ transid: state.msg.transid, message: "Received an #{siprsp.method} SIP request. But this is a client transaction'"])
+        Logger.warning(
+          transid: state.msg.transid,
+          message: "Received an #{siprsp.method} SIP request. But this is a client transaction'"
+        )
+
         {:noreply, state}
 
       # The response matches the INVITE req
       state.msg.cseq == siprsp.cseq ->
-        new_state =handle_UAS_sip_response(state, siprsp)
+        new_state = handle_UAS_sip_response(state, siprsp)
         {:noreply, new_state}
-
 
       # The response matches the CANCEL req
       # A CSeq is a LIST everywhere it is built ([seqno, method] —
       # fix_outbound_request/3, the parser, `match?([_, :INVITE], rsp.cseq)`), so
       # comparing it to a TUPLE could never match: the 200 answering our own
       # CANCEL fell through to the clause below instead.
-      siprsp.cseq == [ hd(state.msg.cseq), :CANCEL ] ->
+      siprsp.cseq == [hd(state.msg.cseq), :CANCEL] ->
         new_state = handle_cancel_response(state, siprsp)
         {:noreply, new_state}
 
@@ -109,22 +135,26 @@ defmodule SIP.ICT do
         # which killed it and (before R1) its dialog with it, silently. The one
         # response that reliably reached this clause was the 200 to our own
         # CANCEL, so cancelling a branch crashed the transaction that sent it.
-        Logger.warning([ transid: state.msg.transid, message: "Response CSeq #{inspect(siprsp.cseq)} does not match transaction requests'"])
+        Logger.warning(
+          transid: state.msg.transid,
+          message: "Response CSeq #{inspect(siprsp.cseq)} does not match transaction requests'"
+        )
+
         {:noreply, state}
     end
   end
 
   @impl true
   # Handle T1 time retransmission
-  def handle_info({ :timerA, ms }, state) do
-    handle_timer({ :timerA, ms }, state)
+  def handle_info({:timerA, ms}, state) do
+    handle_timer({:timerA, ms}, state)
   end
 
   # Handle other timers
   # - timer B - this is the ring time
   # - timer H - if ACK is not sent on time
   # - timer K - normal end of transaction
-  def handle_info({ :timeout, _tref, timer } , state) do
+  def handle_info({:timeout, _tref, timer}, state) do
     handle_timer(timer, state, __MODULE__)
   end
 end

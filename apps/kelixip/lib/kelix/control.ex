@@ -425,10 +425,15 @@ defmodule Kelix.Control do
       aliases: d.aliases,
       max_calls: d.max_calls,
       functions:
-        for(f <- [:registrar, :calls, :presence], Kelix.Router.function_enabled?(d, f), do: f),
+        for(
+          f <- [:registrar, :calls, :presence, :chat],
+          Kelix.Router.function_enabled?(d, f),
+          do: f
+        ),
       registrar: with_module(d.registrar, loaded),
       presence: Enum.map(d.presence, &render_presence_block(&1, loaded)),
       dial_plan: Enum.map(d.dial_plan, &render_rule(&1, loaded)),
+      chat: Enum.map(d.chat, &render_rule(&1, loaded)),
       active_calls: Map.get(active, d.name, 0),
       registrations: map_size(registrations_for(d.name))
     }
@@ -461,23 +466,33 @@ defmodule Kelix.Control do
 
   defp with_module(cfg, _loaded), do: cfg
 
-  # One row per event package the domain serves. The two scripts are shown apart
-  # because they answer two different methods: an operator reading "SUBSCRIBE goes
-  # here, PUBLISH goes there" off this view is reading the router's own decision.
+  # One entry per event package the domain serves. The two methods are shown apart
+  # because they are routed apart: an operator reading "SUBSCRIBE goes here,
+  # PUBLISH goes there" off this view is reading the router's own decision.
+  # `subscribe` is a rule list, rendered as the dial-plan is: first match wins.
   # `publish` absent = the package is subscribed to and published by nothing (405).
   defp render_presence_block(%Kelix.PresenceBlock{} = block, loaded) do
     %{
       event_package: block.event_package,
-      subscribe: with_module(%{script: block.subscribe}, loaded),
+      subscribe: Enum.map(block.subscribe, &render_rule(&1, loaded)),
       publish: block.publish && with_module(%{script: block.publish}, loaded)
     }
   end
 
-  defp render_rule(%Kelix.DialRule{default?: true, script: script}, loaded),
-    do: with_module(%{pattern: nil, default: true, script: script}, loaded)
+  defp render_rule(%Kelix.DialRule{default?: true} = rule, loaded),
+    do: rule |> rule_view(%{pattern: nil, default: true}) |> with_module(loaded)
 
-  defp render_rule(%Kelix.DialRule{raw: raw, script: script}, loaded),
-    do: with_module(%{pattern: raw, default: false, script: script}, loaded)
+  defp render_rule(%Kelix.DialRule{raw: raw} = rule, loaded),
+    do: rule |> rule_view(%{pattern: raw, default: false}) |> with_module(loaded)
+
+  # A chat rule's `idle_timeout` is shown as parsed, the default included: the
+  # operator reads how long a conversation lasts silent, not what the file says.
+  # A call rule has none, and no key rather than a `nil` on every line.
+  defp rule_view(%Kelix.DialRule{script: script, idle_timeout: nil}, view),
+    do: Map.put(view, :script, script)
+
+  defp rule_view(%Kelix.DialRule{script: script, idle_timeout: idle}, view),
+    do: Map.merge(view, %{script: script, idle_timeout: idle})
 
   @doc """
   The media servers of the pool and their state (`kelictl mediaserver list`), in

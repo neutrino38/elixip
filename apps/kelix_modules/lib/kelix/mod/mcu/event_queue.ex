@@ -105,8 +105,7 @@ defmodule Kelix.Mod.Mcu.EventQueue do
 
     Logger.info(module: __MODULE__, message: "mcu #{state.name}: event stream connected#{suffix}")
 
-    {:noreply,
-     %{state | connected?: true, failures: 0, down_notified?: false, renewing: nil}}
+    {:noreply, %{state | connected?: true, failures: 0, down_notified?: false, renewing: nil}}
   end
 
   def handle_info({:http, {ref, :stream, chunk}}, %{request: ref} = state) do

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid" entity="sip:bob@weshwesh.eu" xmlns="urn:ietf:params:xml:ns:pidf">
+ <tuple id="pkgmk1">
+  <status>
+   <basic>open</basic>
+  </status>
+  <contact priority="0.8">sip:bob@weshwesh.eu</contact>
+  <timestamp>2026-10-01T19:18:51Z</timestamp>
+ </tuple>
+ <dm:person id="v0j6k-">
+  <rpid:activities>
+   <rpid:busy>busy</rpid:busy>
+  </rpid:activities>
+  <dm:timestamp>2026-10-01T19:18:51Z</dm:timestamp>
+ </dm:person>
+</presence>

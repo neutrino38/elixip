@@ -148,6 +148,8 @@ defmodule Kelix.Mod.Registrar do
         unsubscribe_registrations: 2,
         registered?: 2,
         registered?: 3,
+        devices: 2,
+        devices: 3,
         remaining_ms: 1
       ]
     }
@@ -325,8 +327,7 @@ defmodule Kelix.Mod.Registrar do
   # It lives its own life, bounded by `expires_at` and reclaimed by the periodic
   # sweep — the usrloc semantics. Monitoring the dialog there made a registration
   # evaporate as soon as that one dialog ended, which is exactly what a real handset
-  # triggered on 2026-07-28.
-  @connected_transports [SIP.Transport.TCP, SIP.Transport.TLS, SIP.Transport.WSS]
+  # triggered on 2026-07-28. `SIP.Transport.connection_oriented?/1` is which is which.
 
   @doc """
   Does `aor` still hold a binding that reaches a device, **other than the ones
@@ -343,24 +344,34 @@ defmodule Kelix.Mod.Registrar do
   `false` too when the store cannot answer.
   """
   @spec registered?(String.t(), String.t(), pid | nil) :: boolean
-  def registered?(domain, aor, ending_dialog \\ nil) do
+  def registered?(domain, aor, ending_dialog \\ nil),
+    do: devices(domain, aor, ending_dialog) != []
+
+  @doc """
+  The bindings of `aor` that reach a device, other than the ones `ending_dialog`
+  owns — the bindings `registered?/3` counts, for a caller that needs to know
+  WHICH devices they are (the presence collection gives each one a tuple). `[]`
+  when the store cannot answer.
+  """
+  @spec devices(String.t(), String.t(), pid | nil) :: [Contact.t()]
+  def devices(domain, aor, ending_dialog \\ nil) do
     case Kelix.Module.safe_call(__MODULE__, {:bindings, domain, aor}) do
       contacts when is_list(contacts) ->
-        Enum.any?(contacts, &reaches_device?(&1, ending_dialog))
+        Enum.filter(contacts, &reaches_device?(&1, ending_dialog))
 
       _down ->
-        false
+        []
     end
   end
 
   defp reaches_device?(%Contact{dialog_pid: pid}, ending) when is_pid(ending) and pid == ending,
     do: false
 
-  defp reaches_device?(%Contact{dialog_pid: pid, flow_module: flow}, _ending)
-       when is_pid(pid) and flow in @connected_transports,
-       do: Process.alive?(pid)
-
-  defp reaches_device?(%Contact{}, _ending), do: true
+  defp reaches_device?(%Contact{dialog_pid: pid, flow_module: flow}, _ending) do
+    if is_pid(pid) and SIP.Transport.connection_oriented?(flow),
+      do: Process.alive?(pid),
+      else: true
+  end
 
   @doc """
   How long the registration held by this instance's dialog has left, in
@@ -663,13 +674,15 @@ defmodule Kelix.Mod.Registrar do
         do: [],
         else: drop_contacts(existing, for({:remove, c} <- actions, do: binding_key(c)))
 
+    flow = SIP.Msg.Ops.arrival_flow(req)
+
     added =
       for {:add, c, exp} <- actions do
         %Contact{
           contact: c,
-          received: received_of(req),
-          flow_pid: flow_of(req),
-          flow_module: flow_module_of(req),
+          received: flow.received,
+          flow_pid: flow.tp_pid,
+          flow_module: flow.tp_module,
           dialog_pid: dialog_pid,
           instance: contact_param(c, "+sip.instance"),
           reg_id: contact_param(c, "reg-id"),
@@ -698,7 +711,7 @@ defmodule Kelix.Mod.Registrar do
         # contacts still learns about the other.
         # Monitor the backing dialog so a connected-transport drop invalidates the
         # binding (§6.3, WebRTC-critical).
-        state = ensure_monitor(state, domain, aor, dialog_pid, flow_module_of(req))
+        state = ensure_monitor(state, domain, aor, dialog_pid, flow.tp_module)
         state = supersede_owners(state, domain, aor, existing, added, dialog_pid)
         notify(state, domain, aor, :registered)
         {:registered, granted(aor, merged, granted_expires(actions)), state}
@@ -791,15 +804,14 @@ defmodule Kelix.Mod.Registrar do
   defp store_or_delete(tid, aor, []), do: :ets.delete(tid, aor)
   defp store_or_delete(tid, aor, contacts), do: :ets.insert(tid, {aor, contacts})
 
-  # `@connected_transports` is defined, and explained, above `registered?/3`.
+  # Only over a connection-oriented transport: see above `registered?/3`.
+  defp ensure_monitor(state, domain, aor, pid, flow) do
+    if is_pid(pid) and SIP.Transport.connection_oriented?(flow),
+      do: monitor_dialog(state, domain, aor, pid),
+      else: state
+  end
 
-  defp ensure_monitor(state, _domain, _aor, pid, _flow) when not is_pid(pid), do: state
-
-  defp ensure_monitor(state, _domain, _aor, _pid, flow)
-       when flow not in @connected_transports,
-       do: state
-
-  defp ensure_monitor(state, domain, aor, pid, _flow) do
+  defp monitor_dialog(state, domain, aor, pid) do
     already? = Enum.any?(state.mons, fn {_ref, key} -> key == {domain, aor, pid} end)
 
     if already? do
@@ -951,35 +963,16 @@ defmodule Kelix.Mod.Registrar do
   # destination and flow.
   defp rewrite(req, %Contact{} = binding), do: Map.put(req, :ruri, target_uri(binding))
 
-  # The stored contact stamped with the destination and flow it registered over.
-  # Both are what `SIP.Transport.Selector.select_transport/1` short-circuits on
-  # (§6.4): a live `tp_pid`+`tp_module` sends straight over the existing
-  # connection, and failing that `destip`/`destport` skip DNS.
-  #
-  # `SIP.Uri.to_request_uri/1` first: what is stored is a Contact *header* value,
-  # display name and binding parameters (`q`, `expires`, `+sip.instance`, the RFC
-  # 3840 feature tags) included, and none of that may appear on the Request-URI
-  # this becomes (RFC 3261 §16.6 item 2). The URI parameters are kept in full —
-  # §19.1.5 requires it — which is the whole reason this is one framework call
-  # and not a list of parameter names maintained here.
+  # The stored contact stamped with the destination and flow it registered over:
+  # `SIP.Msg.Ops.reach_contact/2`, the one reading of how a registered device is
+  # reached (its `+sip.instance` carried along, so a relay fanning a MESSAGE out
+  # can name the devices it reached as the Silo remembers them).
   defp target_uri(%Contact{contact: c} = binding) do
-    c = SIP.Uri.to_request_uri(c)
-    binding = %Contact{binding | contact: c}
-
-    case binding.received do
-      {proto, ip, port} ->
-        %SIP.Uri{
-          c
-          | destip: ip,
-            destport: port,
-            destproto: proto,
-            tp_pid: binding.flow_pid,
-            tp_module: binding.flow_module
-        }
-
-      _ ->
-        %SIP.Uri{c | tp_pid: binding.flow_pid, tp_module: binding.flow_module}
-    end
+    SIP.Msg.Ops.reach_contact(c, %{
+      received: binding.received,
+      tp_pid: binding.flow_pid,
+      tp_module: binding.flow_module
+    })
   end
 
   # ── contact / expires helpers ────────────────────────────────────────────────
@@ -1267,43 +1260,10 @@ defmodule Kelix.Mod.Registrar do
 
   defp to_uri(_), do: nil
 
-  defp received_of(req) do
-    case Map.get(req, :ruri) do
-      %SIP.Uri{destip: ip, destport: port, destproto: proto} when not is_nil(ip) ->
-        {proto, ip, port}
-
-      _ ->
-        nil
-    end
-  end
-
-  defp flow_of(req) do
-    case Map.get(req, :ruri) do
-      %SIP.Uri{tp_pid: pid} -> pid
-      _ -> nil
-    end
-  end
-
-  defp flow_module_of(req) do
-    case Map.get(req, :ruri) do
-      %SIP.Uri{tp_module: t_mod} -> t_mod
-      _ -> nil
-    end
-  end
-
   defp aor_key(%SIP.Uri{userpart: u, domain: d}), do: "#{downcase(u)}@#{fold_alias(d)}"
 
-  # alias → nominal domain name (folds via Domains if running; else identity)
-  defp fold_alias(nil), do: nil
-
-  defp fold_alias(host) do
-    with pid when not is_nil(pid) <- Process.whereis(Kelix.Domains),
-         %Kelix.Domain{name: name} <- Kelix.Domains.lookup(Kelix.Domains.current(), host) do
-      name
-    else
-      _ -> host
-    end
-  end
+  # alias → nominal domain name
+  defp fold_alias(host), do: Kelix.Domains.nominal(host)
 
   # Binding identity is the contact **URI**: RFC 3261 §10.2.4 compares bindings by
   # URI, so a refresh that merely changes `expires` has to REPLACE the binding

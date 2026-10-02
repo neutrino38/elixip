@@ -23,19 +23,10 @@ defmodule Kelix.OptionsTest do
       assert {"Allow", allow} = List.keyfind(fields, "Allow", 0)
 
       # Every function kelixip serves: the registrar, calls, the subscription
-      # layer, and OPTIONS itself. A probe catches any lie in this list, which is
+      # layer, chat, and OPTIONS itself. A probe catches any lie in this list, which is
       # why it is asserted whole rather than one method at a time.
-      assert allow == "OPTIONS, REGISTER, INVITE, ACK, CANCEL, BYE, SUBSCRIBE, PUBLISH, NOTIFY"
-    end
-
-    test "does not advertise MESSAGE, which no function serves yet" do
-      {:reply, 200, "OK", fields} = Kelix.Options.on_options(%{method: :OPTIONS}, self())
-      {"Allow", allow} = List.keyfind(fields, "Allow", 0)
-
-      # Page-mode chat is a function of its own ([[domain.chat]], DESIGN-CHAT.md)
-      # and nothing routes an out-of-dialog MESSAGE today: advertising it would
-      # promise a 405.
-      refute allow =~ "MESSAGE"
+      assert allow ==
+               "OPTIONS, REGISTER, INVITE, ACK, CANCEL, BYE, SUBSCRIBE, PUBLISH, NOTIFY, MESSAGE"
     end
 
     test "the advertised list is the one Kelix.Options exposes" do
@@ -55,6 +46,62 @@ defmodule Kelix.OptionsTest do
       # No Retry-After: we cannot honestly say when this node returns, and upstream
       # would honour whatever number we invented.
       assert fields == []
+    end
+  end
+
+  describe "routing" do
+    @toml """
+    [[domain]]
+    name = "opt.example"
+
+    [[domain.options]]
+    pattern = "XXXX"
+    script  = "options-probe-ua.exs"
+    """
+
+    setup do
+      dir = Path.join(System.tmp_dir!(), "options-test-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "domains.toml")
+      empty = Path.join(dir, "empty.toml")
+      File.write!(path, @toml)
+      File.write!(empty, "")
+      :ok = Kelix.Domains.reload(path)
+
+      on_exit(fn ->
+        Kelix.Domains.reload(empty)
+        File.rm_rf(dir)
+      end)
+
+      :ok
+    end
+
+    defp options_to(user, host),
+      do: %{method: :OPTIONS, ruri: %SIP.Uri{userpart: user, domain: host}}
+
+    test "a rule naming a script makes the framework open a dialog for it" do
+      assert :dispatch = Kelix.Options.on_options(options_to("1234", "opt.example"), self())
+    end
+
+    test "what no rule claims is answered by the core" do
+      assert {:reply, 200, "OK", _} =
+               Kelix.Options.on_options(options_to(nil, "opt.example"), self())
+
+      assert {:reply, 200, "OK", _} =
+               Kelix.Options.on_options(options_to("1234", "other"), self())
+    end
+
+    test "a user-part no rule matches is answered 404" do
+      assert {:reply, 404, _, []} =
+               Kelix.Options.on_options(options_to("alice", "opt.example"), self())
+    end
+
+    # Leaving the upstream rotation must never depend on a script loading.
+    test "the drain wins over every rule" do
+      :ok = Control.drain()
+
+      assert {:reply, 503, _, []} =
+               Kelix.Options.on_options(options_to("1234", "opt.example"), self())
     end
   end
 

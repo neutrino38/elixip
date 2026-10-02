@@ -188,7 +188,10 @@ defmodule SIP.Test.DialogInfo do
     end
 
     test "parses and serializes through its one content type, matched case-insensitively" do
-      doc = %Doc{entity: "sip:bob@ives.fr", dialogs: [%Dialog{id: "d1", call_id: "c1", state: :early}]}
+      doc = %Doc{
+        entity: "sip:bob@ives.fr",
+        dialogs: [%Dialog{id: "d1", call_id: "c1", state: :early}]
+      }
 
       assert {:ok, body} = @package.serialize("Application/Dialog-Info+XML", doc)
       assert {:ok, ^doc} = @package.parse(@content_type, body)

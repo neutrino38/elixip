@@ -98,13 +98,8 @@ defmodule Kelix.Mod.AuthDb do
 
   # Every key a [module.auth_db] block may carry. `module` is the generic
   # module-resolution key handled by Kelix.ModuleSupervisor.
-  @config_keys ~w(module driver host port database username password table ha1_column
-                  user_column domain_column password_hash identity_check
-                  call_timeout_ms pool_size connect_timeout_ms ssl ssl_ca_cert_file
-                  allow_insecure_db_connection)
-
-  # Which SQL driver opens the pool — see Kelix.Mod.AuthDb.Pool.
-  @drivers ~w(mysql postgres)
+  @config_keys ~w(module table ha1_column user_column domain_column password_hash
+                  identity_check) ++ Kelix.DB.Pool.link_keys()
 
   # What to do when the digest proves one identity and the request claims another
   # (see check_identity/3). `warn` is the default on purpose: `strict` is the safe
@@ -122,9 +117,13 @@ defmodule Kelix.Mod.AuthDb do
   `Kelix.Mod.AuthDb.Pool` (which negotiates the transport — TLS first).
   `child_spec/2` also stashes the facade config (table/columns/hash) into app env,
   so the stateless facades resolve it without the pid.
+
+  The block is read over the `[database]` defaults (`Kelix.DB.Pool.with_defaults/1`),
+  here and in `validate_config/1` alike.
   """
   @impl Kelix.Module
   def child_spec(_name, config) do
+    config = Kelix.DB.Pool.with_defaults(config)
     configure(config)
 
     %{id: __MODULE__, start: {Pool, :start_link, [config]}}
@@ -132,21 +131,13 @@ defmodule Kelix.Mod.AuthDb do
 
   @impl Kelix.Module
   def validate_config(config) when is_map(config) do
+    config = Kelix.DB.Pool.with_defaults(config)
+
     with :ok <- reject_unknown_keys(config),
-         {:ok, _} <- req_string(config, "database"),
-         {:ok, _} <- req_string(config, "username"),
-         :ok <- driver_ok(config),
+         :ok <- Kelix.DB.Pool.validate(config, "subscriber"),
          :ok <- hash_ok(config),
-         :ok <- identity_check_ok(config),
-         :ok <- identifiers_ok(config),
-         :ok <- bool_ok(config, "ssl"),
-         :ok <- bool_ok(config, "allow_insecure_db_connection"),
-         :ok <- cleartext_confirmed(config),
-         :ok <- pos_int_ok(config, "port"),
-         :ok <- pos_int_ok(config, "call_timeout_ms"),
-         :ok <- pos_int_ok(config, "pool_size"),
-         :ok <- pos_int_ok(config, "connect_timeout_ms") do
-      :ok
+         :ok <- identity_check_ok(config) do
+      identifiers_ok(config)
     end
   end
 
@@ -213,21 +204,6 @@ defmodule Kelix.Mod.AuthDb do
     tokens ++ (Map.keys(args) -- ["args"])
   end
 
-  defp req_string(config, key) do
-    case Map.get(config, key) do
-      v when is_binary(v) and v != "" -> {:ok, v}
-      _ -> {:error, "#{key} is required (non-empty string)"}
-    end
-  end
-
-  defp driver_ok(config) do
-    case Map.get(config, "driver") do
-      nil -> :ok
-      d when d in @drivers -> :ok
-      _ -> {:error, "driver must be one of #{Enum.join(@drivers, "|")}"}
-    end
-  end
-
   defp hash_ok(config) do
     case Map.get(config, "password_hash") do
       nil -> :ok
@@ -241,37 +217,6 @@ defmodule Kelix.Mod.AuthDb do
       nil -> :ok
       v when v in @identity_checks -> :ok
       _ -> {:error, "identity_check must be one of #{Enum.join(@identity_checks, "|")}"}
-    end
-  end
-
-  defp bool_ok(config, key) do
-    case Map.get(config, key) do
-      nil -> :ok
-      v when is_boolean(v) -> :ok
-      _ -> {:error, "#{key} must be a boolean"}
-    end
-  end
-
-  # `allow_insecure_db_connection` is the ONE gate to a cleartext link, so `ssl =
-  # false` — which asks for exactly that, directly — goes through it too. Two
-  # independent ways to end up unencrypted would make the key mean nothing, and
-  # `kelictl auth_db show` could no longer be read as "cleartext ⇒ somebody
-  # confirmed it".
-  defp cleartext_confirmed(config) do
-    if Map.get(config, "ssl") == false and not Pool.insecure_allowed?(config) do
-      {:error,
-       "ssl = false asks for a CLEARTEXT link to the subscriber DB: confirm it with " <>
-         "allow_insecure_db_connection = true, or drop the key to let TLS be negotiated"}
-    else
-      :ok
-    end
-  end
-
-  defp pos_int_ok(config, key) do
-    case Map.get(config, key) do
-      nil -> :ok
-      v when is_integer(v) and v > 0 -> :ok
-      _ -> {:error, "#{key} must be a positive integer"}
     end
   end
 
@@ -466,15 +411,15 @@ defmodule Kelix.Mod.AuthDb do
   end
 
   # ACK has no response to carry a challenge (RFC 3261 §17.1.1.3); CANCEL must be
-  # accepted for the transaction it cancels (§22.1); OPTIONS is what liveness
-  # probing uses, and challenging it makes this node look down to its own
-  # infrastructure (see Kelix.Options).
-  @never_challenged [:ACK, :CANCEL, :OPTIONS]
+  # accepted for the transaction it cancels (§22.1). OPTIONS is challengeable: the
+  # liveness ping is protected by the routing — it reaches the keepalive rule or
+  # the core (Kelix.Options), never a script that authenticates.
+  @never_challenged [:ACK, :CANCEL]
 
   @doc """
   Should this request be authenticated at all?
 
-  The rule is **"an initial request, other than ACK, CANCEL and OPTIONS"** — not
+  The rule is **"an initial request, other than ACK and CANCEL"** — not
   "creates a dialog", which would need a per-method list to maintain and would miss
   MESSAGE / PUBLISH. An in-dialog request is excluded because the dialog was
   authenticated when it was created: re-challenging mid-call breaks UAs and proves

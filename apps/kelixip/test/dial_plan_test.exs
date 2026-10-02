@@ -33,8 +33,10 @@ defmodule Kelix.DialPlanTest do
     test "mixed literal + classes (national number example)" do
       # 0[1-9]XXXXXXXX  -> 0, then 1-9, then 8 digits = 10 chars
       assert matches?("0[1-9]XXXXXXXX", "0612345678")
-      refute matches?("0[1-9]XXXXXXXX", "0012345678")  # second char must be 1-9
-      refute matches?("0[1-9]XXXXXXXX", "061234567")   # too short
+      # second char must be 1-9
+      refute matches?("0[1-9]XXXXXXXX", "0012345678")
+      # too short
+      refute matches?("0[1-9]XXXXXXXX", "061234567")
     end
   end
 
@@ -54,7 +56,8 @@ defmodule Kelix.DialPlanTest do
     test ". matches one or more chars" do
       assert matches?("9.", "91")
       assert matches?("9.", "9123456")
-      refute matches?("9.", "9")     # needs at least one more
+      # needs at least one more
+      refute matches?("9.", "9")
       refute matches?("9.", "8123")
     end
 
@@ -67,7 +70,8 @@ defmodule Kelix.DialPlanTest do
     test "wildcard followed by a literal (backtracking)" do
       assert matches?("0.9", "0119")
       assert matches?("0.9", "0X9")
-      refute matches?("0.9", "09")   # `.` needs >=1 between 0 and 9
+      # `.` needs >=1 between 0 and 9
+      refute matches?("0.9", "09")
     end
   end
 

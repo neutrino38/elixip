@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.1
+Version:        1.6.2
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -62,7 +62,8 @@ Prometheus metrics.
 The core ships NO SIP function. The registrar, the authentication back-end, the
 conference mixer and the presence collection are loadable modules delivered as
 separate packages (kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu,
-kelixip-mod-presence, kelixip-mod-mcu_presence, kelixip-mod-dialog_state) which
+kelixip-mod-presence, kelixip-mod-mcu_presence, kelixip-mod-dialog_state,
+kelixip-mod-silo, kelixip-mod-conversation) which
 drop their bytecode into the
 root-owned module directory; a deployment installs only what it uses.
 
@@ -143,6 +144,30 @@ pushed every transition. Only a call whose party is proven a user of the domain
 counts: authenticated by digest, or reached through its registrations. Enable
 it with a [module.dialog_state] block in config.toml, next to [module.presence].
 
+%package mod-silo
+Summary:        Store-and-forward for instant messages, for kelixip
+Requires:       %{name} = %{version}
+
+%description mod-silo
+Page-mode messages (RFC 3428) no device took are stored, and delivered when one
+of the recipient's devices registers — once per device, in the order they
+arrived, dated when they were sent. Storage is SQL (MariaDB/MySQL or
+PostgreSQL), shared by every node of a domain; the schema ships under
+/usr/share/kelixip/sql/silo/ and is the operator's to create. Enable it with a
+[module.silo] block in config.toml. Ships the reference chat scripts,
+p2p-chat.exs and registrar-chat.exs.
+
+%package mod-conversation
+Summary:        Hibernated chat conversations, for kelixip
+Requires:       %{name} = %{version}
+
+%description mod-conversation
+What a chat script sets aside with hibernate/1, kept in SQL (MariaDB/MySQL or
+PostgreSQL) until the next message between the same two parties wakes it, on
+whichever node it reaches. The schema ships under
+/usr/share/kelixip/sql/conversation/ and is the operator's to create. Enable it
+with a [module.conversation] block in config.toml.
+
 %prep
 %setup -q
 
@@ -174,6 +199,13 @@ ln -s ../lib/kelixip/bin/kelixip %{buildroot}%{_sbindir}/kelixip
 # module's), so they travel with it — see %files mod-mcu.
 install -d -m 0755 %{buildroot}%{_datadir}/%{name}
 install -m 0644 scripts/*.exs %{buildroot}%{_datadir}/%{name}/
+
+# The DDL of the modules that own a schema. The modules never run it: the
+# operator does, once, with an account allowed to create tables.
+for _mod in silo conversation; do
+    install -d -m 0755 %{buildroot}%{_datadir}/%{name}/sql/$_mod
+    install -m 0644 sql/$_mod/*.sql %{buildroot}%{_datadir}/%{name}/sql/$_mod/
+done
 
 # Configuration. 0640 root:kelixip: config.toml holds the DB password and the API
 # token, so the service reads it and nobody else does.
@@ -267,6 +299,8 @@ fi
 %exclude %{_datadir}/%{name}/mcu*.exs
 %exclude %{_datadir}/%{name}/presence-*.exs
 %exclude %{_datadir}/%{name}/registrar-presence.exs
+%exclude %{_datadir}/%{name}/*-chat.exs
+%dir %{_datadir}/%{name}/sql
 %dir %attr(0755,root,root) %{kelixdir}
 %{kelixdir}/bin
 %{kelixdir}/erts-*
@@ -317,7 +351,38 @@ fi
 %doc doc/modules/dialog_state.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.DialogState*.beam
 
+%files mod-silo
+%doc doc/modules/silo.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.Silo*.beam
+%{_datadir}/%{name}/sql/silo
+# The reference chat scripts: the relay stores what nobody took, the registrar
+# variant delivers it. Both call this module's verbs.
+%{_datadir}/%{name}/*-chat.exs
+
+%files mod-conversation
+%doc doc/modules/conversation.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.Conversation*.beam
+%{_datadir}/%{name}/sql/conversation
+
 %changelog
+* Wed Sep 30 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.2-1
+- Basic instant messaging (page mode, RFC 3428): a [[domain.chat]] block routes
+  a MESSAGE to the `chat` function; a MESSAGE's content is never logged.
+- Conversations: one scenario handles every MESSAGE of a conversation, keyed on
+  its flow; an idle conversation hibernates and is woken by the next MESSAGE.
+- New subpackage kelixip-mod-conversation keeps hibernated conversations in
+  SQL, so one hibernated on a node wakes on another and survives a restart.
+- New subpackage kelixip-mod-silo: store-and-forward in SQL. A MESSAGE no
+  device took is stored and delivered when one of the recipient's devices
+  registers; kelictl silo list|purge.
+- SBB.Page relays one MESSAGE to every device of the recipient in parallel.
+- Reference scripts p2p-chat.exs and registrar-chat.exs.
+- Kelix.DB.Pool: the SQL link shared by every SQL module; an optional
+  [database] block in config.toml supplies driver, host, port and TLS.
+- kelictl shows an inactivity column for hibernated scenarios.
+- The control API encodes a pid as text: GET /scenarios no longer answers 500.
+- User-Agent is now Kelixip/1.6.2.
+
 * Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.1-1
 - kelescope shows presence live: Kelix.Control.subscribe_presence/2 returns a
   domain's presentities, then pushes each change.

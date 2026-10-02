@@ -94,7 +94,11 @@ defmodule Kelix.Mod.AuthDbLiveTest do
 
   defp session_cipher(:postgres) do
     {:ok, %Postgrex.Result{rows: [[cipher]]}} =
-      Postgrex.query(Pool.conn(), "SELECT cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()", [])
+      Postgrex.query(
+        Pool.conn(),
+        "SELECT cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        []
+      )
 
     cipher
   end

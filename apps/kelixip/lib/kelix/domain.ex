@@ -13,6 +13,16 @@ defmodule Kelix.Domain do
   the package is what a watcher asks for, and what the domain answers **489** on
   when it serves another (DESIGN-PRESENCE.md, *the Router reads `Event`*); the
   list is also what `Allow-Events` is composed from.
+
+  `chat` is the ordered `[[domain.chat]]` rule list — the dial plan's shape, a
+  pattern on the R-URI user part and a catch-all last — routing an out-of-dialog
+  MESSAGE to its script (DESIGN-CHAT.md, *chat is a function of its own*). Empty
+  if chat is not enabled.
+
+  `options` is the ordered `[[domain.options]]` rule list for an R-URI with a
+  user-part, the same `%Kelix.DialRule{}` as the dial-plan; `options_keepalive` is
+  the script of the `keepalive = true` rule, serving an R-URI with none. Both empty
+  = the core answers every OPTIONS (`Kelix.Options`).
   """
 
   @type fn_config :: %{optional(atom) => term}
@@ -23,7 +33,10 @@ defmodule Kelix.Domain do
           max_calls: pos_integer | nil,
           registrar: fn_config | nil,
           presence: [Kelix.PresenceBlock.t()],
-          dial_plan: [Kelix.DialRule.t()]
+          dial_plan: [Kelix.DialRule.t()],
+          chat: [Kelix.DialRule.t()],
+          options: [Kelix.DialRule.t()],
+          options_keepalive: String.t() | nil
         }
 
   defstruct name: nil,
@@ -31,48 +44,61 @@ defmodule Kelix.Domain do
             max_calls: nil,
             registrar: nil,
             presence: [],
-            dial_plan: []
+            dial_plan: [],
+            chat: [],
+            options: [],
+            options_keepalive: nil
 end
 
 defmodule Kelix.PresenceBlock do
   @moduledoc """
-  One `[[domain.presence]]` block: an event package, and the script serving each
-  of the two methods that carry it.
+  One `[[domain.presence]]` block: an event package, and the scripts serving the
+  two methods that carry it.
 
-  `subscribe` is required — a package nothing can be subscribed to is a package
-  the domain does not serve. `publish` is optional: the `dialog` package (RFC
-  4235) is published by nothing, and a domain serving it answers **405** to a
-  PUBLISH rather than naming a script that would have to refuse it.
+  `subscribe` is a list of rules read like the dial-plan (`Kelix.DialRule`): an
+  Asterisk pattern on the R-URI user part, first match wins, `default = true`
+  last. It is never empty — a package nothing can be subscribed to is a package
+  the domain does not serve — and `subscribe = "script.exs"` is the one-rule
+  shorthand for a catch-all. A resource list (RFC 4662) is one rule among them:
+  `pattern = "rls"` naming the list script.
+
+  `publish` is optional: the `dialog` package (RFC 4235) is published by
+  nothing, and a domain serving it answers **405** to a PUBLISH rather than
+  naming a script that would have to refuse it.
   """
 
   @type t :: %__MODULE__{
           event_package: String.t(),
-          subscribe: String.t(),
+          subscribe: [Kelix.DialRule.t()],
           publish: String.t() | nil
         }
 
-  defstruct event_package: nil, subscribe: nil, publish: nil
-
-  @doc "The script serving `method` on this block, or nil when it serves none."
-  @spec script_for(t, atom) :: String.t() | nil
-  def script_for(%__MODULE__{subscribe: s}, :SUBSCRIBE), do: s
-  def script_for(%__MODULE__{publish: p}, :PUBLISH), do: p
+  defstruct event_package: nil, subscribe: [], publish: nil
 end
 
 defmodule Kelix.DialRule do
   @moduledoc """
-  One `[[domain.call]]` dial-plan rule (design §3.3). Either a compiled Asterisk
-  `pattern` (matching the R-URI user-part) or the `default = true` catch-all.
+  One `[[domain.call]]` dial-plan rule (design §3.3), or one `[[domain.chat]]`
+  rule — the same list. Either a compiled Asterisk `pattern` (matching the R-URI
+  user-part) or the `default = true` catch-all.
+
+  A chat rule also carries `idle_timeout`, the seconds of silence that end one of
+  its conversations (chat-basic-plan, C3b); `nil` on a call rule.
   """
 
   @type t :: %__MODULE__{
           matcher: (String.t() -> boolean) | nil,
           raw: String.t() | nil,
           script: String.t(),
-          default?: boolean
+          default?: boolean,
+          idle_timeout: pos_integer | nil
         }
 
-  defstruct matcher: nil, raw: nil, script: nil, default?: false
+  defstruct matcher: nil,
+            raw: nil,
+            script: nil,
+            default?: false,
+            idle_timeout: nil
 
   @doc "Does this rule match `user_part`? The catch-all matches anything."
   @spec matches?(t, String.t()) :: boolean

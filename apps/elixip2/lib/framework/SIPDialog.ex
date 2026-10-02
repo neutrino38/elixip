@@ -247,11 +247,14 @@ defmodule SIP.Dialog do
           # creating a dialog: an OPTIONS is not dialog-forming (§12.1), and the
           # dialog this used to create lived 60 s — one lingering process per ping
           # from a monitoring proxy.
+          #
+          # The exception is an OPTIONS the application serves itself (`:dispatch`):
+          # it gets a short dialog of its own, see SIP.Session.Options.
           req.method == :OPTIONS ->
-            {:reply, code, reason, fields} =
-              SIP.Session.ConfigRegistry.dispatch_options(req2, transact_id)
-
-            {:answered, code, reason, fields}
+            case SIP.Session.ConfigRegistry.dispatch_options(req2, transact_id) do
+              {:reply, code, reason, fields} -> {:answered, code, reason, fields}
+              :dispatch -> start_inbound_dialog(req2, 32, debug, dialog_id)
+            end
 
           # A REGISTER no triplet matched may still refresh a registration we
           # already hold (see registration_id/1). It belongs to that dialog: the
@@ -283,7 +286,8 @@ defmodule SIP.Dialog do
   defp in_dialog_request?({_fromtag, _callid, totag}), do: not is_nil(totag)
 
   # Initial (out-of-dialog) request: create the dialog its method calls for.
-  # (:OPTIONS is absent on purpose — it is answered above without a dialog.)
+  # (:OPTIONS is absent on purpose — it is answered above, with a dialog only when
+  # the application asked for one.)
   defp start_new_dialog_for(req, dialog_id, debug) do
     case req.method do
       :INVITE ->

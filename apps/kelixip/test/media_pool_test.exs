@@ -254,6 +254,7 @@ defmodule Kelix.MediaPoolTest do
       assert Enum.all?(MediaPool.status(mp), &match?(%{url: "http://10.0.0." <> _}, &1))
     end
   end
+
   describe "what each media server carries, asked rather than configured" do
     test "the probe brings the profiles back, and status/0 shows them" do
       profiles = %{
@@ -311,7 +312,9 @@ defmodule Kelix.MediaPoolTest do
         )
 
       :ok = MediaPool.check_health(mp)
-      assert [%{healthy: true, profiles: :unknown, server_status: :unknown}] = MediaPool.status(mp)
+
+      assert [%{healthy: true, profiles: :unknown, server_status: :unknown}] =
+               MediaPool.status(mp)
     end
 
     test "the probe brings the server's self-description back too" do
@@ -416,6 +419,7 @@ defmodule Kelix.MediaPoolTest do
       assert [%{healthy: true}] = MediaPool.status(mp)
     end
   end
+
   describe "checkout with a profile constraint" do
     defp pool_with(profiles_by_name) do
       entries =

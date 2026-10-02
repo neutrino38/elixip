@@ -5,11 +5,11 @@ defmodule Smoke do
   """
   use SIP.Scenario
 
-  config username: "smoke", domain: "example.com"
+  config(username: "smoke", domain: "example.com")
 
   state initial_state do
     appdata_set(:hops, 0)
-    goto next
+    goto(next)
   end
 
   state bounce do
@@ -17,9 +17,9 @@ defmodule Smoke do
     appdata_set(:hops, n + 1)
 
     if n < 3 do
-      goto loop, "hop #{n}"
+      goto(loop, "hop #{n}")
     else
-      goto done
+      goto(done)
     end
   end
 

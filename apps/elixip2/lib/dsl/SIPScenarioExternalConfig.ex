@@ -102,6 +102,20 @@ defmodule SIP.Scenario.ExternalConfig do
     Keyword.merge(header, account)
   end
 
+  @doc """
+  Add the scenario keys given on the command line (`elixipp --body …`) to the
+  header every instance gets. With no `--config`, a config of one empty account
+  carries them, so every run gets them as it would get a header. Keys a
+  scenario's `config` block does not name as context fields land in its
+  appdata (`SIP.FSL.Host.build_context/1`), where it reads them back.
+  """
+  @spec with_cli(t() | nil, keyword()) :: t() | nil
+  def with_cli(ext, []), do: ext
+  def with_cli(nil, cli), do: %__MODULE__{header: cli, accounts: [[]]}
+
+  def with_cli(%__MODULE__{header: header} = ext, cli),
+    do: %{ext | header: Keyword.merge(header, cli)}
+
   @doc "Number of accounts declared in the config (0 for `nil`)."
   @spec account_count(t() | nil) :: non_neg_integer()
   def account_count(nil), do: 0

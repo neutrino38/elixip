@@ -169,10 +169,12 @@ defmodule SIP.Transport.UDP do
           ipstr
       end
 
-    Logger.debug(
+    # Lazy, and through SIPMsg.loggable/1: a MESSAGE's content never reaches the
+    # log, and nothing is re-read unless the line is written (chat-basic-plan C1b).
+    Logger.debug(fn ->
       "UDP: Message sent to #{destipstr}:#{dest_port} ---->\r\n" <>
-        msgstr <> "\r\n-----------------"
-    )
+        SIPMsg.loggable(msgstr) <> "\r\n-----------------"
+    end)
 
     case Socket.Datagram.send(state.socket, msgstr, {destip, dest_port}) do
       :ok ->

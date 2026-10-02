@@ -84,7 +84,8 @@ defmodule UAC.InviteExample do
   # -------------------------------------------------------------------------------
   state call_answered do
     on_events do
-      {:ms_event, _conn, :ice_connected} -> goto(call_established, "media connected")
+      {:ms_event, _conn, :ice_connected} ->
+        goto(call_established, "media connected")
 
       {:ms_event, _server, :server_disconnected} ->
         goto(hangup_call, "media server disconnected")

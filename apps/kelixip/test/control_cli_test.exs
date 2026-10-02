@@ -193,6 +193,46 @@ defmodule Kelix.Control.CLITest do
     end
   end
 
+  # SUBSCRIBE is routed like a call — first match on the R-URI user part — so
+  # its rules are printed in their order, each with the pattern it matches.
+  describe "domain show — presence" do
+    setup do
+      Kelix.Test.Fixtures.serve_domains("""
+      [[domain]]
+      name = "presence.example.com"
+
+      [[domain.presence]]
+      event-package = "presence"
+      publish = "presence-publish.exs"
+
+        [[domain.presence.subscribe]]
+        pattern = "rls"
+        script = "presence-rls.exs"
+
+        [[domain.presence.subscribe]]
+        default = true
+        script = "presence-subscribe.exs"
+
+      [[domain.presence]]
+      event-package = "dialog"
+      subscribe = "dialog-subscribe.exs"
+      """)
+
+      :ok
+    end
+
+    test "one line per SUBSCRIBE rule, in order, then PUBLISH" do
+      {0, out} = run(["domain", "show", "presence.example.com"])
+
+      assert out =~
+               ~r/presence SUBSCRIBE rls\s+-> presence-rls.exs\s+\[not loaded\]\n\s+presence SUBSCRIBE \(default\) -> presence-subscribe.exs/
+
+      assert out =~ ~r/presence PUBLISH\s+-> presence-publish.exs/
+      assert out =~ ~r/dialog\s+SUBSCRIBE \(default\) -> dialog-subscribe.exs/
+      assert out =~ ~r/dialog\s+PUBLISH\s+-> \(not served\)/
+    end
+  end
+
   # The script name is what the operator configured; the module is what the BEAM
   # runs, and only the script's own `defmodule` relates the two. `show` prints both,
   # plus whether the module still matches the file.

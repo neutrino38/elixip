@@ -245,19 +245,26 @@ defmodule SIP.Msg.Ops do
   `{:error, reason}` is a disposition that says "recipient-list" over something
   that is not one: the request asked for a list subscription and did not supply a
   readable list, which is a **400**, not a subscription to nothing.
+
+  A disposition over no body at all is `:none`: the disposition describes a body,
+  and there is none to describe. Linphone sends exactly that when it ends a list
+  subscription — `Expires: 0`, the list headers of the initial SUBSCRIBE copied
+  over, no body (RFC 5367 lets a refresh omit the list).
   """
   @spec recipient_list(map()) :: {:ok, [binary()]} | :none | {:error, term()}
   def recipient_list(msg) when is_map(msg) do
-    if content_disposition(msg) == "recipient-list" do
-      case {body_content_type(msg), body_string(msg)} do
-        {"application/resource-lists+xml", body} when is_binary(body) ->
-          SIP.Presence.ResourceLists.parse(body)
+    case {content_disposition(msg), body_content_type(msg), body_string(msg)} do
+      {"recipient-list", "application/resource-lists+xml", body} when is_binary(body) ->
+        SIP.Presence.ResourceLists.parse(body)
 
-        {type, _body} ->
-          {:error, {:not_a_resource_list, type}}
-      end
-    else
-      :none
+      {"recipient-list", nil, nil} ->
+        :none
+
+      {"recipient-list", type, _body} ->
+        {:error, {:not_a_resource_list, type}}
+
+      _not_a_list ->
+        :none
     end
   end
 
@@ -509,6 +516,281 @@ defmodule SIP.Msg.Ops do
       _no_content_type ->
         nil
     end
+  end
+
+  # ── instant messaging (RFC 3428) ─────────────────────────────────────────────
+  #
+  # What the chat function asks of a MESSAGE: what its body is, how long its
+  # content is worth keeping, and which device a contact is. Read here, once, so
+  # the relay, the Silo and the scripts match on an answer rather than compare
+  # strings of their own (docs/design/chat-basic-plan.md, C1).
+
+  @doc """
+  What a page-mode MESSAGE carries: `:im` (a message for a person),
+  `:is_composing` (a typing indicator, RFC 3994) or `:imdn` (a disposition
+  notification, RFC 5438).
+
+  A `message/cpim` body (RFC 3862) is an envelope, and the kind is that of the
+  content it wraps: its MIME header block names the type. An envelope naming no
+  type, or no body at all, reads `:im` — the answer that stores and relays, which
+  is the safe side for a message nobody could classify.
+
+  The distinction exists for one decision: a typing indicator is worth nothing a
+  second later and is never stored.
+  """
+  @spec message_kind(map()) :: :im | :is_composing | :imdn
+  def message_kind(msg) when is_map(msg) do
+    type =
+      case body_content_type(msg) do
+        "message/cpim" -> cpim_content_type(body_string(msg))
+        type -> type
+      end
+
+    case type do
+      "application/im-iscomposing+xml" -> :is_composing
+      "message/imdn+xml" -> :imdn
+      _other -> :im
+    end
+  end
+
+  @doc """
+  What a MESSAGE is, in one line a log or a report may carry: its kind
+  (`message_kind/1`), its sender's AOR, its media type and its size —
+  `"im from alice@example.com (text/plain, 17 octets)"`. **Never its content**
+  (chat-basic-plan, C1b): this is what a tool says it received.
+  """
+  @spec page_summary(map()) :: String.t()
+  def page_summary(msg) when is_map(msg) do
+    octets = byte_size(body_string(msg) || "")
+    sender = address_of_record(msg, :from) || "an unknown sender"
+
+    "#{message_kind(msg)} from #{sender} (#{body_content_type(msg) || "no type"}, #{octets} octets)"
+  end
+
+  # The final answers to a page that are a verdict on the content or the sender,
+  # not on the moment: a device that said one of these will say it again.
+  # 403 blocked sender, 413 too large, 415 unsupported type, 488 not acceptable,
+  # 603 decline, 606 not acceptable anywhere.
+  @page_refusals [403, 413, 415, 488, 603, 606]
+
+  @doc """
+  What one device's answer to a page-mode MESSAGE means for the message:
+
+    * `:delivered` — a 2xx other than 202: the device has it;
+    * `:accepted` — a 202: the device took it without saying it reached anyone
+      (a client quarantining an unknown sender answers so);
+    * `:refused` — a verdict on the content or the sender (403, 413, 415, 488,
+      603, 606): trying again later changes nothing;
+    * `:unreachable` — anything else, a request that never got a final answer
+      (`:failed`) included: *not now*, which is what storage is for.
+
+  One reading for the relay that fans a MESSAGE out (`SBB.Page`) and for the
+  delivery from storage that later retries it.
+  """
+  @spec page_verdict(100..699 | :failed) :: :delivered | :accepted | :refused | :unreachable
+  def page_verdict(202), do: :accepted
+  def page_verdict(code) when code in 200..299, do: :delivered
+  def page_verdict(code) when code in @page_refusals, do: :refused
+  def page_verdict(_code_or_failed), do: :unreachable
+
+  # The Content-Type of the content inside a CPIM envelope: the envelope's own
+  # headers come first, then the MIME headers of the content, then the content.
+  # Only the header blocks are searched — a Content-Type line in the text of the
+  # message itself is the user's, not the envelope's.
+  defp cpim_content_type(body) when is_binary(body) do
+    body
+    |> String.split(~r/\r?\n\r?\n/, parts: 3)
+    |> Enum.take(2)
+    |> Enum.flat_map(&String.split(&1, ~r/\r?\n/))
+    |> Enum.find_value(fn line ->
+      case String.split(line, ":", parts: 2) do
+        [name, value] ->
+          if String.downcase(String.trim(name)) == "content-type" do
+            value |> String.trim() |> split_params() |> elem(0) |> String.downcase() |> presence()
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp cpim_content_type(_no_body), do: nil
+
+  @doc """
+  Does this message carry **user content** — text a person wrote to another?
+
+  A MESSAGE of kind `:im` with a body, in or out of a dialog. A typing indicator
+  and a disposition notification carry a state, not text; a response carries
+  nothing of the kind. This is the one reading of "what must never be recorded"
+  (GDPR): the journal and the debug logs go through `SIPMsg.redacted/1`, which
+  asks it (docs/design/chat-basic-plan.md, C1b).
+  """
+  @spec user_content?(map()) :: boolean()
+  def user_content?(%{method: :MESSAGE} = msg),
+    do: message_kind(msg) == :im and body_string(msg) != nil
+
+  def user_content?(_msg), do: false
+
+  @doc """
+  The lifetime a MESSAGE's sender gives its **content**, in seconds, or `nil`
+  when it says nothing.
+
+  On a non-INVITE request the `Expires` header is the validity of the content
+  (RFC 3261 §20.19), not a registration lifetime: there is no Contact parameter
+  to prefer and no default to fall back on, so this is **not**
+  `requested_expires/2`. `nil` matters — the Silo's retention takes the script's
+  value, then the domain's, only when the sender said nothing.
+  """
+  @spec content_expires(map()) :: non_neg_integer() | nil
+  def content_expires(msg) when is_map(msg), do: expires_header(msg)
+
+  @doc """
+  The instance ID of a Contact (`+sip.instance`, RFC 5626 §4.1), as a bare URN —
+  `"urn:uuid:a11ce000-…"` — or `nil` when it carries none.
+
+  A Contact **header** parameter, read with `SIP.Uri.get_header_param/2`. The
+  value arrives quoted and in angle brackets, which are stripped; a `urn:uuid:`
+  is folded to lower case, since two spellings of one UUID are one device.
+  """
+  @spec instance_id(term()) :: binary() | nil
+  def instance_id(%SIP.Uri{} = contact) do
+    with {:ok, value} when is_binary(value) <- SIP.Uri.get_header_param(contact, "+sip.instance"),
+         urn when urn != "" <-
+           String.trim(value, "\"")
+           |> String.trim_leading("<")
+           |> String.trim_trailing(">")
+           |> String.trim() do
+      if String.match?(urn, ~r/^urn:uuid:/i), do: String.downcase(urn), else: urn
+    else
+      _ -> nil
+    end
+  end
+
+  def instance_id(_other), do: nil
+
+  @doc """
+  The identity a delivery to `contact` is recorded against: its instance ID when
+  it sends one, else its contact URI as a Request-URI.
+
+  The fallback drops the header parameters (`expires`, `q`…), which change from
+  one REGISTER to the next, and keeps the address — so a device re-registering
+  from a new address without an instance ID is a new device, the duplicate risk
+  the design accepts (DESIGN-CHAT.md, *Multi-device*).
+  """
+  @spec device_key(term()) :: binary() | nil
+  def device_key(%SIP.Uri{} = contact) do
+    case instance_id(contact) do
+      nil ->
+        {:ok, ruri} = SIP.Uri.serialize_ruri(contact)
+        ruri
+
+      urn ->
+        urn
+    end
+  end
+
+  def device_key(_other), do: nil
+
+  @doc """
+  The flow a request arrived on, as the transport layer stamped it on its
+  Request-URI: `received` is `{proto, ip, port}` of the source (`nil` when
+  unstamped), `tp_pid` and `tp_module` the transport instance — the connection,
+  for TCP, TLS and WSS — that carried it.
+
+  What a registrar stores beside a binding, and what a delivery to the device
+  that sent the request goes back over (`reach_contact/2`). `source_flow/1`
+  names the same flow as a comparable key; this is what a send needs.
+  """
+  @spec arrival_flow(map()) :: %{
+          received: {term(), term(), term()} | nil,
+          tp_pid: pid() | nil,
+          tp_module: module() | nil
+        }
+  def arrival_flow(req) when is_map(req) do
+    case Map.get(req, :ruri) do
+      %SIP.Uri{destip: ip, destport: port, destproto: proto, tp_pid: pid, tp_module: mod} ->
+        received = if is_nil(ip), do: nil, else: {proto, ip, port}
+        %{received: received, tp_pid: pid, tp_module: mod}
+
+      _ ->
+        %{received: nil, tp_pid: nil, tp_module: nil}
+    end
+  end
+
+  @doc """
+  Who is at the other end of `flow` (`arrival_flow/1`'s shape): the connection,
+  over a connection-oriented transport (`SIP.Transport.connection_oriented?/1`) —
+  `{:connection, pid}` — else the source address and port — `{:address,
+  received}` — else `nil`, which is nobody in particular.
+
+  Two requests that answer the same came from the same device, as far as the
+  network can tell: what tells apart the devices of one user when the request
+  names none, as a PUBLISH does. A UDP transport's pid names nobody: one instance
+  serves every peer.
+  """
+  @spec flow_peer(map() | nil) :: {:connection, pid()} | {:address, tuple()} | nil
+  def flow_peer(%{tp_pid: pid, tp_module: mod} = flow) when is_pid(pid) do
+    if SIP.Transport.connection_oriented?(mod), do: {:connection, pid}, else: flow_address(flow)
+  end
+
+  def flow_peer(%{} = flow), do: flow_address(flow)
+  def flow_peer(_none), do: nil
+
+  defp flow_address(%{received: {_proto, _ip, _port} = received}), do: {:address, received}
+  defp flow_address(_flow), do: nil
+
+  @doc """
+  The Request-URI that reaches `contact` — a Contact header value — over `flow`
+  (`arrival_flow/1`'s shape): the contact as a Request-URI, stamped with the
+  destination and the transport instance `SIP.Transport.Selector` short-circuits
+  on, so a NATed device is reached over the connection it registered on, with
+  no DNS.
+
+  `SIP.Uri.to_request_uri/1` first: the display name and the binding parameters
+  (`q`, `expires`, the RFC 3840 feature tags) may not appear on a Request-URI
+  (RFC 3261 §16.6 item 2), while every URI parameter is kept (§19.1.5). One
+  header parameter is carried back on, `+sip.instance`, so whoever sends to the
+  result can still name the device (`device_key/1`); it cannot reach the wire,
+  since a Request-URI is serialized by `SIP.Uri.serialize_ruri/1`, which drops
+  every header parameter.
+  """
+  @spec reach_contact(SIP.Uri.t(), map()) :: SIP.Uri.t()
+  def reach_contact(%SIP.Uri{} = contact, flow) when is_map(flow) do
+    ruri = contact |> SIP.Uri.to_request_uri() |> keep_instance(contact)
+    ruri = %SIP.Uri{ruri | tp_pid: Map.get(flow, :tp_pid), tp_module: Map.get(flow, :tp_module)}
+
+    case Map.get(flow, :received) do
+      {proto, ip, port} -> %SIP.Uri{ruri | destip: ip, destport: port, destproto: proto}
+      _ -> ruri
+    end
+  end
+
+  defp keep_instance(ruri, contact) do
+    case SIP.Uri.get_header_param(contact, "+sip.instance") do
+      {:ok, value} when is_binary(value) -> SIP.Uri.set_header_param(ruri, "+sip.instance", value)
+      _none -> ruri
+    end
+  end
+
+  @doc """
+  Where the devices a REGISTER binds can be reached **now**: one Request-URI per
+  Contact it binds (a lifetime above 0, `contact_expires/3`), each over the flow
+  the REGISTER arrived on (`reach_contact/2`). Empty for an un-registration and
+  for the `Contact: *` wildcard.
+
+  What a delivery triggered by that REGISTER — the Silo's flush — sends to: the
+  device that just registered, not the AOR's other bindings, which are served by
+  their own REGISTERs.
+  """
+  @spec register_targets(map()) :: [SIP.Uri.t()]
+  def register_targets(req) when is_map(req) do
+    header = expires_header(req)
+    flow = arrival_flow(req)
+
+    for %SIP.Uri{} = contact <- List.wrap(Map.get(req, :contact)),
+        contact_expires(contact, header) > 0,
+        do: reach_contact(contact, flow)
   end
 
   @doc """
@@ -869,6 +1151,67 @@ defmodule SIP.Msg.Ops do
     case to_uri(Map.get(msg, header)) do
       %SIP.Uri{userpart: user, domain: domain} -> {presence(user), host_string(domain)}
       _ -> {nil, nil}
+    end
+  end
+
+  @doc """
+  The address-of-record an address header names, as one comparable string,
+  `"user@host"` — `nil` when the header is absent, unparsable, or names no user.
+
+  What a page-mode conversation is keyed on: the `From` and the `To` of every
+  MESSAGE of one conversation name the same two AORs, while their tags, their
+  display names and the Call-ID change with each message. The host is folded to
+  lower case (RFC 3261 §19.1.4 compares it case-insensitively); the user part is
+  kept verbatim, as `target_aor/1` keeps it.
+  """
+  @spec address_of_record(map(), :from | :to) :: String.t() | nil
+  def address_of_record(msg, header) when is_map(msg) and header in [:from, :to] do
+    case header_aor(msg, header) do
+      {user, host} when is_binary(user) and is_binary(host) ->
+        user <> "@" <> String.downcase(host)
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  The flow a request arrived on, as `{transport, ip, port}` — `"UDP"`, `"TCP"`,
+  `"TLS"` or `"WSS"`, the peer's address and port — or `nil` for a request that
+  did not come off the network (hand-built, or not yet stamped).
+
+  The transport layer stamps it on the Request-URI of every inbound request that
+  starts a transaction (`destip`, `destport`, `tp_module`): where an answer must
+  go back is where the request came from. A page-mode conversation is keyed on it
+  (chat-basic-plan, C3c): the same `From` writing to the same `To` over the same
+  flow is the same sender, which a `From` alone does not prove.
+  """
+  @spec source_flow(map()) :: {String.t(), :inet.ip_address(), :inet.port_number()} | nil
+  def source_flow(msg) when is_map(msg) do
+    case Map.get(msg, :ruri) do
+      %SIP.Uri{tp_module: mod, destip: ip, destport: port}
+      when is_atom(mod) and not is_nil(mod) and is_tuple(ip) and is_integer(port) ->
+        {String.upcase(mod.transport_str()), ip, port}
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  The connection a request arrived on — the pid of its connected transport
+  instance (TCP, TLS, WSS) — or `nil` for a connectionless one (UDP), which has
+  no connection to lose, and for a request that did not come off the network.
+  """
+  @spec source_connection(map()) :: pid() | nil
+  def source_connection(msg) when is_map(msg) do
+    case Map.get(msg, :ruri) do
+      %SIP.Uri{tp_module: mod, tp_pid: pid}
+      when is_atom(mod) and not is_nil(mod) and is_pid(pid) ->
+        if mod.is_reliable(), do: pid, else: nil
+
+      _ ->
+        nil
     end
   end
 
@@ -1455,6 +1798,12 @@ defmodule SIP.Msg.Ops do
   # Response headers copied verbatim when a reply is relayed leg-to-leg.
   @b2bua_reply_passthrough ["Reason", "Warning", "Retry-After"]
 
+  # …and, on the answer to an OPTIONS only, the capabilities it reports (RFC 3261
+  # §11.2): they are the whole answer to a probe. On any other response they would
+  # promise extensions this B2BUA does not perform on the far leg (100rel, replaces).
+  @options_reply_capabilities [:supported, :accept, :allowevents]
+  @options_reply_capabilities_lc ["allow", "accept-encoding", "accept-language"]
+
   # Matched case-insensitively: a header with no atom of its own keeps the
   # spelling the peer used (see strip_asserted_identity/1).
   @pai_header_lc "p-asserted-identity"
@@ -1601,7 +1950,9 @@ defmodule SIP.Msg.Ops do
   What a response relayed leg-to-leg carries over: the body (normalized to the
   `[%{contenttype, data}]` part shape so its Content-Type survives
   `update_sip_msg/2`), the `#{inspect(@b2bua_reply_passthrough)}` headers, and
-  the *identity* of the answerer's Contact (see `contact_identity/1`).
+  the *identity* of the answerer's Contact (see `contact_identity/1`). On the
+  answer to an OPTIONS, the capabilities it reports as well: `Allow`, `Accept`,
+  `Accept-Encoding`, `Accept-Language`, `Supported`, `Allow-Events`.
 
   The Contact's address is deliberately NOT copied: the relayed response must
   advertise *our* address on the answering leg, which the transport layer stamps
@@ -1623,8 +1974,24 @@ defmodule SIP.Msg.Ops do
       end
 
     passthrough = for h <- @b2bua_reply_passthrough, v = Map.get(resp, h), do: {h, v}
-    body_fields ++ contact_fields ++ passthrough
+    body_fields ++ contact_fields ++ passthrough ++ options_capabilities(resp)
   end
+
+  # A header with no atom of its own keeps the spelling the peer used, hence the
+  # case-insensitive match on the string keys.
+  defp options_capabilities(%{cseq: [_seq, :OPTIONS]} = resp) do
+    atoms = for h <- @options_reply_capabilities, v = Map.get(resp, h), do: {h, v}
+
+    strings =
+      for {key, v} <- resp,
+          is_binary(key),
+          String.downcase(key) in @options_reply_capabilities_lc,
+          do: {key, v}
+
+    atoms ++ strings
+  end
+
+  defp options_capabilities(_resp), do: []
 
   # The identity half of a Contact crossing a leg boundary: the userpart and
   # display name say WHO answers there; the host, port and transport say WHERE,

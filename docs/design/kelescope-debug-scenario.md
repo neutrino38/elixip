@@ -470,12 +470,21 @@ event ::                                     # FSL.Journal events, oldest first;
       reply: boolean, repeat: boolean,
       body: String.t() | nil,                # the message as text, body decoded
       clipped: boolean,
+      redacted: boolean,                     # a MESSAGE's content left out (GDPR)
       decoded_from: String.t() | nil,        # "deflate" | "gzip"
       method: atom | nil, code: integer | nil, reason: String.t() | nil,
       cseq: String.t() | nil, sdp: boolean}
   | %{kind: :cut, at: integer}               # max_trace_bytes reached
   # any other kind: skip it
 ```
+
+`redacted: true` marks a MESSAGE whose content was never recorded: the text a
+person wrote is replaced in `body` by `<content not recorded: <type>, N
+octets>`, and the envelope around it — SIP headers, a CPIM envelope's From, To,
+DateTime and `imdn.Message-ID` — is kept (chat-basic-plan.md, C1b). Nothing on
+the node holds the content, so there is no request that returns it; kelescope
+says "content not recorded (GDPR)" where it would unfold the body. A node older
+than the field sends none: read it as `false`.
 
 Everything is plain data (strings, integers, booleans, atoms, `DateTime`), so it
 crosses the distribution as is and encodes to JSON: `GET /traces` and

@@ -251,7 +251,14 @@ defmodule SIP.Session.B2bua do
 
   # Dialog lifetime (seconds) of an outbound leg, by method. Mirrors the inbound
   # values SIP.Dialog.start_new_dialog_for/3 uses.
-  @default_timeouts %{INVITE: 1800, MESSAGE: 60, REGISTER: 600, SUBSCRIBE: 600, PUBLISH: 600}
+  @default_timeouts %{
+    INVITE: 1800,
+    MESSAGE: 60,
+    REGISTER: 600,
+    SUBSCRIBE: 600,
+    PUBLISH: 600,
+    OPTIONS: 32
+  }
 
   defmacro __using__(_opts) do
     quote do
@@ -839,7 +846,10 @@ defmodule SIP.Session.B2bua do
   defp no_media_plane?({:b2bua, :media_setup_failed, reason}), do: no_media_plane?(reason)
   defp no_media_plane?({:b2bua, :reoffer_answer_failed, reason}), do: no_media_plane?(reason)
   defp no_media_plane?({:b2bua, :reoffer_relay_failed, reason}), do: no_media_plane?(reason)
-  defp no_media_plane?({leg, reason}) when leg in [:inbound, :outbound], do: no_media_plane?(reason)
+
+  defp no_media_plane?({leg, reason}) when leg in [:inbound, :outbound],
+    do: no_media_plane?(reason)
+
   defp no_media_plane?(:no_media_server), do: true
   defp no_media_plane?({:error, :no_media_server}), do: true
   defp no_media_plane?({:media_down, _reason}), do: true
@@ -1604,7 +1614,10 @@ defmodule SIP.Session.B2bua do
 
   defp expand_targets(%Peer{fork: :parallel} = peer) do
     Enum.map(peer.uris, fn entry ->
-      entry |> List.wrap() |> Enum.flat_map(&srv_expand(&1, peer)) |> Enum.map(&resolve_and_mark/1)
+      entry
+      |> List.wrap()
+      |> Enum.flat_map(&srv_expand(&1, peer))
+      |> Enum.map(&resolve_and_mark/1)
     end)
   end
 
@@ -1930,7 +1943,8 @@ defmodule SIP.Session.B2bua do
         Logger.info(
           dialogpid: sip_ctx.dialogpid,
           module: __MODULE__,
-          message: "BYE from the #{from_leg} leg not relayed: the #{other_leg(from_leg)} is already closing"
+          message:
+            "BYE from the #{from_leg} leg not relayed: the #{other_leg(from_leg)} is already closing"
         )
 
         SIP.Context.set(sip_ctx, :lasterr, :ok)
@@ -3598,8 +3612,18 @@ defmodule SIP.Session.B2bua do
   end
 
   # Only a request that can create a dialog can create a leg (RFC 3261 §12.1).
+  # OPTIONS is not dialog-forming, but a probe relayed to a registered UA is one
+  # leg carrying one transaction, as a MESSAGE is.
   defp dialog_forming?(req) when is_map(req) do
-    Map.get(req, :method) in [:INVITE, :MESSAGE, :REGISTER, :SUBSCRIBE, :PUBLISH, :NOTIFY]
+    Map.get(req, :method) in [
+      :INVITE,
+      :MESSAGE,
+      :REGISTER,
+      :SUBSCRIBE,
+      :PUBLISH,
+      :NOTIFY,
+      :OPTIONS
+    ]
   end
 
   defp dialog_forming?(_), do: false

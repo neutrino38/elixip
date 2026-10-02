@@ -2,7 +2,7 @@
 # observe quota / active instances. Touches no dialog, so a fake dialog pid is ok.
 defmodule KelixTest.Waiter do
   use SIP.Scenario
-  uas :register
+  uas(:register)
 
   state initial_state do
     on_events do

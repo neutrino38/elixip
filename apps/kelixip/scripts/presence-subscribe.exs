@@ -93,16 +93,16 @@ defmodule Kelix.PresenceSubscribe do
   # module reports a state for, a conference room: subscribing to one nobody
   # provisioned is 404, not an empty state a watcher would wait on for an hour.
   #
-  # The SUBSCRIBE itself needs no carrying around: on_events stores the inbound
-  # request and last_uas_req() reads it back in any later state.
+  # The presentity is not read off the Request-URI: a refresh comes back through
+  # here, and its Request-URI is our own Contact, which names nobody. Reading it
+  # answered 404 to every refresh, and the watcher lost the contact's presence
+  # half an hour after subscribing. `presentity_aor/1` knows which one to read.
   state authorize do
-    req = last_uas_req()
-
-    if Kelix.Mod.Presence.exists?(sip_ctx, SIP.Msg.Ops.target_aor(req)) do
+    if Kelix.Mod.Presence.exists?(sip_ctx, SIP.Session.Notifier.presentity_aor(sip_ctx)) do
       goto(subscribe, "presentity exists")
     else
       reject_subscription(404, "Not Found")
-      goto(wait_subscribe, "404 no such presentity")
+      goto(refused, "404 no such presentity")
     end
   end
 
@@ -136,7 +136,19 @@ defmodule Kelix.PresenceSubscribe do
       # 406 / 423 have already gone out; the watcher may ask again with what the
       # refusal told it. (The 489 never reaches here — the router raised it.)
       {:error, code} ->
-        goto(wait_subscribe, "#{code}")
+        goto(refused, "#{code}")
+    end
+  end
+
+  # A refusal ends the request, not the subscription. A refused REFRESH leaves
+  # the one it refreshes running until its last granted lifetime (RFC 6665
+  # §4.1.2.2): the state still has to be pushed and its end still has to be
+  # handled, and `wait_subscribe` does neither — a watcher parked there missed
+  # every change until the 32 s timer failed the instance.
+  state refused do
+    case last_subscription() do
+      nil -> goto(wait_subscribe, "no subscription yet")
+      _running -> goto(subscribed, "the subscription runs on")
     end
   end
 
@@ -201,14 +213,22 @@ defmodule Kelix.PresenceSubscribe do
     end
   end
 
-  # One line per NOTIFY: to whom, about whom, on which package, saying what.
+  # One line per NOTIFY: to whom, about whom, on which package, saying what. An
+  # accepted un-SUBSCRIBE sends no state — `notify/1` skips it, and the final
+  # NOTIFY is the dialog's — so the line says that instead of a state never sent.
   defp trace_notify(sub, doc) do
+    what =
+      case SIP.Subscription.status(sub) do
+        :terminated -> "un-SUBSCRIBE accepted, the dialog sends the final NOTIFY"
+        _active when is_nil(doc) -> "no state, ending (noresource)"
+        _active -> SIP.EventPackage.summary(doc)
+      end
+
     Logger.info(
       module: __MODULE__,
       message:
         "NOTIFY #{sub.event} to #{SIP.Subscription.watcher_uri(sub)} " <>
-          "about #{sub.presentity_uri}: " <>
-          if(doc, do: SIP.EventPackage.summary(doc), else: "no state, ending (noresource)")
+          "about #{sub.presentity_uri}: #{what}"
     )
   end
 

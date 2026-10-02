@@ -130,6 +130,35 @@ defmodule SIP.Test.Pidf do
 
   # ── The refusals ────────────────────────────────────────────────────────────
 
+  # Captured from Linphone-Desktop 6.2.3 and Trix (JsSIP 3.13.8) on 2026-10-01
+  # (presence-composite-plan.md, PC0). Both say "available" by sending NO
+  # `<dm:person>` at all, never an empty one: a document with no activity is how
+  # a client clears the person state, and it must read as exactly that.
+  describe "parse/1 on field captures" do
+    test "available is no person at all, and reads as no activity and no note" do
+      for name <- ~w(linphone623-open trix-open) do
+        assert {:ok, doc} = Pidf.parse(sample(name))
+        assert [%Tuple{status: :open}] = doc.tuples
+        assert {doc.activity, doc.note} == {nil, nil}, name
+      end
+    end
+
+    test "busy is an RPID activity on the person, with or without text in it" do
+      for name <- ~w(linphone623-busy trix-busy) do
+        assert {:ok, doc} = Pidf.parse(sample(name))
+        assert doc.activity == :busy, name
+        assert Doc.open?(doc)
+      end
+    end
+
+    test "Trix carries no contact; Linphone carries the AOR" do
+      assert {:ok, %Doc{tuples: [%Tuple{contact: nil}]}} = Pidf.parse(sample("trix-open"))
+
+      assert {:ok, %Doc{tuples: [%Tuple{contact: "sip:bob@weshwesh.eu"}]}} =
+               Pidf.parse(sample("linphone623-open"))
+    end
+  end
+
   describe "parse/1 refuses" do
     test "a body over the size bound, without looking at it" do
       body = "<presence entity=\"sip:j@ives.fr\">" <> String.duplicate("<!-- pad -->", 10_000)
@@ -181,7 +210,9 @@ defmodule SIP.Test.Pidf do
 
   describe "serialize/1" do
     test "writes a document a watcher can read back unchanged" do
-      for name <- ~w(linphone-open linphone-away linphone-closed two-tuples) do
+      for name <-
+            ~w(linphone-open linphone-away linphone-closed two-tuples) ++
+              ~w(linphone623-open linphone623-busy trix-open trix-busy) do
         assert {:ok, doc} = Pidf.parse(sample(name))
         assert {:ok, body} = Pidf.serialize(doc)
 

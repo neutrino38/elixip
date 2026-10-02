@@ -4,12 +4,18 @@ defmodule Kelix.Options do
   upstream proxy or load balancer sends to decide whether this node still takes
   traffic. Registered in `SIP.Session.ConfigRegistry` at boot by `Kelix.Router`.
 
-  Two answers:
+  Three answers:
 
     * **200 OK** with the methods this server implements, in `Allow`;
     * **503 Service Unavailable** while the node is draining
       (`Kelix.Control.drain/0`), which is how a node leaves the upstream rotation
-      without touching what is already in flight — see `Kelix.Control.graceful_shutdown/0`.
+      without touching what is already in flight — see `Kelix.Control.graceful_shutdown/0`;
+    * `:dispatch`, when a `[[domain.options]]` rule names a script for the request
+      (`Kelix.Router.resolve_options/2`): the framework then opens the OPTIONS a
+      short dialog and `on_new_options/3` routes it like a call, quota included.
+
+  The drain is decided first, whatever the domains declare: leaving the upstream
+  rotation must never depend on a script loading.
 
   This lives in the release rather than in a loadable module (design §8.3, "the core
   ships no SIP function"). Answering a liveness ping is not a SIP *function*: it is
@@ -32,17 +38,39 @@ defmodule Kelix.Options do
   # What kelixip implements today. SUBSCRIBE, PUBLISH and NOTIFY join the list with
   # the subscription layer: NOTIFY because a notifier answers the 200 to the one it
   # sent, and a UA reading this list decides from it whether to subscribe at all.
-  @allow "OPTIONS, REGISTER, INVITE, ACK, CANCEL, BYE, SUBSCRIBE, PUBLISH, NOTIFY"
+  # MESSAGE joins with the chat function. `Allow` describes the node, a 405 the
+  # domain: a domain with no `[[domain.chat]]` refuses MESSAGE as one without
+  # presence refuses SUBSCRIBE (chat-basic-plan.md, decision 3).
+  @allow "OPTIONS, REGISTER, INVITE, ACK, CANCEL, BYE, SUBSCRIBE, PUBLISH, NOTIFY, MESSAGE"
 
   @impl SIP.Session.Options
-  def on_options(_req, _transaction_id) do
+  def on_options(req, _transaction_id) do
     if Kelix.Control.draining?() do
       # No Retry-After: we do not know when (or whether) this node comes back, and a
       # figure invented here is one upstream would honour.
       {:reply, 503, "Service Unavailable", []}
     else
-      {:reply, 200, "OK", [{"Allow", @allow}]}
+      case route(req) do
+        :core -> core_answer()
+        {:route, _route} -> :dispatch
+        {:reject, code, reason} -> {:reply, code, reason, []}
+      end
     end
+  end
+
+  @impl SIP.Session.Options
+  def on_new_options(dialog_id, req, _transaction_id),
+    do: Kelix.Router.dispatch(dialog_id, req)
+
+  @doc "What the core answers an OPTIONS no script serves, drain aside."
+  @spec core_answer() :: {:reply, 200, String.t(), list}
+  def core_answer, do: {:reply, 200, "OK", [{"Allow", @allow}]}
+
+  # No domains snapshot is no rule: the node still answers its liveness ping.
+  defp route(req) do
+    if Process.whereis(Kelix.Domains),
+      do: Kelix.Router.resolve_options(Kelix.Domains.current(), req),
+      else: :core
   end
 
   @doc "The methods advertised in `Allow` (also reported by `kelictl status`)."

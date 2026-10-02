@@ -53,6 +53,24 @@ import Kelix.Mod.AuthDb, only: [authenticate: 3, challengeable?: 1]
 The realm used for lookup and digest is the **domain's nominal name** (aliases
 fold to it).
 
+The keys that say where the server is and how to reach it — `driver`, `host`,
+`port`, `ssl`, `ssl_ca_cert_file`, `allow_insecure_db_connection`,
+`connect_timeout_ms` — may instead come from a `[database]` block in
+`config.toml`, shared with every SQL module. A key set in `[module.auth_db]` wins.
+`database`, `username`, `password` and `pool_size` are never inherited.
+
+```toml
+# config.toml
+[database]
+driver = "postgres"
+host   = "db.example.net"
+
+[module.auth_db]
+database = "kamailio"
+username = "kamailio_ro"
+password = "secret"
+```
+
 ## The link to the database
 
 The module's supervised service is a **permanent connection pool**
@@ -175,12 +193,13 @@ challengeable?(req) :: boolean
 ```
 
 Should this request be authenticated at all? The rule is **an initial request,
-other than `ACK`, `CANCEL` and `OPTIONS`**:
+other than `ACK` and `CANCEL`**:
 
 - `ACK` has no response to carry a challenge (RFC 3261 §17.1.1.3);
 - `CANCEL` must be accepted for the transaction it cancels (§22.1);
-- `OPTIONS` is what liveness probing uses — challenging it makes this node look
-  down to its own infrastructure;
+- `OPTIONS` is challengeable. The liveness ping never reaches a script that
+  authenticates: the `keepalive` rule of `[[domain.options]]`, or the node itself,
+  answers it;
 - an **in-dialog** request (a To tag) was authenticated when the dialog was
   created; re-challenging mid-call breaks UAs and proves nothing new.
 

@@ -97,7 +97,9 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
   # credentials, never the challenged one.
   state initial_state do
     req = last_uas_req()
-    realm = Kelix.Mod.AuthDb.SBB.Authenticate.realm_of(sbb_data_get(:realm), req, ctx_get(:domain))
+
+    realm =
+      Kelix.Mod.AuthDb.SBB.Authenticate.realm_of(sbb_data_get(:realm), req, ctx_get(:domain))
 
     case Kelix.Mod.AuthDb.authenticate(req, realm) do
       # The digest proved `identity.user`, and the identity check has already had
@@ -143,7 +145,7 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
         goto(initial_state, "credentials re-submitted")
 
       # The same, for the methods a provisional response would be noise on: a
-      # SUBSCRIBE and a PUBLISH are answered once, and the answer is the verdict
+      # SUBSCRIBE, a PUBLISH and an OPTIONS are answered once, and the answer is the verdict
       # `initial_state` is about to reach. The request needs no carrying — the
       # instrumentation stored it, and `last_uas_req()` reads back the one that
       # came with the credentials.
@@ -151,6 +153,15 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
         goto(initial_state, "credentials re-submitted")
 
       {:PUBLISH, _req, _trans, _dlg} ->
+        goto(initial_state, "credentials re-submitted")
+
+      # A page comes back as a new MESSAGE — a transaction, often a Call-ID, of
+      # its own — and reaches this instance because the router keys a
+      # conversation on its sender, recipient and flow (chat-basic-plan, C3c).
+      {:MESSAGE, _req, _trans, _dlg} ->
+        goto(initial_state, "credentials re-submitted")
+
+      {:OPTIONS, _req, _trans, _dlg} ->
         goto(initial_state, "credentials re-submitted")
 
       # A caller that cancels the challenged attempt: nothing was forwarded, so

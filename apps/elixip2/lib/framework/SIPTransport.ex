@@ -1,5 +1,4 @@
 defmodule SIP.Transport do
-
   require Logger
 
   defmodule Depack do
@@ -10,12 +9,10 @@ defmodule SIP.Transport do
     require SIPMsg
     require Logger
 
-    defstruct [
-      buffer: "",
-      body: "",
-      state: :wait_for_msg,
-      clen: 0
-    ]
+    defstruct buffer: "",
+              body: "",
+              state: :wait_for_msg,
+              clen: 0
 
     # Content-Length as the depacketizer must read it: a non-negative integer, or
     # nothing it can frame on. This is FRAMING, not interpretation — there is no
@@ -29,31 +26,33 @@ defmodule SIP.Transport do
     # `split_at("abcdefgh", -5)` is `{"abc", "defgh"}` — so the body was framed
     # truncated and its tail re-read as the next message.
     defp parse_and_get_clen([]) do
-      { :ok, 0 }
+      {:ok, 0}
     end
 
-    defp parse_and_get_clen([ line | rest ]) do
+    defp parse_and_get_clen([line | rest]) do
       case String.split(line, ": ", parts: 2) do
-        [ "Content-Length", val ] ->
+        ["Content-Length", val] ->
           case Integer.parse(String.trim(val)) do
-            { clen, "" } when clen >= 0 -> { :ok, clen }
+            {clen, ""} when clen >= 0 -> {:ok, clen}
             _ -> :invalid
           end
 
-        _ -> parse_and_get_clen(rest)
+        _ ->
+          parse_and_get_clen(rest)
       end
     end
 
     defp parse_first_line(line) do
       case String.split(line, " ", parts: 3) do
+        # This is a SIP response
+        ["SIP/2.0", _response_code, _reason] ->
+          :ok
 
-				# This is a SIP response
-				[ "SIP/2.0", _response_code, _reason ] -> :ok
+        # This is a SIP request
+        [_req, _sip_uri, "SIP/2.0"] ->
+          :ok
 
-				# This is a SIP request
-				[ _req, _sip_uri, "SIP/2.0" ] -> :ok
-
-				_ ->
+        _ ->
           # The line reaching us has already lost its CRLF, so a keep-alive shows up
           # here as an EMPTY first line — which is why the `[ "\r\n" ]` clause that
           # used to sit here never matched, and every CRLF ping took the :error path
@@ -62,7 +61,6 @@ defmodule SIP.Transport do
           if SIPMsg.keepalive?(line), do: :ping, else: :error
       end
     end
-
 
     @doc """
     Feed received octets to the depacketizer and frame whatever messages they
@@ -86,30 +84,34 @@ defmodule SIP.Transport do
     the other case entirely: the transport answers 513 and KEEPS the connection,
     because the stream is still in step and every other dialog riding it is fine.
     """
-    def on_data_received(buf = %Depack{ state: :refused }, _data, _cb_fun), do: buf
+    def on_data_received(buf = %Depack{state: :refused}, _data, _cb_fun), do: buf
 
-    def on_data_received(buf = %Depack{}, data, cb_fun) when is_binary(data) and is_function(cb_fun) and buf.state == :wait_for_msg do
+    def on_data_received(buf = %Depack{}, data, cb_fun)
+        when is_binary(data) and is_function(cb_fun) and buf.state == :wait_for_msg do
       # IO.puts("waiting for mesg")
-      buf = %Depack{ buf | buffer: buf.buffer <> data } # Accumulate
-      if String.contains?(buf.buffer,"\r\n") do
-        [ first_line, rest ] = String.split(buf.buffer, "\r\n", parts: 2)
+      # Accumulate
+      buf = %Depack{buf | buffer: buf.buffer <> data}
+
+      if String.contains?(buf.buffer, "\r\n") do
+        [first_line, rest] = String.split(buf.buffer, "\r\n", parts: 2)
+
         case parse_first_line(first_line) do
           :ok ->
-            buf = %Depack{ buf | state: :reading_headers }
+            buf = %Depack{buf | state: :reading_headers}
             # IO.puts(" -> reading_headers ")
             on_data_received(buf, "", cb_fun)
 
           :ping ->
             # A keep-alive CRLF: consume just it and keep reading what follows.
             cb_fun.(:ping, "")
-            buf = %Depack{ buf | buffer: rest }
-            Logger.debug([module: __MODULE__, message: "keep-alive CRLF received, dropping"])
+            buf = %Depack{buf | buffer: rest}
+            Logger.debug(module: __MODULE__, message: "keep-alive CRLF received, dropping")
             on_data_received(buf, "", cb_fun)
 
           :error ->
             # Invalid SIP - discard eveything
             # IO.puts("invalid SIP msg: first_line = #{first_line}")
-            %Depack{ buf | buffer: "", clen: 0 }
+            %Depack{buf | buffer: "", clen: 0}
         end
       else
         # Not one CRLF yet, so not even a first line — and nothing to answer with.
@@ -119,27 +121,29 @@ defmodule SIP.Transport do
       end
     end
 
-    def on_data_received(buf = %Depack{}, data, cb_fun) when is_binary(data) and is_function(cb_fun) and buf.state == :reading_headers do
-      buf = %Depack{ buf | buffer: buf.buffer <> data } # Accumulate
+    def on_data_received(buf = %Depack{}, data, cb_fun)
+        when is_binary(data) and is_function(cb_fun) and buf.state == :reading_headers do
+      # Accumulate
+      buf = %Depack{buf | buffer: buf.buffer <> data}
       # IO.puts("reading_headers !")
-      if String.contains?(buf.buffer,"\r\n\r\n") do
-        [ headers, rest ] = String.split(buf.buffer, "\r\n\r\n", parts: 2)
+      if String.contains?(buf.buffer, "\r\n\r\n") do
+        [headers, rest] = String.split(buf.buffer, "\r\n\r\n", parts: 2)
 
         # Remove first line
-        [ _first_line | header_lines ] = String.split(headers, "\r\n")
+        [_first_line | header_lines] = String.split(headers, "\r\n")
 
         case parse_and_get_clen(header_lines) do
-          { :ok, 0 } ->
+          {:ok, 0} ->
             # This SIP message has no body. Pass it to the transaction layer
             # IO.puts("Message complete !")
             cb_fun.(:msg, headers)
 
             # Reset the buffer
-            buf = %Depack{ buf | state: :wait_for_msg, buffer: "", clen: 0 }
+            buf = %Depack{buf | state: :wait_for_msg, buffer: "", clen: 0}
             # Handle the rest
             on_data_received(buf, rest, cb_fun)
 
-          { :ok, clen } ->
+          {:ok, clen} ->
             # The bound is applied to the length the peer DECLARES, the moment the
             # header block ends and before one body octet is buffered. That is what
             # turns an announced gigabyte into 450 bytes of work — and it is also
@@ -151,7 +155,7 @@ defmodule SIP.Transport do
             if clen > SIPMsg.max_message_size() do
               refuse(buf, :too_large, headers, cb_fun, "Content-Length: #{clen} announced")
             else
-              buf = %Depack{ buf | state: :reading_body, buffer: headers, clen: clen, body: "" }
+              buf = %Depack{buf | state: :reading_body, buffer: headers, clen: clen, body: ""}
               on_data_received(buf, rest, cb_fun)
             end
 
@@ -170,15 +174,17 @@ defmodule SIP.Transport do
       end
     end
 
-    def on_data_received(buf = %Depack{}, data, cb_fun) when is_binary(data) and is_function(cb_fun) and buf.state == :reading_body do
+    def on_data_received(buf = %Depack{}, data, cb_fun)
+        when is_binary(data) and is_function(cb_fun) and buf.state == :reading_body do
       accumulated = buf.body <> data
+
       if byte_size(accumulated) >= buf.clen do
         {body, rest} = String.split_at(accumulated, buf.clen)
         cb_fun.(:msg, buf.buffer <> "\r\n\r\n" <> body)
-        buf = %Depack{ buf | state: :wait_for_msg, buffer: "", body: "", clen: 0 }
+        buf = %Depack{buf | state: :wait_for_msg, buffer: "", body: "", clen: 0}
         on_data_received(buf, rest, cb_fun)
       else
-        %Depack{ buf | body: accumulated }
+        %Depack{buf | body: accumulated}
       end
     end
 
@@ -187,20 +193,29 @@ defmodule SIP.Transport do
     # the peer gets the close and nothing else.
     defp refuse_if_past_bound(buf, headers, cb_fun) do
       if Kernel.byte_size(buf.buffer) > SIPMsg.max_message_size() do
-        refuse(buf, :too_large, headers, cb_fun,
-          "#{Kernel.byte_size(buf.buffer)} bytes buffered with no message boundary")
+        refuse(
+          buf,
+          :too_large,
+          headers,
+          cb_fun,
+          "#{Kernel.byte_size(buf.buffer)} bytes buffered with no message boundary"
+        )
       else
         buf
       end
     end
 
     defp refuse(buf, what, headers, cb_fun, detail) do
-      Logger.warning([module: __MODULE__, message: "#{what}: #{detail} (bound " <>
-        "#{SIPMsg.max_message_size()} bytes) — refusing to frame further, the " <>
-        "connection goes down"])
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "#{what}: #{detail} (bound " <>
+            "#{SIPMsg.max_message_size()} bytes) — refusing to frame further, the " <>
+            "connection goes down"
+      )
 
       cb_fun.(what, headers)
-      %Depack{ buf | state: :refused, buffer: "", body: "", clen: 0 }
+      %Depack{buf | state: :refused, buffer: "", body: "", clen: 0}
     end
   end
 
@@ -229,44 +244,54 @@ defmodule SIP.Transport do
     def connect(state, transport, timeout \\ 10000) do
       ssl_options =
         [
-          versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
+          # Spécifie la version de TLS à utiliser
+          versions: [:"tlsv1.2"],
           # Cipher suites are configurable via :elixip2/:tls_ciphers; @tls_ciphers is the default.
           ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers),
           timeout: timeout,
           mode: :active
         ] ++ client_cert_options() ++ peer_verification_options(state)
 
-      sock = case transport do
-        :tcp ->
-          # socket2 expects a string hostname/IP, not an Erlang tuple
-          destip_str = SIP.NetUtils.ip2string(state.destip)
-          s = Socket.TCP.connect!(destip_str, state.destport, [ timeout: timeout, mode: :active ])
-          Socket.process!(s, self())
-          s
+      sock =
+        case transport do
+          :tcp ->
+            # socket2 expects a string hostname/IP, not an Erlang tuple
+            destip_str = SIP.NetUtils.ip2string(state.destip)
+            s = Socket.TCP.connect!(destip_str, state.destport, timeout: timeout, mode: :active)
+            Socket.process!(s, self())
+            s
 
-        :tls ->
-          s = Socket.SSL.connect!(state.destip, state.destport, ssl_options)
-          Socket.process!(s, self())
-          s
+          :tls ->
+            s = Socket.SSL.connect!(state.destip, state.destport, ssl_options)
+            Socket.process!(s, self())
+            s
 
-        :wss ->
-          # With the socket2 fork, mode: :active makes Socket.Web spawn a reader
-          # that delivers incoming frames as {:web, socket, data} to this process
-          # (see handle_info/2). ssl_options already carries mode: :active.
-          wss_options = Keyword.merge(ssl_options, protocol: ["sip"], secure: true)
-          Socket.Web.connect!(state.destip, state.destport, wss_options)
+          :wss ->
+            # With the socket2 fork, mode: :active makes Socket.Web spawn a reader
+            # that delivers incoming frames as {:web, socket, data} to this process
+            # (see handle_info/2). ssl_options already carries mode: :active.
+            wss_options = Keyword.merge(ssl_options, protocol: ["sip"], secure: true)
+            Socket.Web.connect!(state.destip, state.destport, wss_options)
 
-        :ws  -> Socket.Web.connect!(state.destip, state.destport, [ timeout: timeout, mode: :active, protocol: ["sip"] ])
+          :ws ->
+            Socket.Web.connect!(state.destip, state.destport,
+              timeout: timeout,
+              mode: :active,
+              protocol: ["sip"]
+            )
 
-        _ -> raise "Unsupported transport #{transport}"
-      end
+          _ ->
+            raise "Unsupported transport #{transport}"
+        end
 
       # Obtain local IP and port. Socket.local! has no implementation for
       # %Socket.Web{} (WS/WSS), so reach into the underlying socket directly.
       {local_ip, local_port} = local_address(sock)
 
       # Return the local IP and port inside the state map.
-      Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
+      Map.put(state, :localip, local_ip)
+      |> Map.put(:localport, local_port)
+      |> Map.put(:socket, sock)
     end
 
     @doc false
@@ -323,12 +348,12 @@ defmodule SIP.Transport do
           [server_name: domain]
 
         _ ->
-          Logger.debug([
+          Logger.debug(
             module: __MODULE__,
             message:
               "outbound TLS with no domain to verify against: the certificate will " <>
                 "have to carry the address in an iPAddress SAN"
-          ])
+          )
 
           []
       end
@@ -374,7 +399,8 @@ defmodule SIP.Transport do
 
     # Local address of a WS/WSS socket: Socket.Web wraps the transport socket,
     # which is an :ssl socket when secure (WSS) and a :gen_tcp port otherwise (WS).
-    defp local_address(%Socket.Web{socket: ssl}) when is_tuple(ssl) and elem(ssl, 0) == :sslsocket do
+    defp local_address(%Socket.Web{socket: ssl})
+         when is_tuple(ssl) and elem(ssl, 0) == :sslsocket do
       {:ok, addr} = :ssl.sockname(ssl)
       addr
     end
@@ -398,8 +424,9 @@ defmodule SIP.Transport do
     incoming message is therefore the socket's peer, not that hostname; this
     yields it as a real IP tuple, consistent with the sender address UDP passes.
     """
-    def remote_address(%Socket.Web{socket: ssl}) when is_tuple(ssl) and elem(ssl, 0) == :sslsocket,
-      do: unwrap_peer(:ssl.peername(ssl))
+    def remote_address(%Socket.Web{socket: ssl})
+        when is_tuple(ssl) and elem(ssl, 0) == :sslsocket,
+        do: unwrap_peer(:ssl.peername(ssl))
 
     def remote_address(%Socket.Web{socket: tcp}) do
       port = if is_tuple(tcp), do: elem(tcp, 1), else: tcp
@@ -435,7 +462,7 @@ defmodule SIP.Transport do
     node shutdown where the dialog registry is gone before us.
     """
     def notify_transport_down(tp_module, %{destip: destip, destport: destport}) do
-      SIP.Dialog.broadcast({ :transport_down, tp_module, destip, destport })
+      SIP.Dialog.broadcast({:transport_down, tp_module, destip, destport})
     rescue
       _ -> :ok
     catch
@@ -453,9 +480,14 @@ defmodule SIP.Transport do
       # A keep-alive is not a message and not an error: dropping it here, before the
       # parser, is what keeps three error lines per ping out of the server log.
       if SIPMsg.keepalive?(message) do
-        Logger.debug([module: __MODULE__, message: "#{tp_name}: keep-alive from " <>
-          "#{peer_str(destip, destport)} (#{byte_size(message)} bytes), dropping"])
-        { :noreply, state }
+        Logger.debug(
+          module: __MODULE__,
+          message:
+            "#{tp_name}: keep-alive from " <>
+              "#{peer_str(destip, destport)} (#{byte_size(message)} bytes), dropping"
+        )
+
+        {:noreply, state}
       else
         # Another protocol on our port is not a broken SIP message either: an RFC 5626
         # §4.4.2 STUN keep-alive, an ICE probe, a scanner. We send no Binding Response,
@@ -463,9 +495,14 @@ defmodule SIP.Transport do
         # names STUN, which is a lead, instead of blaming the SIP parser.
         case SIP.Stun.decode(message) do
           {:ok, stun} ->
-            Logger.debug([module: __MODULE__, message: "#{tp_name}: STUN #{SIP.Stun.describe(stun)}" <>
-              " from #{peer_str(destip, destport)}, dropping (not a STUN server)"])
-            { :noreply, state }
+            Logger.debug(
+              module: __MODULE__,
+              message:
+                "#{tp_name}: STUN #{SIP.Stun.describe(stun)}" <>
+                  " from #{peer_str(destip, destport)}, dropping (not a STUN server)"
+            )
+
+            {:noreply, state}
 
           :error ->
             process_sip_message(state, message, tp_name, tp_mod, socket, destip, destport)
@@ -497,90 +534,128 @@ defmodule SIP.Transport do
         do_process_incoming_message(state, message, tp_name, tp_mod, socket, destip, destport)
       rescue
         e ->
-          Logger.error([module: __MODULE__, message: "#{tp_name}: dropping an unparsable " <>
-            "message from #{inspect(destip)}:#{destport} (#{Exception.message(e)})"])
-          Logger.debug([module: __MODULE__, message: "offending message: #{inspect(message)}"])
-          { :noreply, state }
+          Logger.error(
+            module: __MODULE__,
+            message:
+              "#{tp_name}: dropping an unparsable " <>
+                "message from #{inspect(destip)}:#{destport} (#{Exception.message(e)})"
+          )
+
+          Logger.debug(
+            module: __MODULE__,
+            message: "offending message: #{inspect(SIPMsg.loggable(message))}"
+          )
+
+          {:noreply, state}
       end
     end
 
     # Display incoming SIP message for debug purposes.
     # We check that the message is a valid string to avoid Logger crash
 
+    # Lazy, and through SIPMsg.loggable/1: a received MESSAGE's content never
+    # reaches the log (chat-basic-plan C1b), and nothing is re-read unless the
+    # line is written.
     defp log_incoming_message(message, tp_name, destip, destport) do
-      dump = if String.valid?(message), do: message, else: inspect(message)
+      Logger.debug(fn ->
+        shown = SIPMsg.loggable(message)
+        dump = if String.valid?(shown), do: shown, else: inspect(shown)
 
-      Logger.debug(
         "#{tp_name}: Message received from #{peer_str(destip, destport)} <----\r\n" <>
           dump <> "\r\n-----------------"
-      )
+      end)
     end
 
     defp do_process_incoming_message(state, message, tp_name, tp_mod, socket, destip, destport) do
       case SIP.Transac.process_sip_message(message) do
-        :ok -> { :noreply, state }
+        :ok ->
+          {:noreply, state}
 
-        { :msg_too_large, parsed_msg } ->
+        {:msg_too_large, parsed_msg} ->
           refuse_too_large(state, parsed_msg, tp_name, destip, destport)
 
-        { :unsupported_content_encoding, parsed_msg } ->
+        {:unsupported_content_encoding, parsed_msg} ->
           refuse_body_encoding(state, parsed_msg, tp_name, destip, destport)
 
-        { :no_matching_transaction, parsed_msg } ->
+        {:no_matching_transaction, parsed_msg} ->
           # A request has a method atom (e.g. :REGISTER); a response carries
           # `method: false` (and `false` is itself an atom, so guard against it
           # explicitly — otherwise a response with no matching transaction would
           # wrongly take the request path and crash on the missing :ruri).
           if parsed_msg.method != false and is_atom(parsed_msg.method) do
-            ruri_with_tp_info = %SIP.Uri{ parsed_msg.ruri | destip: destip, destport: destport,
-                                          destproto: received_proto(tp_mod),
-                                          tp_module: tp_mod, tp_pid: self() }
-            msg = Map.put(parsed_msg, :ruri, ruri_with_tp_info )
+            ruri_with_tp_info = %SIP.Uri{
+              parsed_msg.ruri
+              | destip: destip,
+                destport: destport,
+                destproto: received_proto(tp_mod),
+                tp_module: tp_mod,
+                tp_pid: self()
+            }
+
+            msg = Map.put(parsed_msg, :ruri, ruri_with_tp_info)
 
             if parsed_msg.method == :ACK do
               # An ACK matching no transaction is the ACK of a 2xx (new branch,
               # RFC 3261 §13.2.2.4): it creates NO server transaction (§17.2.3).
               # Route it straight to the dialog, which forwards it to the app.
               SIP.Dialog.process_incoming_request(msg, nil, false)
-              { :noreply, state }
+              {:noreply, state}
             else
               # We need to start a new transaction. Use the transport's own local
               # IP/port (resolved at setup) rather than the socket's bound address,
               # which is the 0.0.0.0 wildcard for UDP. Socket.local/1 also returns
               # {:ok, {ip, port}}, so it cannot be destructured into {ip, port}.
-              { local_ip, local_port } = case socket do
-                { ip, port } -> { ip, port }
-                s when is_port(s) ->
-                  # Raw :gen_tcp port (inbound TCP connections): Socket.local/1 only
-                  # handles Socket structs, so use :inet.sockname directly.
-                  case :inet.sockname(s) do
-                    { :ok, {{0,0,0,0}, _} } -> { state.localip, state.localport }
-                    { :ok, {ip, port} }     -> { ip, port }
-                    _                       -> { state.localip, state.localport }
-                  end
-                s when is_tuple(s) and elem(s, 0) == :sslsocket ->
-                  # Raw :ssl socket (inbound TLS connections via TLSListener).
-                  case :ssl.sockname(s) do
-                    {:ok, {{0,0,0,0}, _}} -> {state.localip, state.localport}
-                    {:ok, {ip, port}}     -> {ip, port}
-                    _                     -> {state.localip, state.localport}
-                  end
-                _ -> case Socket.local(socket) do
-                        { :ok, {{0,0,0,0}, _port} } -> { state.localip, state.localport }
-                        { :ok, {ip, port}} -> { ip, port }
-                     end
-              end
-              {:ok, _tpid} = SIP.Transac.start_uas_transaction(msg, { local_ip, local_port, tp_name, state.upperlayer })
-              { :noreply, state }
+              {local_ip, local_port} =
+                case socket do
+                  {ip, port} ->
+                    {ip, port}
+
+                  s when is_port(s) ->
+                    # Raw :gen_tcp port (inbound TCP connections): Socket.local/1 only
+                    # handles Socket structs, so use :inet.sockname directly.
+                    case :inet.sockname(s) do
+                      {:ok, {{0, 0, 0, 0}, _}} -> {state.localip, state.localport}
+                      {:ok, {ip, port}} -> {ip, port}
+                      _ -> {state.localip, state.localport}
+                    end
+
+                  s when is_tuple(s) and elem(s, 0) == :sslsocket ->
+                    # Raw :ssl socket (inbound TLS connections via TLSListener).
+                    case :ssl.sockname(s) do
+                      {:ok, {{0, 0, 0, 0}, _}} -> {state.localip, state.localport}
+                      {:ok, {ip, port}} -> {ip, port}
+                      _ -> {state.localip, state.localport}
+                    end
+
+                  _ ->
+                    case Socket.local(socket) do
+                      {:ok, {{0, 0, 0, 0}, _port}} -> {state.localip, state.localport}
+                      {:ok, {ip, port}} -> {ip, port}
+                    end
+                end
+
+              {:ok, _tpid} =
+                SIP.Transac.start_uas_transaction(
+                  msg,
+                  {local_ip, local_port, tp_name, state.upperlayer}
+                )
+
+              {:noreply, state}
             end
           else
-            Logger.warning("Received a SIP #{parsed_msg.response} response from #{SIP.NetUtils.ip2string(destip)}:#{destport} not linked to any transaction. Dropping it")
-            { :noreply, state }
+            Logger.warning(
+              "Received a SIP #{parsed_msg.response} response from #{SIP.NetUtils.ip2string(destip)}:#{destport} not linked to any transaction. Dropping it"
+            )
+
+            {:noreply, state}
           end
 
         _ ->
-          Logger.error("Received an invalid SIP message from #{SIP.NetUtils.ip2string(destip)}:#{destport}")
-          { :noreply, state }
+          Logger.error(
+            "Received an invalid SIP message from #{SIP.NetUtils.ip2string(destip)}:#{destport}"
+          )
+
+          {:noreply, state}
       end
     end
 
@@ -601,7 +676,7 @@ defmodule SIP.Transport do
         msgstr -> send_outside_this_callback(msgstr, destip, destport, false)
       end
 
-      { :noreply, state }
+      {:noreply, state}
     end
 
     # RFC 3261 §21.4.13: the 415 MUST say what we can read, or the peer has no way
@@ -609,14 +684,14 @@ defmodule SIP.Transport do
     # oversized case, the message was framed correctly and only its body is
     # unreadable, so the stream is still in sync.
     defp refuse_body_encoding(state, parsed_msg, tp_name, destip, destport) do
-      fields = [ { "Accept-Encoding", SIP.Msg.BodyCoding.supported() } ]
+      fields = [{"Accept-Encoding", SIP.Msg.BodyCoding.supported()}]
 
       case refusal_response(parsed_msg, 415, tp_name, destip, destport, fields) do
         nil -> :ok
         msgstr -> send_outside_this_callback(msgstr, destip, destport, false)
       end
 
-      { :noreply, state }
+      {:noreply, state}
     end
 
     @doc """
@@ -644,24 +719,34 @@ defmodule SIP.Transport do
             # the very header that made us refuse. What matters is whether enough of
             # the request survived to answer it. The request is NOT dispatched
             # either way: it was never received in full.
-            { _parse_code, parsed_msg } ->
+            {_parse_code, parsed_msg} ->
               if answerable?(parsed_msg) do
                 refusal_response(parsed_msg, code, tp_name, destip, destport)
               end
 
-            _ -> nil
+            _ ->
+              nil
           end
         rescue
           e ->
             # Composing the answer must never be what keeps the connection open.
-            Logger.warning([module: __MODULE__, message: "#{tp_name}: cannot compose the " <>
-              "#{code} for #{peer_str(destip, destport)} (#{Exception.message(e)})"])
+            Logger.warning(
+              module: __MODULE__,
+              message:
+                "#{tp_name}: cannot compose the " <>
+                  "#{code} for #{peer_str(destip, destport)} (#{Exception.message(e)})"
+            )
+
             nil
         end
 
       if is_nil(msgstr) do
-        Logger.warning([module: __MODULE__, message: "#{tp_name}: closing the connection to " <>
-          "#{peer_str(destip, destport)} unanswered — nothing parseable to answer"])
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "#{tp_name}: closing the connection to " <>
+              "#{peer_str(destip, destport)} unanswered — nothing parseable to answer"
+        )
       end
 
       send_outside_this_callback(msgstr, destip, destport, true)
@@ -673,7 +758,7 @@ defmodule SIP.Transport do
     # parse on purpose.
     defp answerable?(msg) do
       is_map(msg) and is_atom(Map.get(msg, :method)) and
-        Enum.all?([ :via, :to, :from, :callid, :cseq ], &Map.has_key?(msg, &1))
+        Enum.all?([:via, :to, :from, :callid, :cseq], &Map.has_key?(msg, &1))
     end
 
     # Which refusal a message gets, and the log line that says why. A response and
@@ -683,20 +768,34 @@ defmodule SIP.Transport do
       cond do
         # A response carries `method: false`, and `false` is itself an atom.
         parsed_msg.method == false or not is_atom(parsed_msg.method) ->
-          Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping a SIP response " <>
-            "#{refusal_reason(code)} from #{peer_str(destip, destport)} " <>
-            "— a response is never answered"])
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "#{tp_name}: dropping a SIP response " <>
+                "#{refusal_reason(code)} from #{peer_str(destip, destport)} " <>
+                "— a response is never answered"
+          )
+
           nil
 
         parsed_msg.method == :ACK ->
-          Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping an ACK " <>
-            "#{refusal_reason(code)} from #{peer_str(destip, destport)} " <>
-            "— an ACK is never answered"])
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "#{tp_name}: dropping an ACK " <>
+                "#{refusal_reason(code)} from #{peer_str(destip, destport)} " <>
+                "— an ACK is never answered"
+          )
+
           nil
 
         true ->
-          Logger.warning([module: __MODULE__, message: "#{tp_name}: #{parsed_msg.method} from " <>
-            "#{peer_str(destip, destport)} #{refusal_reason(code)}, answering #{code}"])
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "#{tp_name}: #{parsed_msg.method} from " <>
+                "#{peer_str(destip, destport)} #{refusal_reason(code)}, answering #{code}"
+          )
 
           SIPMsg.serialize(SIP.Msg.Ops.reply_to_request(parsed_msg, code, nil, fields))
       end
@@ -734,10 +833,7 @@ defmodule SIP.Transport do
 
       :ok
     end
-
-
   end
-
 
   # ------------------------------------- Transport Public API ----------------------------------------
 
@@ -760,15 +856,39 @@ defmodule SIP.Transport do
     GenServer.call(tid, request)
   catch
     :exit, reason ->
-      Logger.debug(module: __MODULE__,
-        message: "transport #{inspect(tid)} is gone (#{inspect(reason)}): #{inspect(request)}")
+      Logger.debug(
+        module: __MODULE__,
+        message:
+          "transport #{inspect(tid)} is gone (#{inspect(reason)}): #{inspect(loggable_request(request))}"
+      )
+
       :transporterror
   end
 
-  @spec send_msg( pid(), binary(), binary() | tuple(), integer() ) :: any()
+  # A send carries the message's wire text: shown through SIPMsg.loggable/1 like
+  # every other dump of it.
+  defp loggable_request({:sendmsg, msgstr, destip, destport}) when is_binary(msgstr),
+    do: {:sendmsg, SIPMsg.loggable(msgstr), destip, destport}
+
+  defp loggable_request(request), do: request
+
+  @doc """
+  Is `tmod` a connection-oriented transport — one whose instance IS a connection
+  to one peer, and dies with it?
+
+  What makes a state learnt from a peer bound to the connection it came in on:
+  over TCP, TLS or WSS the peer is reachable over that connection and nothing
+  else, and its end is the peer going away. Over UDP one instance serves every
+  peer, and outlives all of them.
+  """
+  @spec connection_oriented?(module() | nil) :: boolean()
+  def connection_oriented?(tmod),
+    do: tmod in [SIP.Transport.TCP, SIP.Transport.TLS, SIP.Transport.WSS]
+
+  @spec send_msg(pid(), binary(), binary() | tuple(), integer()) :: any()
   @doc "Send a SIP message through a transport instance designated by its process ID"
   def send_msg(tid, msg, destip, destport) when is_bitstring(msg) and is_integer(destport) do
-    safe_call(tid, { :sendmsg, msg, destip, destport})
+    safe_call(tid, {:sendmsg, msg, destip, destport})
   end
 
   @doc """
@@ -780,7 +900,8 @@ defmodule SIP.Transport do
   end
 
   @doc "Create a local contact URI associated with a given transport instance"
-  @spec build_contact_uri(module(), pid()) :: %SIP.Uri{ domain: binary(), port: integer(), scheme: binary() } | nil
+  @spec build_contact_uri(module(), pid()) ::
+          %SIP.Uri{domain: binary(), port: integer(), scheme: binary()} | nil
   def build_contact_uri(tmod, tid), do: build_contact_uri(tmod, tid, nil)
 
   @doc """
@@ -850,14 +971,15 @@ defmodule SIP.Transport do
   @spec build_contact_uri(module(), pid(), :inet.ip_address() | nil) :: %SIP.Uri{} | nil
   def build_contact_uri(tmod, tid, peer_ip) do
     case get_local_ip_port(tid) do
-      { :ok, bound, localport } ->
+      {:ok, bound, localport} ->
         localip = publish_ip(bound, peer_ip)
         transport_str = apply(tmod, :transport_str, [])
+
         %SIP.Uri{
-         domain: localip,
-         port: localport,
-         scheme: "sip:",
-         proto: String.upcase(transport_str)
+          domain: localip,
+          port: localport,
+          scheme: "sip:",
+          proto: String.upcase(transport_str)
         }
         # The transport, ALWAYS, and in lower case. A Contact is the address a
         # peer sends its in-dialog requests to, and address means the three of
@@ -876,7 +998,8 @@ defmodule SIP.Transport do
       # The transport died before it could say where it is bound. There is no
       # honest Contact to build, and raising here would take the transaction —
       # and with it its dialog — down over a header (design §14.4, R3).
-      _err -> nil
+      _err ->
+        nil
     end
   end
 
@@ -901,23 +1024,29 @@ defmodule SIP.Transport do
   defp add_contact_header(new_contact, msg) do
     old_contact = Map.get(msg, :contact)
 
-    new_contact = if not is_nil(old_contact) do
-      # Transfert contact parameters if specified by the caller
-      # Override transport params
-      #
-      # BOTH parameter sets: the caller's binding parameters are header parameters
-      # (`expires`, `q`, a `+sip.instance`) and live in `hparams`. Carrying only
-      # `params` would drop the `expires` that SIP.Session.Registrar puts on the
-      # Contact of a REGISTER — the registration then asks for nothing.
-      %SIP.Uri{ new_contact | params: old_contact.params, hparams: old_contact.hparams,
-                userpart: old_contact.userpart, displayname: old_contact.displayname }
-      # …and the transport of the transport actually used, over whatever the
-      # caller had put there. Same value and same case as build_contact_uri/2
-      # above: one rule for the Contact we stamp, not two.
-      |> SIP.Uri.set_uri_param("transport", String.downcase(new_contact.proto))
-    else
-      new_contact
-    end
+    new_contact =
+      if not is_nil(old_contact) do
+        # Transfert contact parameters if specified by the caller
+        # Override transport params
+        #
+        # BOTH parameter sets: the caller's binding parameters are header parameters
+        # (`expires`, `q`, a `+sip.instance`) and live in `hparams`. Carrying only
+        # `params` would drop the `expires` that SIP.Session.Registrar puts on the
+        # Contact of a REGISTER — the registration then asks for nothing.
+        %SIP.Uri{
+          new_contact
+          | params: old_contact.params,
+            hparams: old_contact.hparams,
+            userpart: old_contact.userpart,
+            displayname: old_contact.displayname
+        }
+        # …and the transport of the transport actually used, over whatever the
+        # caller had put there. Same value and same case as build_contact_uri/2
+        # above: one rule for the Contact we stamp, not two.
+        |> SIP.Uri.set_uri_param("transport", String.downcase(new_contact.proto))
+      else
+        new_contact
+      end
 
     Map.put(msg, :contact, new_contact)
   end

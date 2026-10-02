@@ -67,8 +67,11 @@ defmodule SIP.Test.ListSubscription do
           notify_list(states)
           stay("partial push")
 
-        {:subscription_terminated, _ref, reason} -> scenario_success("#{reason}")
-        {:dialog_terminated, _d, _r} -> scenario_success("dialog gone")
+        {:subscription_terminated, _ref, reason} ->
+          scenario_success("#{reason}")
+
+        {:dialog_terminated, _d, _r} ->
+          scenario_success("dialog gone")
       after
         20_000 -> scenario_failure("the subscription never ended")
       end
@@ -150,7 +153,9 @@ defmodule SIP.Test.ListSubscription do
 
       # Carol is not: named all the same, so the watcher stops waiting for her.
       carol = resource(manifest, @carol)
-      assert [%Rlmi.Instance{state: :terminated, reason: "noresource", cid: nil}] = carol.instances
+
+      assert [%Rlmi.Instance{state: :terminated, reason: "noresource", cid: nil}] =
+               carol.instances
     end
 
     # A collection keyed on `{user, domain, event}` hands the state back under the
@@ -276,7 +281,9 @@ defmodule SIP.Test.ListSubscription do
       assert length(parts) == 8
 
       for buddy <- buddies do
-        assert [%Rlmi.Instance{state: :active, cid: part_cid}] = resource(manifest, buddy).instances
+        assert [%Rlmi.Instance{state: :active, cid: part_cid}] =
+                 resource(manifest, buddy).instances
+
         assert Enum.any?(parts, &(&1["Content-ID"] == "<" <> part_cid <> ">"))
       end
     end
@@ -413,7 +420,11 @@ defmodule SIP.Test.ListSubscription do
       contact: %SIP.Uri{scheme: "sip:", userpart: "bob", domain: "82.184.8.2", port: 53_936},
       event: "presence",
       accept:
-        Keyword.get(opts, :accept, "multipart/related, application/pidf+xml, application/rlmi+xml"),
+        Keyword.get(
+          opts,
+          :accept,
+          "multipart/related, application/pidf+xml, application/rlmi+xml"
+        ),
       expires: 3600,
       callid: SIP.Msg.Ops.generate_from_or_to_tag(),
       cseq: [1, :SUBSCRIBE],

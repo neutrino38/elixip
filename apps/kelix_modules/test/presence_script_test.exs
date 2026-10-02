@@ -340,6 +340,27 @@ defmodule Kelix.PresenceScriptTest do
       assert log =~ "NOTIFY presence to sip:alice@example.com about sip:bob@example.com: closed"
     end
 
+    # An accepted un-SUBSCRIBE sends no state: the line logged "open" for a NOTIFY
+    # that never left (Trix → kelixip, 2026-10-01).
+    test "an un-SUBSCRIBE logs no state", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+      submit(pid, dialog, subscribe())
+      assert_receive {:notified, _body, _}, 1000
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          submit(pid, dialog, subscribe(expires: 0))
+          assert_receive {:replied, 200, "OK", _, _}, 1000
+          Process.sleep(100)
+        end)
+
+      assert log =~
+               "about sip:bob@example.com: un-SUBSCRIBE accepted, the dialog sends the final NOTIFY"
+
+      refute log =~ "about sip:bob@example.com: closed"
+    end
+
     test "one PUBLISH becomes one NOTIFY on the watcher's dialog", %{subscribe: sub, publish: pub} do
       {:ok, dialog} = MockDialog.start_link(self())
       watcher = spawn_instance(sub, dialog, subscribe())
@@ -602,6 +623,103 @@ defmodule Kelix.PresenceScriptTest do
       assert [row] = Presence.watchers(@domain, @presentity)
       assert row.presentity_uri == bob_uri()
       assert Presence.watchers("visioassistance.net", "900020123") == []
+    end
+
+    # A refresh is sent inside the dialog, to our own Contact, and need not carry
+    # the list again: the list is the one the initial SUBSCRIBE named. Re-reading
+    # both off the refresh answered a NOTIFY naming nobody — the watcher's whole
+    # roster gone at the first refresh.
+    test "a refresh without the list keeps the list and its URI", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri(), @outsider])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      refresh =
+        req
+        |> Map.drop(["Require", "Content-Disposition", :body, :contenttype])
+        |> Map.merge(%{ruri: our_contact(), expires: 1800})
+
+      submit(pid, dialog, refresh)
+      assert_receive {:replied, 200, "OK", fields, _}, 1000
+      assert fields[:expires] == 1800
+      assert_receive {:notified, body, content_type}, 1000
+      {manifest, _parts} = read_list(body, content_type)
+
+      assert manifest.uri == "sip:rls@#{@domain}"
+
+      assert Enum.map(manifest.resources, & &1.uri) |> Enum.sort() ==
+               Enum.sort([bob_uri(), @outsider])
+
+      assert [_watcher] = Presence.watchers(@domain, @presentity)
+    end
+
+    # A refused refresh ends the request, not the list subscription (RFC 6665
+    # §4.1.2.2): the states of its entries are still pushed.
+    test "a refused refresh leaves the list notifying", %{rls: m, publish: pub} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri(), @outsider])
+      watcher = spawn_instance(m, dialog, req)
+
+      submit(watcher, dialog, req)
+      assert_receive {:notified, _full_state, _}, 1000
+
+      submit(watcher, dialog, Map.merge(req, %{ruri: our_contact(), expires: 30}))
+      assert_receive {:replied, 423, _, _, _}, 1000
+
+      publisher = spawn_instance(pub, dialog, publish())
+      submit(publisher, dialog, publish())
+      assert_receive {:replied, 200, _, _, _}, 1000
+
+      assert_receive {:notified, body, content_type}, 2000
+      {manifest, _parts} = read_list(body, content_type)
+      assert [%{uri: uri}] = manifest.resources
+      assert uri == bob_uri()
+    end
+
+    # How Linphone 6.2 ends its buddy list: `Expires: 0`, no body, but the
+    # `Content-Disposition: recipient-list` and `Require` of the initial SUBSCRIBE
+    # copied over. Read as a list it failed to supply, it was answered 400 and the
+    # subscription lingered until it expired.
+    test "an unsubscribe without the list, keeping its headers, is a 200", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri()])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      unsubscribe =
+        req
+        |> Map.drop([:body, :contenttype])
+        |> Map.merge(%{ruri: our_contact(), expires: 0})
+
+      submit(pid, dialog, unsubscribe)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+    end
+
+    # The same refresh as a UA that repeats its list sends it: the list URI is
+    # still the initial Request-URI, not our Contact.
+    test "a refresh repeating the list keeps the list URI", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri()])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      submit(pid, dialog, Map.put(req, :ruri, our_contact()))
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, body, content_type}, 1000
+      {manifest, _parts} = read_list(body, content_type)
+
+      assert manifest.uri == "sip:rls@#{@domain}"
+      assert Enum.map(manifest.resources, & &1.uri) == [bob_uri()]
     end
   end
 
@@ -890,6 +1008,11 @@ defmodule Kelix.PresenceScriptTest do
       submit(phone.pid, phone.dialog, register("10.0.0.9", expires: 0))
       assert_receive {:replied, 200, "OK", _, _}, 1000
       send(phone.pid, {:dialog_terminated, phone.dialog, :normal})
+
+      # its tuple leaves the composite: the watcher is told, still open
+      assert_receive {:notified, body, _}, 1000
+      assert body =~ "<basic>open</basic>"
+      refute body =~ "10.0.0.9"
       refute_receive {:notified, _body, _}, 300
 
       assert [%{contact: %SIP.Uri{domain: "10.0.0.10"}}] =
@@ -962,9 +1085,73 @@ defmodule Kelix.PresenceScriptTest do
     end
   end
 
+  # A refresh as a UA really sends it: inside the dialog, to the remote target —
+  # our own Contact, which names no user. The presentity is the initial
+  # SUBSCRIBE's; reading it off this Request-URI answered 404 to every refresh
+  # (Trix → kelixip, 2026-09-30), and the watcher lost the presence for good.
+  describe "a refresh sent to our Contact" do
+    setup do
+      serve_registrar_domain()
+    end
+
+    test "is granted, and the watcher still watches the same presentity", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      submit(pid, dialog, subscribe())
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      contact = %SIP.Uri{
+        domain: "[2001:db8::1]",
+        port: 8443,
+        params: %{"transport" => "wss"}
+      }
+
+      submit(pid, dialog, Map.put(subscribe(expires: 1800), :ruri, contact))
+      assert_receive {:replied, 200, "OK", fields, _}, 1000
+      assert fields[:expires] == 1800
+      assert_receive {:notified, _, _}, 1000
+      assert [_watcher] = Presence.watchers(@domain, @presentity)
+    end
+  end
+
+  # A refused refresh ends the request, not the subscription (RFC 6665 §4.1.2.2).
+  # The instance went back to waiting for a first SUBSCRIBE, where a state change
+  # is not handled: the watcher stopped being notified (Trix → kelixip, 2026-10-01).
+  describe "a refused refresh" do
+    setup do
+      serve_registrar_domain()
+    end
+
+    test "leaves the subscription notifying", %{subscribe: sub, publish: pub} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      watcher = spawn_instance(sub, dialog, subscribe())
+
+      submit(watcher, dialog, subscribe())
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      submit(watcher, dialog, subscribe(expires: 30))
+      assert_receive {:replied, 423, _, _, _}, 1000
+
+      publisher = spawn_instance(pub, dialog, publish())
+      submit(publisher, dialog, publish())
+      assert_receive {:replied, 200, _, _, _}, 1000
+
+      assert_receive {:notified, body, "application/pidf+xml"}, 1000
+      assert body =~ "open"
+    end
+  end
+
   # ── the list subscription's own fixtures ─────────────────────────────────────
 
   defp bob_uri, do: "sip:#{@presentity}@#{@domain}"
+
+  # Where an in-dialog refresh is sent: the remote target, our own Contact, which
+  # names no user.
+  defp our_contact,
+    do: %SIP.Uri{domain: "[2001:db8::1]", port: 8443, params: %{"transport" => "wss"}}
 
   # The SUBSCRIBE a client sends to open its buddy list: the list in the body,
   # the Request-URI naming the list and not a presentity.

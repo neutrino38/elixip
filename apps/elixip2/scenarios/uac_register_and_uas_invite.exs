@@ -68,7 +68,7 @@ defmodule UAC.RegisterThenWaitForCall do
         process_sip_reply(rsp, trans_pid)
         # Named as a sibling: a sub-scenario path is resolved against the directory of
         # the file that declares it (include semantics), not against the tester's cwd.
-        spawn_fsm "uas_invite.exs", as: :invite_uas
+        spawn_fsm("uas_invite.exs", as: :invite_uas)
         goto(registered, "200 OK")
 
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
@@ -88,7 +88,7 @@ defmodule UAC.RegisterThenWaitForCall do
   state registered do
     on_events do
       :register_refresh -> goto(refresh, "REGISTER refresh")
-      {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("UAC stopped gracefully")
+      {:scenario_ctl, :shutdown, _reason} -> scenario_aborted("UAC stopped gracefully")
       {:child_exit, :invite_uas, :success, _r} -> goto(unregistering, "call complete")
       {:child_exit, :invite_uas, :failure, _r} -> goto(unregistering, "call failure")
     after

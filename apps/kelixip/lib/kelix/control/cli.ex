@@ -563,7 +563,11 @@ defmodule Kelix.Control.CLI do
          # ● : the instance's journal is on (kelictl debug <id> on)
          if(Map.get(&1, :traced), do: "#{&1.id} ●", else: to_string(&1.id)),
          &1.domain,
-         to_string(&1.function),
+         # A conversation is one instance for many MESSAGEs: it says how many.
+         case Map.get(&1, :messages) do
+           nil -> to_string(&1.function)
+           n -> "#{&1.function} (#{n} msg)"
+         end,
          # WHICH scenario runs here — the file domains.toml routed to, the way
          # elixipp's --monitor names the scenario module. The pool knows it even
          # when the FSM view does not, so it is never empty for a live instance.
@@ -615,6 +619,7 @@ defmodule Kelix.Control.CLI do
   end
 
   defp render(:domain, {:ok, d}) do
+    # a node older than the chat function sends no `chat` key
     lines =
       [
         "domain:        #{d.name}",
@@ -627,7 +632,9 @@ defmodule Kelix.Control.CLI do
       ] ++
         format_presence(d.presence) ++
         [if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")] ++
-        format_dial_plan(d.dial_plan)
+        format_dial_plan(d.dial_plan) ++
+        [if(Map.get(d, :chat, []) == [], do: "chat:          (disabled)", else: "chat:")] ++
+        format_dial_plan(Map.get(d, :chat, []))
 
     {0, Enum.join(lines, "\n")}
   end
@@ -742,7 +749,17 @@ defmodule Kelix.Control.CLI do
 
     {0,
      table(
-       ["id", "scenario", "domain", "script", "written (UTC)", "instance", "SIP", "size", "kept for"],
+       [
+         "id",
+         "scenario",
+         "domain",
+         "script",
+         "written (UTC)",
+         "instance",
+         "SIP",
+         "size",
+         "kept for"
+       ],
        rows,
        &[
          to_string(&1.id),
@@ -1194,18 +1211,31 @@ defmodule Kelix.Control.CLI do
     Enum.map_join(Enum.sort(cfg), " ", fn {k, v} -> "#{k}=#{v}" end)
   end
 
-  # One line per event package, naming the script each method is routed to. Not
-  # numbered, unlike the dial-plan: the package is an exact key, so declaration
-  # order decides nothing.
+  # One line per SUBSCRIBE rule and one for PUBLISH, per event package. Within a
+  # package the SUBSCRIBE rules are first-match-wins, like the dial-plan, so they
+  # are listed in their order with the pattern each one matches.
   defp format_presence(blocks) do
-    pw = blocks |> Enum.map(&String.length(&1.event_package)) |> Enum.max(fn -> 0 end)
+    rows = Enum.flat_map(blocks, &presence_rows/1)
+    pw = rows |> Enum.map(&String.length(elem(&1, 0))) |> Enum.max(fn -> 0 end)
+    mw = rows |> Enum.map(&String.length(elem(&1, 1))) |> Enum.max(fn -> 0 end)
 
-    for b <- blocks,
-        {method, script} <- [{"SUBSCRIBE", b.subscribe}, {"PUBLISH", b.publish}],
+    for {package, method, script} <- rows,
         do:
-          "  #{String.pad_trailing(b.event_package, pw)} #{String.pad_trailing(method, 9)} -> " <>
+          "  #{String.pad_trailing(package, pw)} #{String.pad_trailing(method, mw)} -> " <>
             format_presence_script(script)
   end
+
+  defp presence_rows(b) do
+    subscribe =
+      for rule <- subscribe_rules(b.subscribe),
+          do: {b.event_package, "SUBSCRIBE #{rule.pattern || "(default)"}", rule}
+
+    subscribe ++ [{b.event_package, "PUBLISH", b.publish}]
+  end
+
+  # A node older than the SUBSCRIBE rules sends one script, not a list.
+  defp subscribe_rules(rules) when is_list(rules), do: rules
+  defp subscribe_rules(%{} = script), do: [Map.put(script, :pattern, nil)]
 
   # A package with no `publish` script: the method is not served on it, and the
   # router answers 405. Printed, because an operator wondering why their PUBLISH
@@ -1230,9 +1260,14 @@ defmodule Kelix.Control.CLI do
     |> Enum.with_index(1)
     |> Enum.map(fn {{pattern, r}, i} ->
       "  #{i}. #{String.pad_trailing(pattern, pw)} -> " <>
-        "#{String.pad_trailing(r.script, sw)}  #{format_script_module(r)}"
+        "#{String.pad_trailing(r.script, sw)}  #{format_script_module(r)}" <>
+        format_idle_timeout(Map.get(r, :idle_timeout))
     end)
   end
+
+  # A chat rule's silence before its conversation ends; a call rule has none.
+  defp format_idle_timeout(seconds) when is_integer(seconds), do: "  idle #{seconds}s"
+  defp format_idle_timeout(_), do: ""
 
   # A script the registry has never loaded has no module yet — say so rather than
   # printing a blank, which would read as "no module" instead of "not loaded".

@@ -1,6 +1,6 @@
 # Packaging kelixip / elixipp (design §12.1, §15 P10)
 
-Produces five packages — RPM for Alma Linux 9, deb for Ubuntu/Debian (elixipp:
+Produces the packages below — RPM for Alma Linux 9, deb for Ubuntu/Debian (elixipp:
 RPM only so far) — from one `mix release` plus one `mix escript.build`:
 
 | Package (RPM / deb) | Contents |
@@ -12,6 +12,8 @@ RPM only so far) — from one `mix release` plus one `mix escript.build`:
 | `kelixip-mod-presence` | `Kelix.Mod.Presence` bytecode — the presence collection, with its reference scripts |
 | `kelixip-mod-mcu_presence` / `kelixip-mod-mcu-presence` | `Kelix.Mod.McuPresence` bytecode — conference rooms as presentities; requires the two above |
 | `kelixip-mod-dialog_state` / `kelixip-mod-dialog-state` | `Kelix.Mod.DialogState` bytecode — the call occupancy of the served users (BLF, on-the-phone); requires `kelixip-mod-presence` |
+| `kelixip-mod-silo` | `Kelix.Mod.Silo` bytecode — store-and-forward of instant messages, with its DDL (`/usr/share/kelixip/sql/silo/`) and the reference chat scripts |
+| `kelixip-mod-conversation` | `Kelix.Mod.Conversation` bytecode — hibernated chat conversations, with its DDL (`/usr/share/kelixip/sql/conversation/`) |
 | `elixipp` | the test-tool escript (`/usr/bin/elixipp`) + `ELIXIPP.md`/`FSL.md` |
 
 Each module package carries **its own document** under `/usr/share/doc/<package>/`,

@@ -460,6 +460,13 @@ defmodule Kelix.ControlAPI do
   defp jsonable(%_{} = struct), do: struct |> Map.from_struct() |> jsonable()
   defp jsonable(%{} = map), do: Map.new(map, fn {k, v} -> {jsonable_key(k), jsonable(v)} end)
   defp jsonable(list) when is_list(list), do: Enum.map(list, &jsonable/1)
+  # A monitor row carries its instance's pid: meaningful inside the node, and a
+  # crash of the whole response for Jason, which encodes no pid. GET /scenarios
+  # answered 500 whenever a scenario was running — that is, whenever it had
+  # something to say. Such a term travels as the text an operator reads in logs.
+  defp jsonable(v) when is_pid(v) or is_reference(v) or is_port(v) or is_function(v),
+    do: inspect(v)
+
   defp jsonable(v), do: v
 
   defp jsonable_key(k) when is_atom(k) and k not in [nil, true, false], do: to_string(k)

@@ -11,10 +11,12 @@
 #
 # A request is routed by its R-URI host (falling back to the To host); no match is
 # a 404. The method then selects the function — REGISTER -> registrar,
-# INVITE -> calls, SUBSCRIBE/PUBLISH -> presence — and a function with no block on
-# that domain is a 405. For presence there is one more step: the request's `Event`
-# header selects which [[domain.presence]] block serves it, and a package this
-# domain declares none for is answered 489 before any script runs.
+# INVITE -> calls, SUBSCRIBE/PUBLISH -> presence, MESSAGE -> chat,
+# OPTIONS -> [[domain.options]] — and a function with no block on that domain is a
+# 405 (OPTIONS excepted: the node answers it itself). For presence there is one more
+# step: the request's `Event` header selects which [[domain.presence]] block serves
+# it, and a package this domain declares none for is answered 489 before any script
+# runs.
 
 #[[domain]]
 #name    = "example.com"
@@ -30,7 +32,9 @@
 #  [domain.registrar]
 #  script = "registrar.exs"               # or "registrar-presence.exs": the same, and
 #                                         # a subscriber that does not PUBLISH is open
-#                                         # while registered (kelixip-mod-presence)
+#                                         # while registered (kelixip-mod-presence);
+#                                         # or "registrar-chat.exs": that, plus the
+#                                         # delivery of stored messages (kelixip-mod-silo)
 #  #default_expires = 3600       # per-domain override of [module.registrar]
 #  #min_expires     = 60
 #
@@ -39,8 +43,29 @@
 #  # 405 to a PUBLISH. Both scripts need kelixip-mod-presence installed.
 #  [[domain.presence]]
 #  event-package = "presence"
-#  subscribe     = "presence-subscribe.exs"
 #  publish       = "presence-publish.exs"
+#  # SUBSCRIBE is routed like a call: rules on the R-URI user part, first match
+#  # wins, no match is a 404. `subscribe = "presence-subscribe.exs"` alone is the
+#  # same as the catch-all rule.
+#  # A client whose list URI is a setting can use one on this domain: a SUBSCRIBE
+#  # to sip:rls@example.com then reaches the list script.
+#    #[[domain.presence.subscribe]]
+#    #pattern = "rls"
+#    #script  = "presence-rls.exs"
+#
+#    [[domain.presence.subscribe]]
+#    default = true
+#    script  = "presence-subscribe.exs"
+#
+#  # Chat (page-mode MESSAGE, RFC 3428): the dial-plan's shape, on the R-URI
+#  # user-part. One instance serves a conversation — same sender, same recipient,
+#  # same connection — until it is silent `idle_timeout` seconds. p2p-chat.exs
+#  # authenticates the sender, relays to every device of the recipient and
+#  # stores what nobody took: kelixip-mod-silo, with registrar-chat.exs above.
+#  [[domain.chat]]
+#  default      = true
+#  script       = "p2p-chat.exs"
+#  idle_timeout = 300
 #
 # A buddy list (RFC 4662) is a SUBSCRIBE to a LIST URI, and clients hard-code
 # which one: Linphone sends `sip:rls@sip.linphone.org` whatever the account's own
@@ -65,6 +90,25 @@
 #  [[domain.call]]
 #  default = true
 #  script  = "default_call.exs"
+#
+#  # OPTIONS: with no block the node answers every OPTIONS itself (200, or 503
+#  # while draining). A rule hands it to a script: `keepalive = true` for an R-URI
+#  # with no user-part (the load balancer's ping), then patterns in order on the
+#  # user-part, as in the dial-plan. The drain, an unknown host and `sip:domain`
+#  # with no keepalive rule are always answered by the node. `*` is literal in a
+#  # pattern: write `conf-.`, not `conf-*`. Each instance counts in max_calls.
+#  [[domain.options]]
+#  keepalive = true
+#  script    = "options-keepalive.exs"
+#
+#  [[domain.options]]
+#  pattern = "conf-."
+#  script  = "options-mcu.exs"          # an example: no such script is shipped
+#
+#  [[domain.options]]
+#  default = true
+#  script  = "options-probe-ua.exs"     # 407, then relayed to the registered UA;
+#                                       # needs kelixip-mod-registrar and -auth_db
 
 # The usrloc store's own block. It lives HERE, not in config.toml, so it is
 # reloadable alongside the domains it serves — a stray copy in config.toml is

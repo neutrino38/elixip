@@ -116,6 +116,24 @@ defmodule Kelix.Domains do
     end
   end
 
+  @doc """
+  The nominal name of the domain `host` belongs to — an alias folds to it — or
+  `host` itself when no domain claims it, or when the table is not running (a
+  unit test). What a module keys per-domain state on, so an alias and the name
+  it stands for share one store.
+  """
+  @spec nominal(String.t() | nil) :: String.t() | nil
+  def nominal(nil), do: nil
+
+  def nominal(host) when is_binary(host) do
+    with pid when not is_nil(pid) <- Process.whereis(__MODULE__),
+         %Domain{name: name} <- lookup(current(), host) do
+      name
+    else
+      _ -> host
+    end
+  end
+
   # ── GenServer callbacks ──────────────────────────────────────────────────────
 
   @impl true
@@ -179,7 +197,7 @@ defmodule Kelix.Domains do
 
   @doc """
   Every script a snapshot refers to — the `registrar`/`presence` block's `script`
-  and each dial-plan rule's — as `[{name, context}]`, deduped by name (first
+  and each dial-plan, chat and options rule's — as `[{name, context}]`, deduped by name (first
   reference wins). `context` says *where* the reference comes from, so an error
   message can name the domain and the rule an operator has to go and fix.
   """
@@ -195,12 +213,14 @@ defmodule Kelix.Domains do
       for block <- List.wrap(d.registrar),
           do: {block.script, "domain #{d.name} [domain.registrar]"}
 
-    # Both scripts of every block: a node whose `publish` script is missing serves
+    # Every script of every block: a node whose `publish` script is missing serves
     # SUBSCRIBE and dies on the first PUBLISH, which is exactly what the load-time
     # contract exists to catch.
     presence_refs =
       for block <- d.presence,
-          {key, script} <- [subscribe: block.subscribe, publish: block.publish],
+          {key, script} <-
+            Enum.map(block.subscribe, &{"subscribe rule #{rule_label(&1)}", &1.script}) ++
+              [{"publish", block.publish}],
           is_binary(script),
           do:
             {script,
@@ -211,7 +231,20 @@ defmodule Kelix.Domains do
       for rule <- d.dial_plan,
           do: {rule.script, "domain #{d.name} call rule #{rule_label(rule)}"}
 
-    registrar_refs ++ presence_refs ++ call_refs
+    chat_refs =
+      for rule <- d.chat,
+          do: {rule.script, "domain #{d.name} chat rule #{rule_label(rule)}"}
+
+    options_refs =
+      for script <- List.wrap(d.options_keepalive),
+          do: {script, "domain #{d.name} options rule keepalive = true"}
+
+    options_refs =
+      options_refs ++
+        for rule <- d.options,
+            do: {rule.script, "domain #{d.name} options rule #{rule_label(rule)}"}
+
+    registrar_refs ++ presence_refs ++ call_refs ++ chat_refs ++ options_refs
   end
 
   defp rule_label(%DialRule{default?: true}), do: "default = true"
@@ -310,6 +343,8 @@ defmodule Kelix.Domains do
          {:ok, registrar} <- opt_fn_block(dm, "registrar", @registrar_keys, name),
          {:ok, presence} <- parse_presence(Map.get(dm, "presence", []), name),
          {:ok, dial_plan} <- parse_dial_plan(Map.get(dm, "call", []), name),
+         {:ok, chat} <- parse_dial_plan(Map.get(dm, "chat", []), name, "chat"),
+         {:ok, {keepalive, options}} <- parse_options(Map.get(dm, "options", []), name),
          :ok <- check_domain_keys(dm, name) do
       {:ok,
        %Domain{
@@ -318,14 +353,17 @@ defmodule Kelix.Domains do
          max_calls: max_calls,
          registrar: registrar,
          presence: presence,
-         dial_plan: dial_plan
+         dial_plan: dial_plan,
+         chat: chat,
+         options: options,
+         options_keepalive: keepalive
        }}
     end
   end
 
   defp parse_domain(_), do: {:error, "each [[domain]] must be a table"}
 
-  @domain_keys ~w(name aliases max_calls registrar presence call)
+  @domain_keys ~w(name aliases max_calls registrar presence call chat options)
   defp check_domain_keys(dm, name) do
     case Map.keys(dm) -- @domain_keys do
       [] -> :ok
@@ -334,36 +372,114 @@ defmodule Kelix.Domains do
   end
 
   # ── dial-plan (ordered; first-match-wins; one catch-all, last) ───────────────
+  #
+  # `[[domain.call]]` and `[[domain.chat]]` are the same list — a pattern on the
+  # R-URI user part, first match wins, `default = true` last — so they are one
+  # parser, and `key` is only what the messages call the block.
 
-  defp parse_dial_plan(rules, domain) when is_list(rules) do
-    with {:ok, parsed} <- reduce_while_ok(rules, fn r -> parse_rule(r, domain) end),
-         :ok <- validate_catch_all(parsed, domain) do
+  defp parse_dial_plan(rules, domain, key \\ "call")
+
+  defp parse_dial_plan(rules, domain, key) when is_list(rules) do
+    with {:ok, parsed} <- reduce_while_ok(rules, fn r -> parse_rule(r, domain, key) end),
+         :ok <- validate_catch_all(parsed, domain, key) do
       {:ok, parsed}
     end
   end
 
-  defp parse_dial_plan(_, domain),
-    do: {:error, "domain #{inspect(domain)}: `call` must be an array of tables"}
+  defp parse_dial_plan(_, domain, key),
+    do: {:error, "domain #{inspect(domain)}: `#{key}` must be an array of tables"}
 
-  defp parse_rule(%{"default" => true} = r, domain) do
-    with {:ok, script} <- req_string(r, "script", "call rule (domain #{domain})"),
-         :ok <- reject_keys(r, ~w(default script), "default call rule (domain #{domain})") do
-      {:ok, %DialRule{default?: true, script: script}}
+  defp parse_rule(%{"default" => true} = r, domain, key) do
+    what = "default #{key} rule (domain #{domain})"
+
+    with {:ok, script} <- req_string(r, "script", "#{key} rule (domain #{domain})"),
+         :ok <- reject_keys(r, ~w(default script) ++ rule_keys(key), what),
+         {:ok, rule} <-
+           parse_conversation(%DialRule{default?: true, script: script}, r, key, what) do
+      {:ok, rule}
     end
   end
 
-  defp parse_rule(%{"pattern" => pattern} = r, domain) when is_binary(pattern) do
-    with {:ok, script} <- req_string(r, "script", "call rule (domain #{domain})"),
-         :ok <- reject_keys(r, ~w(pattern script), "call rule (domain #{domain})"),
-         {:ok, matcher} <- compile_pattern(pattern, domain) do
-      {:ok, %DialRule{matcher: matcher, raw: pattern, script: script}}
+  defp parse_rule(%{"pattern" => pattern} = r, domain, key) when is_binary(pattern) do
+    what = "#{key} rule (domain #{domain})"
+
+    with {:ok, script} <- req_string(r, "script", what),
+         :ok <- reject_keys(r, ~w(pattern script) ++ rule_keys(key), what),
+         {:ok, matcher} <- compile_pattern(pattern, domain),
+         rule = %DialRule{matcher: matcher, raw: pattern, script: script},
+         {:ok, rule} <- parse_conversation(rule, r, key, what) do
+      {:ok, rule}
     end
   end
 
-  defp parse_rule(_, domain),
+  defp parse_rule(_, domain, "options"),
     do:
       {:error,
-       "domain #{inspect(domain)}: each [[domain.call]] needs `pattern = \"...\"` or `default = true`"}
+       "domain #{inspect(domain)}: each [[domain.options]] needs `keepalive = true`, " <>
+         "`pattern = \"...\"` or `default = true`"}
+
+  defp parse_rule(_, domain, key),
+    do:
+      {:error,
+       "domain #{inspect(domain)}: each [[domain.#{key}]] needs `pattern = \"...\"` or `default = true`"}
+
+  # A chat rule says how long one of its conversations lasts silent
+  # (chat-basic-plan, C3b). A call rule has no such thing: a call is its dialog.
+  defp rule_keys("chat"), do: ~w(idle_timeout)
+  defp rule_keys(_key), do: []
+
+  @default_idle_timeout 300
+
+  defp parse_conversation(rule, r, "chat", what) do
+    with {:ok, idle} <- idle_timeout(Map.get(r, "idle_timeout", @default_idle_timeout), what) do
+      {:ok, %DialRule{rule | idle_timeout: idle}}
+    end
+  end
+
+  defp parse_conversation(rule, _r, _key, _what), do: {:ok, rule}
+
+  defp idle_timeout(value, _what) when is_integer(value) and value > 0, do: {:ok, value}
+
+  defp idle_timeout(value, what),
+    do:
+      {:error,
+       "#{what}: `idle_timeout` must be a positive integer (seconds), got #{inspect(value)}"}
+
+  # ── OPTIONS (one keepalive rule for `sip:domain`, then a dial-plan) ───────────
+
+  # The keepalive rule serves an R-URI with no user-part, which no pattern is ever
+  # tried against, so its position among the others does not matter.
+  defp parse_options(rules, domain) when is_list(rules) do
+    {keepalives, others} = Enum.split_with(rules, &match?(%{"keepalive" => _}, &1))
+
+    with {:ok, keepalive} <- parse_keepalive(keepalives, domain),
+         {:ok, parsed} <- reduce_while_ok(others, &parse_rule(&1, domain, "options")),
+         :ok <- validate_catch_all(parsed, domain, "options") do
+      {:ok, {keepalive, parsed}}
+    end
+  end
+
+  defp parse_options(_, domain),
+    do: {:error, "domain #{inspect(domain)}: `options` must be an array of tables"}
+
+  defp parse_keepalive([], _domain), do: {:ok, nil}
+
+  defp parse_keepalive([%{"keepalive" => true} = r], domain) do
+    ctx = "keepalive options rule (domain #{domain})"
+
+    with {:ok, script} <- req_string(r, "script", ctx),
+         :ok <- reject_keys(r, ~w(keepalive script), ctx) do
+      {:ok, script}
+    end
+  end
+
+  defp parse_keepalive([_], domain),
+    do: {:error, "domain #{inspect(domain)}: `keepalive` must be `true` or absent"}
+
+  defp parse_keepalive(_, domain),
+    do:
+      {:error,
+       "domain #{inspect(domain)}: at most one [[domain.options]] rule has keepalive = true"}
 
   defp compile_pattern(pattern, domain) do
     case DialPlan.compile(pattern) do
@@ -376,7 +492,7 @@ defmodule Kelix.Domains do
     end
   end
 
-  defp validate_catch_all(rules, domain) do
+  defp validate_catch_all(rules, domain, key) do
     case Enum.split_while(rules, &(not &1.default?)) do
       {_before, []} ->
         :ok
@@ -386,7 +502,7 @@ defmodule Kelix.Domains do
 
       {_before, [_default | _after]} ->
         {:error,
-         "domain #{inspect(domain)}: the catch-all (default = true) must be the last call rule"}
+         "domain #{inspect(domain)}: the catch-all (default = true) must be the last #{key} rule"}
     end
   end
 
@@ -415,9 +531,10 @@ defmodule Kelix.Domains do
   defp parse_presence_block(%{} = block, domain) do
     ctx = "domain #{domain} [[domain.presence]]"
 
-    with :ok <- reject_keys(block, @presence_keys, ctx),
+    with :ok <- reject_lists(block, ctx),
+         :ok <- reject_keys(block, @presence_keys, ctx),
          {:ok, package} <- req_string(block, "event-package", ctx),
-         {:ok, subscribe} <- req_string(block, "subscribe", ctx),
+         {:ok, subscribe} <- parse_subscribe(Map.get(block, "subscribe"), domain, ctx),
          {:ok, publish} <- opt_script(block, "publish", ctx) do
       {:ok,
        %PresenceBlock{
@@ -447,6 +564,34 @@ defmodule Kelix.Domains do
         {:error,
          "domain #{inspect(domain)}: event package #{inspect(package)} is served by " <>
            "more than one [[domain.presence]] block"}
+    end
+  end
+
+  # The SUBSCRIBE rules are the dial-plan's reading, on the R-URI of a SUBSCRIBE:
+  # a resource list, a conference room range and the domain's users are three
+  # rules of one list. A plain string is the one-rule shorthand, a catch-all.
+  defp parse_subscribe(script, _domain, _ctx) when is_binary(script) and script != "",
+    do: {:ok, [%DialRule{default?: true, script: script}]}
+
+  defp parse_subscribe([_ | _] = rules, domain, _ctx),
+    do: parse_dial_plan(rules, domain, "presence.subscribe")
+
+  defp parse_subscribe(_other, _domain, ctx),
+    do:
+      {:error,
+       "#{ctx}: `subscribe` is required — a script, or [[domain.presence.subscribe]] " <>
+         "rules (`pattern` or `default = true`, and `script`)"}
+
+  # `lists` / `list-subscribe` routed a resource list before SUBSCRIBE had rules.
+  # Named, rather than refused as two unknown keys, so the operator reads what
+  # replaces them.
+  defp reject_lists(block, ctx) do
+    if Map.has_key?(block, "lists") or Map.has_key?(block, "list-subscribe") do
+      {:error,
+       "#{ctx}: `lists` / `list-subscribe` are gone — declare the list as a SUBSCRIBE " <>
+         "rule: [[domain.presence.subscribe]] pattern = \"rls\" script = \"presence-rls.exs\""}
+    else
+      :ok
     end
   end
 
