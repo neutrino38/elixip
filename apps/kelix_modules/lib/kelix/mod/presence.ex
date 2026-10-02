@@ -54,9 +54,10 @@ defmodule Kelix.Mod.Presence do
 
   A presence state is first what its presentity PUBLISHed. When nothing live is
   published, it is the state another module **reported** for it (see *Reported
-  states*); failing that, **open** while the presentity is registered — which the
-  registrar script says, through `registration_changed/1` and
-  `registration_ended/1` — and, on a domain that has a registrar, **closed** for a
+  states*); failing that, **open** while the presentity is registered — one open
+  tuple per registered device, which the registrar script reports through
+  `registration_changed/1` and `registration_ended/1` — and, on a domain that has
+  a registrar, **closed** for a
   subscriber `Kelix.Mod.AuthDb` knows. Anywhere else — a domain with no
   registrar, a domain this node does not serve, a user nobody provisioned — there
   is no state, `nil`, which a notifier reports as `noresource`.
@@ -69,8 +70,9 @@ defmodule Kelix.Mod.Presence do
   time (docs/design/dialog-state-plan.md, decision 7). Any other package has no
   state.
 
-  A registration that opens or closes a watched resource nobody publishes is
-  pushed like a publication. The collection never follows the registrar on its
+  A registration that changes what a watcher is told — a resource nobody
+  publishes opening or closing, a device without a publication joining or leaving
+  the composite — is pushed like a publication. The collection never follows the registrar on its
   own: a domain whose registrar script does not report (`registrar.exs`) shows its
   subscribers closed.
 
@@ -113,6 +115,11 @@ defmodule Kelix.Mod.Presence do
       soon as one of his devices is. Each publication's tuples are named after
       its `ruid`, minted on its initial PUBLISH and kept across its refreshes and
       modifications, so a device that did not move keeps its tuple ids;
+    * a **registered device that publishes nothing** adds one open tuple, its
+      binding's contact: Bob is reachable on the desk phone that only registers
+      while his mobile publishes. A device is told publishing by the flow, as a
+      publisher is (`SIP.Publication.published_over?/2`): a binding whose flow
+      carries a live publication adds nothing — the publication speaks for it;
     * the **person** — activity and note — is one state per resource, held here:
       every publication that carries a document sets it, and a document with no
       activity clears it (the field clients say "available" by saying nothing).
@@ -139,8 +146,9 @@ defmodule Kelix.Mod.Presence do
   #   states     %{domain => :ets.tid}  resource => [%SIP.Publication{}], one per etag
   #   watchers   %{domain => :ets.tid}  resource => %{pid => %SIP.Subscription{}}
   #   mons       %{monitor_ref => {domain, resource, pid}}  watcher instances
-  #   registered MapSet of `presence` resources whose presentity holds a binding,
-  #              as the registrar script reported it
+  #   registered %{resource => [device]}, the `presence` resources whose presentity
+  #              holds a binding that reaches a device, as the registrar script
+  #              reported it; a device is %{key, contact, flow} (`device/1`)
   #   reported   %{resource => %{source => %{doc, pid, seq, known?}}}, the states
   #              `report/5` stated; `known?` is whether the subscriber base knows
   #              the presentity, asked in the reporter's process at report time
@@ -155,7 +163,7 @@ defmodule Kelix.Mod.Presence do
   defstruct states: %{},
             watchers: %{},
             mons: %{},
-            registered: MapSet.new(),
+            registered: %{},
             reported: %{},
             reporters: %{},
             connections: %{},
@@ -855,11 +863,16 @@ defmodule Kelix.Mod.Presence do
   # of one AOR reporting at once are then answered in turn, each reading the store
   # as the other left it, and the last push is the true one.
   def handle_call({:registration, {user, domain, _event} = resource, ending_dialog}, _from, state) do
-    open? =
-      Code.ensure_loaded?(Kelix.Mod.Registrar) and
-        Kelix.Mod.Registrar.registered?(domain, user, ending_dialog)
+    devices =
+      if Code.ensure_loaded?(Kelix.Mod.Registrar),
+        do:
+          Kelix.Mod.Registrar.devices(domain, user, ending_dialog)
+          |> Enum.map(&device/1)
+          |> Enum.uniq_by(& &1.key)
+          |> Enum.sort_by(& &1.key),
+        else: []
 
-    {:reply, :ok, set_registered(state, resource, open?)}
+    {:reply, :ok, set_registered(state, resource, devices)}
   end
 
   def handle_call({:unpublish, resource, flow}, _from, state),
@@ -1216,28 +1229,51 @@ defmodule Kelix.Mod.Presence do
     :ok
   end
 
-  # A registration moved. It is news only when the status actually changed — the
-  # registrar script reports every refreshing REGISTER — and only for a resource
-  # nobody publishes nor reports: both win over the registration.
-  defp set_registered(state, resource, open?) do
-    if MapSet.member?(state.registered, resource) == open? do
+  # A registration moved. It is news only when what a watcher is told changed —
+  # the registrar script reports every refreshing REGISTER, and a resource that
+  # publishes or is reported shows its devices only beside its publications.
+  defp set_registered(state, resource, devices) do
+    if Map.get(state.registered, resource, []) == devices do
       state
     else
+      before = known_state(state, resource)
+
       registered =
-        if open?,
-          do: MapSet.put(state.registered, resource),
-          else: MapSet.delete(state.registered, resource)
+        if devices == [],
+          do: Map.delete(state.registered, resource),
+          else: Map.put(state.registered, resource, devices)
 
       state = %{state | registered: registered}
       watchers = watchers_of(state, resource)
+      now = known_state(state, resource)
 
-      if map_size(watchers) > 0 and current_doc(state, resource) == nil and
-           reported_doc(state, resource) == nil,
-         do: push(watchers, resource, known_state(state, resource))
+      if map_size(watchers) > 0 and not same_state?(before, now),
+        do: push(watchers, resource, now)
 
       broadcast_panel(state, resource)
       state
     end
+  end
+
+  # One registered device, as the composite needs it: the contact its tuple
+  # offers, the flow that tells whether it publishes, and a stable key naming its
+  # tuple — `SIP.Msg.Ops.device_key/1`: the RFC 5626 instance when it sent one
+  # (it survives an address change), else the contact. Hashed: neither is an XML
+  # `NCName`.
+  defp device(%Kelix.Mod.Registrar.Contact{} = binding) do
+    {:ok, contact} = SIP.Uri.serialize_ruri(binding.contact)
+    seed = SIP.Msg.Ops.device_key(binding.contact)
+
+    %{
+      key:
+        "r" <> (:crypto.hash(:sha256, seed) |> Base.encode16(case: :lower) |> binary_part(0, 12)),
+      contact: contact,
+      flow: %{
+        received: binding.received,
+        tp_pid: binding.flow_pid,
+        tp_module: binding.flow_module
+      }
+    }
   end
 
   # ── reported states ─────────────────────────────────────────────────────────
@@ -1334,7 +1370,8 @@ defmodule Kelix.Mod.Presence do
   # presentity, closed on a domain with a registrar. On `dialog`: no call.
   defp resolved_state(state, resource, known?) do
     current_doc(state, resource) || reported_doc(state, resource) ||
-      status_doc(resource, implied_status(state, resource, known?))
+      registration_doc(state, resource) ||
+      status_doc(resource, implied_status(resource, known?))
   end
 
   # The state as the collection alone can tell it, for a resource known to exist
@@ -1346,7 +1383,7 @@ defmodule Kelix.Mod.Presence do
   # completes in the caller's process with `unpublished_state/1`.
   defp held_state(state, resource) do
     current_doc(state, resource) || reported_doc(state, resource) ||
-      if MapSet.member?(state.registered, resource), do: status_doc(resource, :open)
+      registration_doc(state, resource)
   end
 
   # The same, for a watcher that just subscribed: a presentity that neither
@@ -1355,28 +1392,26 @@ defmodule Kelix.Mod.Presence do
   # (the facades call this on a `nil` the collection answered) — never in the
   # collection's, where every other watcher and publisher would wait on it.
   defp unpublished_state(resource),
-    do: status_doc(resource, implied_status(nil, resource, false))
+    do: status_doc(resource, implied_status(resource, false))
 
-  # What the package says of a presentity nobody publishes nor reports. On
-  # `presence`: `:open` / `:closed`, or nil on a domain with no registrar (or not
+  # What the package says of a presentity nobody publishes, reports nor registers.
+  # On `presence`: `:closed`, or nil on a domain with no registrar (or not
   # served), or for a user the subscriber base does not know. On `dialog`: `:idle`
   # for a subscriber the base knows — the registration says nothing about a call
   # — else nil. Any other package: nil.
-  defp implied_status(state, {user, domain, "presence"} = resource, known?)
+  defp implied_status({user, domain, "presence"}, known?)
        when is_binary(user) and is_binary(domain) do
-    cond do
-      state != nil and MapSet.member?(state.registered, resource) -> :open
-      registrar_domain?(domain) and (known? or subscriber?(user, domain)) -> :closed
-      true -> nil
-    end
+    if registrar_domain?(domain) and (known? or subscriber?(user, domain)),
+      do: :closed,
+      else: nil
   end
 
-  defp implied_status(_state, {user, domain, "dialog"} = resource, known?)
+  defp implied_status({user, domain, "dialog"} = resource, known?)
        when is_binary(user) and is_binary(domain) do
     if known? or provisioned?(resource), do: :idle, else: nil
   end
 
-  defp implied_status(_state, _resource, _known?), do: nil
+  defp implied_status(_resource, _known?), do: nil
 
   defp status_doc(_resource, nil), do: nil
 
@@ -1433,9 +1468,30 @@ defmodule Kelix.Mod.Presence do
       person =
         Map.get(state.persons, resource, %SIP.Presence.Doc{entity: "sip:#{user}@#{rdomain}"})
 
-      SIP.Presence.Doc.compose(person, for(pub <- pubs, do: {pub.ruid, pub.doc}))
+      published = for pub <- pubs, do: {pub.ruid, pub.doc}
+      SIP.Presence.Doc.compose(person, published ++ unpublished_devices(state, resource, pubs))
     else
       List.last(pubs).doc
+    end
+  end
+
+  # The registered devices no live publication speaks for, as the documents
+  # `compose/2` takes: one open tuple each, offering the binding's contact.
+  defp unpublished_devices(state, {user, rdomain, _event} = resource, pubs) do
+    for device <- Map.get(state.registered, resource, []),
+        not Enum.any?(pubs, &SIP.Publication.published_over?(&1, device.flow)) do
+      {device.key, SIP.Presence.Doc.new("sip:#{user}@#{rdomain}", :open, contact: device.contact)}
+    end
+  end
+
+  # A presentity nobody publishes nor reports, as its registrations tell it.
+  defp registration_doc(state, {user, rdomain, _event} = resource) do
+    case unpublished_devices(state, resource, []) do
+      [] ->
+        nil
+
+      devices ->
+        SIP.Presence.Doc.compose(%SIP.Presence.Doc{entity: "sip:#{user}@#{rdomain}"}, devices)
     end
   end
 
@@ -1531,7 +1587,7 @@ defmodule Kelix.Mod.Presence do
           {{user, _dom, _event}, _held} <- table_contents(tables, domain),
           do: user
 
-    registered = for {user, ^domain, _event} <- state.registered, do: user
+    registered = for {{user, ^domain, _event}, _devices} <- state.registered, do: user
     reported = for {{user, ^domain, _event}, _sources} <- state.reported, do: user
     users = Enum.uniq(held ++ registered ++ reported)
 
@@ -1622,23 +1678,25 @@ defmodule Kelix.Mod.Presence do
     }
   end
 
-  # A presentity the registrar script reported registered holds a state nobody
-  # published: open, which is what its watchers are told while nothing live is
-  # published. Listed beside the publications so `list` shows every state the
-  # collection holds, not only kamailio's `presentity` rows. `user` is `:_` for
-  # the whole domain.
+  # A registered device holds a state nobody published: open, one tuple in what
+  # its watchers are told (see *The composite state*). One row per device, its
+  # tuple's key as `ruid` and its contact as `sender`, beside the publications so
+  # `show` lists every state the collection holds, not only kamailio's
+  # `presentity` rows. `user` is `:_` for the whole domain.
   defp registration_rows(state, domain, user) do
-    for {u, ^domain, event} <- state.registered, user == :_ or u == user do
+    for {{u, ^domain, event}, devices} <- state.registered,
+        user == :_ or u == user,
+        device <- devices do
       %{
         presentity_uri: "sip:#{u}@#{domain}",
         event: event,
         source: "registrar",
         status: "open",
         activity: nil,
-        ruid: nil,
+        ruid: device.key,
         etag: nil,
         expires: nil,
-        sender: nil,
+        sender: device.contact,
         content_type: nil
       }
     end

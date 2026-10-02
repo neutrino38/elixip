@@ -1008,6 +1008,11 @@ defmodule Kelix.PresenceScriptTest do
       submit(phone.pid, phone.dialog, register("10.0.0.9", expires: 0))
       assert_receive {:replied, 200, "OK", _, _}, 1000
       send(phone.pid, {:dialog_terminated, phone.dialog, :normal})
+
+      # its tuple leaves the composite: the watcher is told, still open
+      assert_receive {:notified, body, _}, 1000
+      assert body =~ "<basic>open</basic>"
+      refute body =~ "10.0.0.9"
       refute_receive {:notified, _body, _}, 300
 
       assert [%{contact: %SIP.Uri{domain: "10.0.0.10"}}] =

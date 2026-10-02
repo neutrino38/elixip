@@ -825,7 +825,7 @@ defmodule Kelix.Mod.PresenceTest do
     defp registration_ended(device),
       do: :ok = Presence.registration_ended(ctx(device, register_req(device, 3600)))
 
-    defp status(%SIP.Presence.Doc{tuples: [%{status: status}]}), do: status
+    defp status(%SIP.Presence.Doc{} = doc), do: SIP.Presence.Doc.status(doc)
 
     # An un-REGISTER is also the unPUBLISH of the device that sends it: told by
     # the flow, as a publisher is. Another device's publication stays.
@@ -971,8 +971,9 @@ defmodule Kelix.Mod.PresenceTest do
       pub = %{publication("magali.buu", doc: doc("magali.buu", :closed)) | domain: "weshwesh.eu"}
       {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
 
-      # one line for the AOR, stating what its watchers are told: the publication
-      assert {:ok, [%{aor: "magali.buu", status: "closed", sources: "publish, registrar"}]} =
+      # one line for the AOR, stating what its watchers are told: the composite,
+      # open through the registered device the publication does not speak for
+      assert {:ok, [%{aor: "magali.buu", status: "open", sources: "publish, registrar"}]} =
                Presence.handle_control("list", %{"domain" => "weshwesh.eu"})
 
       assert {:ok, %{states: states}} =
@@ -1040,10 +1041,11 @@ defmodule Kelix.Mod.PresenceTest do
       :registered = register(softphone)
       {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
 
-      # one device un-registers, the other drops: closed only after the second
-      # the AOR keeps the other device's binding, so it stays registered
+      # one device un-registers, the other drops: closed only after the second.
+      # The first one's tuple goes, which the watchers are told — still open
       :registered = register(phone, 0)
-      refute_receive {:presence, :state, @magali, _doc}, 100
+      assert_receive {:presence, :state, @magali, %SIP.Presence.Doc{tuples: [_one]} = doc}
+      assert status(doc) == :open
 
       registration_ended(softphone)
       assert_receive {:presence, :state, @magali, doc}
@@ -1086,7 +1088,8 @@ defmodule Kelix.Mod.PresenceTest do
       {:ok, contact} = SIP.Uri.serialize_ruri(first)
 
       assert :ok = Kelix.Control.unregister("weshwesh.eu", "magali.buu", contact)
-      refute_receive {:presence, :state, @magali, _doc}, 100
+      assert_receive {:presence, :state, @magali, %SIP.Presence.Doc{tuples: [_one]} = doc}
+      assert status(doc) == :open
       assert [_other] = Kelix.Mod.Registrar.bindings("weshwesh.eu", "magali.buu")
     end
 
@@ -1114,13 +1117,77 @@ defmodule Kelix.Mod.PresenceTest do
       assert_receive {:presence, :state, {"8001", "weshwesh.eu", "presence"}, nil}
     end
 
-    test "a registration is not pushed over a live publication" do
-      pub = %{publication("magali.buu") | domain: "weshwesh.eu"}
+    # A device that publishes is told by its flow, as a publisher is: its
+    # registration adds nothing to what its publication already says.
+    test "the registration of a device that publishes adds no tuple" do
+      phone = device("10.0.0.9")
+      over_phone = SIP.Msg.Ops.arrival_flow(register_req(phone, 3600))
+
+      pub = %{
+        publication("magali.buu", flow: over_phone, doc: doc("magali.buu", :closed))
+        | domain: "weshwesh.eu"
+      }
+
       {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
       {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
 
-      :registered = register(device("10.0.0.9"))
+      :registered = register(phone)
       refute_receive {:presence, :state, _resource, _doc}, 100
+
+      assert %SIP.Presence.Doc{tuples: [%{status: :closed}]} =
+               Presence.state_of("weshwesh.eu", {"magali.buu", "presence"})
+    end
+
+    # Bob is reachable on the desk phone that only registers while his mobile
+    # publishes: the device adds one open tuple, offering its contact.
+    test "a registered device that publishes nothing adds an open tuple" do
+      pub = %{
+        publication("magali.buu", flow: udp(5070), doc: doc("magali.buu", :closed))
+        | domain: "weshwesh.eu"
+      }
+
+      {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      phone = device("10.0.0.9")
+      :registered = register(phone)
+
+      assert_receive {:presence, :state, @magali, %SIP.Presence.Doc{tuples: tuples} = doc}
+      assert status(doc) == :open
+
+      assert [
+               %{status: :closed, contact: nil},
+               %{status: :open, contact: "sip:magali.buu@10.0.0.9"}
+             ] =
+               tuples
+
+      # a refreshing REGISTER moves nothing
+      :registered = register(phone)
+      refute_receive {:presence, :state, @magali, _doc}, 100
+
+      # the device goes: the publication alone again
+      :unregistered = register(phone, 0)
+      assert_receive {:presence, :state, @magali, %SIP.Presence.Doc{tuples: [_one]} = doc}
+      assert status(doc) == :closed
+    end
+
+    # The person is the presentity's, not a device's: a registered device's
+    # tuple sits beside the activity a publication set.
+    test "a registered device keeps the published activity" do
+      :registered = register(device("10.0.0.9"))
+
+      pub = %{
+        publication("magali.buu",
+          flow: udp(5070),
+          doc: SIP.Presence.Doc.new("sip:magali.buu@weshwesh.eu", :closed, activity: :away)
+        )
+        | domain: "weshwesh.eu"
+      }
+
+      {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
+
+      assert %SIP.Presence.Doc{activity: :away, tuples: [_published, _registered]} =
+               Presence.state_of("weshwesh.eu", {"magali.buu", "presence"})
     end
 
     test "when the publication goes, a registered subscriber is pushed open" do

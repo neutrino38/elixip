@@ -148,6 +148,8 @@ defmodule Kelix.Mod.Registrar do
         unsubscribe_registrations: 2,
         registered?: 2,
         registered?: 3,
+        devices: 2,
+        devices: 3,
         remaining_ms: 1
       ]
     }
@@ -342,13 +344,23 @@ defmodule Kelix.Mod.Registrar do
   `false` too when the store cannot answer.
   """
   @spec registered?(String.t(), String.t(), pid | nil) :: boolean
-  def registered?(domain, aor, ending_dialog \\ nil) do
+  def registered?(domain, aor, ending_dialog \\ nil),
+    do: devices(domain, aor, ending_dialog) != []
+
+  @doc """
+  The bindings of `aor` that reach a device, other than the ones `ending_dialog`
+  owns — the bindings `registered?/3` counts, for a caller that needs to know
+  WHICH devices they are (the presence collection gives each one a tuple). `[]`
+  when the store cannot answer.
+  """
+  @spec devices(String.t(), String.t(), pid | nil) :: [Contact.t()]
+  def devices(domain, aor, ending_dialog \\ nil) do
     case Kelix.Module.safe_call(__MODULE__, {:bindings, domain, aor}) do
       contacts when is_list(contacts) ->
-        Enum.any?(contacts, &reaches_device?(&1, ending_dialog))
+        Enum.filter(contacts, &reaches_device?(&1, ending_dialog))
 
       _down ->
-        false
+        []
     end
   end
 

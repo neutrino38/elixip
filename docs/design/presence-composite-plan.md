@@ -1,7 +1,7 @@
 # presence-composite-plan.md — the composite state of a presentity, first slice
 
-**Status: planned 2026-09-30. PC0, PC1 and PC2 done 2026-10-01, PC3 done
-2026-10-02; decision 1 taken on the traces. The third symptom of §1 is not
+**Status: planned 2026-09-30. PC0, PC1 and PC2 done 2026-10-01, PC3 and PC4
+done 2026-10-02; decisions 1 and 2 taken. The third symptom of §1 is not
 fixed by composition: decision 3.** The presence design is
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md); this document is the order the first
 slice of objective 1 — *a composite state* — gets built in, what each phase
@@ -146,7 +146,7 @@ and the stable tuple ids, in `presence_test.exs` (*the composite state*); four o
 them fail on the code before the phase. The third symptom is not among them —
 see decision 3.
 
-### PC4 — the registration in the composite (decision 2)
+### PC4 — the registration in the composite (decision 2) — done 2026-10-02
 
 Today a registered device that publishes nothing counts only when **nothing** is
 published for the presentity. Option: each registered device without a
@@ -154,6 +154,24 @@ publication contributes an `open` tuple, so Bob is reachable on his desk phone
 even while only his mobile publishes. It changes the precedence between
 registration and publication, which DESIGN-PRESENCE.md states; decided before the
 phase starts, and possibly dropped.
+
+As built: the option is taken. The registrar script's report now carries the
+bindings that reach a device (`Kelix.Mod.Registrar.devices/3`, which
+`registered?/3` became a test of), held per resource. Each one no live
+publication speaks for — told by the flow, `SIP.Publication.published_over?/2`,
+as a publisher is — adds one `open` tuple offering the binding's contact, keyed
+by `SIP.Msg.Ops.device_key/1` hashed (instance, else contact). A presentity that
+only registers gets the same tuples, one per device, instead of a single
+synthetic `open`. A registration is pushed when the composite changes, which
+now includes one of several devices leaving (still open, one tuple fewer).
+`kelictl presence show` lists one registrar row per device, its key as `ruid`
+and its contact as `sender`.
+
+Proof: in `presence_test.exs`, a device that publishes adds no tuple, one that
+does not adds an open tuple beside a closed publication and leaves with it, the
+published activity is kept beside a registered device; the tests of the former
+precedence (registration ignored under a publication, a departing device
+unnoticed) are rewritten to the rule.
 
 ### PC5 — documentation and field test
 
@@ -169,7 +187,8 @@ both follow.
    **modification** whose document carries no activity (no `<dm:person>`, or one
    without `<rpid:activities>`) clears it; a **refresh** (RFC 3903 §4.4, no body)
    leaves it as it is.
-2. **Registration tuples** — PC4, with or without it.
+2. **Registration tuples** — taken 2026-10-02: with. A registered device that
+   publishes nothing is one open tuple of the composite.
 3. **Devices behind a proxy** — open, found in PC3. Composition does not fix the
    third symptom of §1: the two devices are one publisher, so the initial
    PUBLISH of the second replaces the first's publication before anything is
