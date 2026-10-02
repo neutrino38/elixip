@@ -126,6 +126,26 @@ through one function:
 The Router is otherwise **stateless**: it reads `Kelix.Domains` and
 `Kelix.ScriptRegistry` and holds nothing.
 
+**OPTIONS takes another door.** An out-of-dialog OPTIONS is answered before any
+dialog exists, by `Kelix.Options`, inside the server transaction. Most of them are
+liveness pings, and one process per ping is a leak. The order:
+
+```
+1. drain     the node drains → 503, whatever the domains declare
+2. rule      Router.resolve_options/2 over [[domain.options]]:
+               no domain, no rule, or sip:domain without a keepalive rule → 200 + Allow
+               a user-part no rule matches → 404
+               a rule's script → :dispatch
+3. dialog    the framework opens a 32 s OPTIONS dialog, rearmed by each OPTIONS on it
+4-5.         Router.dispatch/3 — quota (max_calls, like a call) and spawn, as above
+```
+
+The dialog is what a script serving an OPTIONS needs: the re-submission after a
+407 keeps the Call-ID and From-tag and reaches the instance that challenged it,
+and a relay to a registered UA is a B2BUA leg. The `default` rule never serves an
+R-URI with no user-part, so a probe script cannot answer a load balancer's ping
+480. The plan and its decisions are [options-plan.md](options-plan.md).
+
 Step 5 is what keeps scripts generic: the instance's context is seeded with the
 domain (which becomes the auth realm), the resolved expiry bounds and the
 selected media-pool handle, so a script never hardcodes the domain it serves.

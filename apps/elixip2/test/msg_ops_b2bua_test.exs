@@ -13,6 +13,24 @@ defmodule SIP.Test.MsgOpsB2bua do
 
   alias SIP.Msg.Ops
 
+  defp options_200(method) do
+    raw =
+      "SIP/2.0 200 OK\r\n" <>
+        "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKopt1\r\n" <>
+        "From: <sip:alice@example.com>;tag=a1\r\n" <>
+        "To: <sip:bob@example.com>;tag=b1\r\n" <>
+        "Call-ID: opt-caps-1\r\n" <>
+        "CSeq: 2 #{method}\r\n" <>
+        "Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, MESSAGE\r\n" <>
+        "Accept: application/sdp\r\n" <>
+        "Accept-Language: fr\r\n" <>
+        "Supported: replaces, outbound\r\n" <>
+        "Content-Length: 0\r\n\r\n"
+
+    {:ok, msg} = SIPMsg.parse(raw, fn _code, _errmsg, _lineno, _line -> nil end)
+    msg
+  end
+
   defp parse!(file) do
     {:ok, raw} = File.read(Path.join(__DIR__, file))
 
@@ -150,6 +168,26 @@ defmodule SIP.Test.MsgOpsB2bua do
   end
 
   describe "forwarded_reply_fields/1" do
+    # A probe relayed to a UA: its capabilities are the answer.
+    test "the answer to an OPTIONS carries the capabilities it reports" do
+      resp = options_200("OPTIONS")
+      fields = Ops.forwarded_reply_fields(resp)
+
+      assert {"Allow", "INVITE, ACK, CANCEL, OPTIONS, BYE, MESSAGE"} in fields
+      assert {"Accept-Language", "fr"} in fields
+      assert Keyword.fetch!(fields, :accept) == resp.accept
+      assert Keyword.fetch!(fields, :supported) == resp.supported
+    end
+
+    # On an INVITE they would promise extensions this B2BUA does not perform.
+    test "the same headers on any other response stay behind" do
+      fields = Ops.forwarded_reply_fields(options_200("INVITE"))
+
+      refute Enum.any?(fields, fn {k, _} -> is_binary(k) and String.downcase(k) == "allow" end)
+      refute Keyword.has_key?(fields, :supported)
+      refute Keyword.has_key?(fields, :accept)
+    end
+
     test "an SDP-bearing 200: the body crosses with its Content-Type, the Contact as identity only" do
       resp = parse!("SIP-200-LVP.txt")
       fields = Ops.forwarded_reply_fields(resp)

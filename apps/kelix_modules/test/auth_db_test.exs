@@ -314,8 +314,10 @@ defmodule Kelix.Mod.AuthDbTest do
       refute AuthDb.challengeable?(%{method: :CANCEL, to: "<sip:bob@#{@domain}>"})
     end
 
-    test "OPTIONS never is — challenging a liveness probe makes this node look down" do
-      refute AuthDb.challengeable?(%{method: :OPTIONS, to: "<sip:bob@#{@domain}>"})
+    # The liveness probe is kept away from authenticating scripts by the routing
+    # (keepalive rule or core), so the method itself no longer has to be exempt.
+    test "an initial OPTIONS is — a probe relayed to a registered UA names its sender" do
+      assert AuthDb.challengeable?(%{method: :OPTIONS, to: "<sip:bob@#{@domain}>"})
     end
 
     test "an in-dialog request is not, the dialog was authenticated when created" do

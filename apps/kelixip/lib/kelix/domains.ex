@@ -197,7 +197,7 @@ defmodule Kelix.Domains do
 
   @doc """
   Every script a snapshot refers to — the `registrar`/`presence` block's `script`
-  and each dial-plan and chat rule's — as `[{name, context}]`, deduped by name (first
+  and each dial-plan, chat and options rule's — as `[{name, context}]`, deduped by name (first
   reference wins). `context` says *where* the reference comes from, so an error
   message can name the domain and the rule an operator has to go and fix.
   """
@@ -235,7 +235,16 @@ defmodule Kelix.Domains do
       for rule <- d.chat,
           do: {rule.script, "domain #{d.name} chat rule #{rule_label(rule)}"}
 
-    registrar_refs ++ presence_refs ++ call_refs ++ chat_refs
+    options_refs =
+      for script <- List.wrap(d.options_keepalive),
+          do: {script, "domain #{d.name} options rule keepalive = true"}
+
+    options_refs =
+      options_refs ++
+        for rule <- d.options,
+            do: {rule.script, "domain #{d.name} options rule #{rule_label(rule)}"}
+
+    registrar_refs ++ presence_refs ++ call_refs ++ chat_refs ++ options_refs
   end
 
   defp rule_label(%DialRule{default?: true}), do: "default = true"
@@ -335,6 +344,7 @@ defmodule Kelix.Domains do
          {:ok, presence} <- parse_presence(Map.get(dm, "presence", []), name),
          {:ok, dial_plan} <- parse_dial_plan(Map.get(dm, "call", []), name),
          {:ok, chat} <- parse_dial_plan(Map.get(dm, "chat", []), name, "chat"),
+         {:ok, {keepalive, options}} <- parse_options(Map.get(dm, "options", []), name),
          :ok <- check_domain_keys(dm, name) do
       {:ok,
        %Domain{
@@ -344,14 +354,16 @@ defmodule Kelix.Domains do
          registrar: registrar,
          presence: presence,
          dial_plan: dial_plan,
-         chat: chat
+         chat: chat,
+         options: options,
+         options_keepalive: keepalive
        }}
     end
   end
 
   defp parse_domain(_), do: {:error, "each [[domain]] must be a table"}
 
-  @domain_keys ~w(name aliases max_calls registrar presence call chat)
+  @domain_keys ~w(name aliases max_calls registrar presence call chat options)
   defp check_domain_keys(dm, name) do
     case Map.keys(dm) -- @domain_keys do
       [] -> :ok
@@ -400,6 +412,12 @@ defmodule Kelix.Domains do
     end
   end
 
+  defp parse_rule(_, domain, "options"),
+    do:
+      {:error,
+       "domain #{inspect(domain)}: each [[domain.options]] needs `keepalive = true`, " <>
+         "`pattern = \"...\"` or `default = true`"}
+
   defp parse_rule(_, domain, key),
     do:
       {:error,
@@ -426,6 +444,42 @@ defmodule Kelix.Domains do
     do:
       {:error,
        "#{what}: `idle_timeout` must be a positive integer (seconds), got #{inspect(value)}"}
+
+  # ── OPTIONS (one keepalive rule for `sip:domain`, then a dial-plan) ───────────
+
+  # The keepalive rule serves an R-URI with no user-part, which no pattern is ever
+  # tried against, so its position among the others does not matter.
+  defp parse_options(rules, domain) when is_list(rules) do
+    {keepalives, others} = Enum.split_with(rules, &match?(%{"keepalive" => _}, &1))
+
+    with {:ok, keepalive} <- parse_keepalive(keepalives, domain),
+         {:ok, parsed} <- reduce_while_ok(others, &parse_rule(&1, domain, "options")),
+         :ok <- validate_catch_all(parsed, domain, "options") do
+      {:ok, {keepalive, parsed}}
+    end
+  end
+
+  defp parse_options(_, domain),
+    do: {:error, "domain #{inspect(domain)}: `options` must be an array of tables"}
+
+  defp parse_keepalive([], _domain), do: {:ok, nil}
+
+  defp parse_keepalive([%{"keepalive" => true} = r], domain) do
+    ctx = "keepalive options rule (domain #{domain})"
+
+    with {:ok, script} <- req_string(r, "script", ctx),
+         :ok <- reject_keys(r, ~w(keepalive script), ctx) do
+      {:ok, script}
+    end
+  end
+
+  defp parse_keepalive([_], domain),
+    do: {:error, "domain #{inspect(domain)}: `keepalive` must be `true` or absent"}
+
+  defp parse_keepalive(_, domain),
+    do:
+      {:error,
+       "domain #{inspect(domain)}: at most one [[domain.options]] rule has keepalive = true"}
 
   defp compile_pattern(pattern, domain) do
     case DialPlan.compile(pattern) do

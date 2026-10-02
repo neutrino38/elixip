@@ -143,10 +143,10 @@ the code decides which header carries them.
 | SUBSCRIBE / REFER out of dialog | yes | dialog-creating, same treatment as INVITE. A SUBSCRIBE refresh is challenged too: it is a request of its own, and a subscription authenticated once would otherwise be extended for hours by whoever knows its Call-ID |
 | PUBLISH | yes | 401, like a SUBSCRIBE. It is not dialog-creating, and it is the request that says a user is online or off: unauthenticated, a stranger declares someone's state |
 | MESSAGE | **OPEN** | answered 405 until `[[domain.chat]]` lands ([DESIGN-CHAT.md](DESIGN-CHAT.md)); the decision belongs with that function |
-| OPTIONS | **never** | challenging it breaks liveness probing (see `Kelix.Options`) |
+| OPTIONS | yes, when a script serves it | a probe relayed to a registered UA names its sender. The liveness ping is protected by the routing, not by its method: it reaches the `keepalive` rule or the node itself (`Kelix.Options`), never a script that authenticates ([options-plan.md](options-plan.md)) |
 
-So the rule is not "creates a dialog" but **"is an initial request other than ACK,
-CANCEL and OPTIONS"**. The code that applies it is method-agnostic accordingly:
+So the rule is not "creates a dialog" but **"is an initial request other than ACK
+and CANCEL"**. The code that applies it is method-agnostic accordingly:
 `AuthDb.SBB.authenticate/1` challenges through `challenge_request/2` and waits for
 the re-submission of whatever method it challenged. Worth stating that way in the spec: it is checkable in one
 place and does not need a list to be maintained per method.

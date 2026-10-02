@@ -61,6 +61,47 @@ defmodule Kelix.DispatchTest do
     end
   end
 
+  describe "the OPTIONS path (SIP.Session.Options, :dispatch)" do
+    setup do
+      dom = uniq("opts")
+
+      {:ok, snap} =
+        Domains.parse(
+          ~s([[domain]]\nname = "#{dom}"\nmax_calls = 1\n) <>
+            ~s([[domain.call]]\ndefault = true\nscript = "#{@waiter}"\n) <>
+            ~s([[domain.options]]\nkeepalive = true\nscript = "#{@waiter}")
+        )
+
+      %{snap: snap, dom: dom}
+    end
+
+    test "an OPTIONS a rule claims spawns the rule's script", %{snap: snap, dom: dom} do
+      ping = %{method: :OPTIONS, ruri: %SIP.Uri{userpart: nil, domain: dom}}
+      assert {:accept, pid} = Router.dispatch(self(), ping, snap)
+      assert Process.alive?(pid)
+      cleanup([pid])
+    end
+
+    # Decision of 2026-09-29: a scripted OPTIONS takes a max_calls slot like a call.
+    test "it counts in max_calls, both ways", %{snap: snap, dom: dom} do
+      ping = %{method: :OPTIONS, ruri: %SIP.Uri{userpart: nil, domain: dom}}
+      invite = %{method: :INVITE, ruri: %SIP.Uri{userpart: "8001", domain: dom}}
+
+      assert {:accept, pid} = Router.dispatch(self(), ping, snap)
+      assert {:reject, 503, _} = Router.dispatch(self(), invite, snap)
+      cleanup([pid])
+    end
+
+    # A reload between Kelix.Options routing it and its dialog reaching the router:
+    # the answer is the core's, carried by the refusal of the dialog.
+    test "an OPTIONS no rule claims any more gets the core's answer", %{snap: snap} do
+      ping = %{method: :OPTIONS, ruri: %SIP.Uri{userpart: nil, domain: "gone.test"}}
+
+      assert {:reject, 200, "OK", [{"Allow", allow}]} = Router.dispatch(self(), ping, snap)
+      assert allow == Kelix.Options.allow()
+    end
+  end
+
   describe "the calls path (SIP.Session.Call)" do
     setup do
       dom = uniq("calls")

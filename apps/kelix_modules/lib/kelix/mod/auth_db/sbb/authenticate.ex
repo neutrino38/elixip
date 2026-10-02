@@ -145,7 +145,7 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
         goto(initial_state, "credentials re-submitted")
 
       # The same, for the methods a provisional response would be noise on: a
-      # SUBSCRIBE and a PUBLISH are answered once, and the answer is the verdict
+      # SUBSCRIBE, a PUBLISH and an OPTIONS are answered once, and the answer is the verdict
       # `initial_state` is about to reach. The request needs no carrying — the
       # instrumentation stored it, and `last_uas_req()` reads back the one that
       # came with the credentials.
@@ -159,6 +159,9 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
       # its own — and reaches this instance because the router keys a
       # conversation on its sender, recipient and flow (chat-basic-plan, C3c).
       {:MESSAGE, _req, _trans, _dlg} ->
+        goto(initial_state, "credentials re-submitted")
+
+      {:OPTIONS, _req, _trans, _dlg} ->
         goto(initial_state, "credentials re-submitted")
 
       # A caller that cancels the challenged attempt: nothing was forwarded, so

@@ -18,6 +18,11 @@ defmodule Kelix.Domain do
   pattern on the R-URI user part and a catch-all last — routing an out-of-dialog
   MESSAGE to its script (DESIGN-CHAT.md, *chat is a function of its own*). Empty
   if chat is not enabled.
+
+  `options` is the ordered `[[domain.options]]` rule list for an R-URI with a
+  user-part, the same `%Kelix.DialRule{}` as the dial-plan; `options_keepalive` is
+  the script of the `keepalive = true` rule, serving an R-URI with none. Both empty
+  = the core answers every OPTIONS (`Kelix.Options`).
   """
 
   @type fn_config :: %{optional(atom) => term}
@@ -29,7 +34,9 @@ defmodule Kelix.Domain do
           registrar: fn_config | nil,
           presence: [Kelix.PresenceBlock.t()],
           dial_plan: [Kelix.DialRule.t()],
-          chat: [Kelix.DialRule.t()]
+          chat: [Kelix.DialRule.t()],
+          options: [Kelix.DialRule.t()],
+          options_keepalive: String.t() | nil
         }
 
   defstruct name: nil,
@@ -38,7 +45,9 @@ defmodule Kelix.Domain do
             registrar: nil,
             presence: [],
             dial_plan: [],
-            chat: []
+            chat: [],
+            options: [],
+            options_keepalive: nil
 end
 
 defmodule Kelix.PresenceBlock do

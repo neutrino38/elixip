@@ -451,8 +451,13 @@ defmodule SIP.Session.CallUAS do
   fallback to `:inbound_request` made that omission silent AND wrong: the
   scenario would authenticate the refresh but save the contacts of the very first
   request.
+
+  OPTIONS is stored for the REGISTER reason: an instance serving an OPTIONS
+  (SIP.Session.Options, `:dispatch`) challenges it and authenticates its
+  re-submission. Only an inbound OPTIONS dialog delivers one to the application —
+  an INVITE dialog answers its keepalives itself — so no other slot is overwritten.
   """
-  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER, :SUBSCRIBE, :PUBLISH]
+  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER, :SUBSCRIBE, :PUBLISH, :OPTIONS]
 
   # An out-of-dialog MESSAGE is what a page-mode instance serves, and
   # `reply_message/2` answers it from this slot. One sent INSIDE a dialog is not
