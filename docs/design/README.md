@@ -38,8 +38,6 @@ The user-facing counterparts live at the repository root —
 | [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
 | [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
 | [chat-basic-plan.md](chat-basic-plan.md) | the build order of basic chat: the `chat` function, the page relay, the Silo, phase by phase |
-| [debug-improvments.md](debug-improvments.md) | scenario debugging: the sequence diagram drawn from the real SIP messages — what is built, its limits, what comes next (in French) |
-| [debug-fsl-port-plan.md](debug-fsl-port-plan.md) | carrying the step above across the FSL extraction: what goes into the `finite_state_language` package, what stays in the SIP binding, in which order |
 
 ## Designed elsewhere
 

@@ -543,7 +543,11 @@ A browser cannot carry T.140 on an RTP profile — `RTCPeerConnection` has no
     URL the answer publishes is what the media server is then armed with. It
     plays the browser, which is the condition for testing a Total Conversation
     call without one. Nothing of ours is bound on that leg, so a leg whose only
-    medium is such a WebSocket has no offer to build at all;
+    medium is such a WebSocket has no offer to build at all. The media server
+    must support `ConnectMediaConnection` (its `feat/wss-client` build); an older
+    one, or an answer without a URL, drops the text medium and keeps the call.
+    `scenarios/uac_invite_webrtc.exs` is the reference, not yet validated end to
+    end against a real gateway;
 - a **WebRTC data channel** (RFC 8865): `m=application … UDP/DTLS/SCTP
   webrtc-datachannel`, inside the leg's own DTLS and ICE. It is answered when
   offered, **and it is what our own offers carry by default on a WebRTC leg** —
