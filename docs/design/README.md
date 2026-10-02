@@ -39,6 +39,7 @@ The user-facing counterparts live at the repository root —
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
 | [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
 | [DESIGN-CHAT-MEDIA.md](DESIGN-CHAT-MEDIA.md) | chat attachments: the RCS `fthttp` contract Linphone speaks, the file store behind Apache, the web client |
+| [chat-media-plan.md](chat-media-plan.md) | its build order: the PHP reference server first, Trix, then the Elixir store |
 | [dialog-state-plan.md](dialog-state-plan.md) | call occupancy of a served AOR: the `dialog` package (RFC 4235), the stamp auth_db and the registrar put on a leg, the `dialog_state` module and its push for the ACD |
 | [presence-basic-plan.md](presence-basic-plan.md) | the build order of the above, phase by phase: what basic presence is, and what each step proves |
 | [presence-rls-plan.md](presence-rls-plan.md) | the buddy list on top of it: one SUBSCRIBE covering N resources (RFC 4662 / 5367), lot by lot |

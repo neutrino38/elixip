@@ -12,7 +12,10 @@ the reference file server was read on GitHub
 (`BelledonneCommunications/flexisip-http-file-transfer-server`, PHP). §12
 lists what was not verified.
 
-**Status (2026-10-02): designed, not built.** Every host name in this
+**Status (2026-10-02): designed, not built.** The build order is
+[chat-media-plan.md](chat-media-plan.md): the reference PHP server is run
+first and is the store for as long as it suffices; the Elixir store of §6
+replaces it on the trigger the plan states. Every host name in this
 document is a placeholder under `example.com` (RFC 2606); the production names
 live in the deployment, never in a repository.
 
