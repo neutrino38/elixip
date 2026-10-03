@@ -9,7 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.6.2
+Version:        1.6.3
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
@@ -46,6 +46,11 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sat Oct 03 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-1
+- Released together with kelixip 1.6.3-1.
+- PIDF: extension elements of <rpid:activities> are read and written as marks.
+- User-Agent is now Elixipp-1.6.3.
+
 * Wed Sep 30 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.2-1
 - Released together with kelixip 1.6.2-1.
 - UAC.Page and UAS.Page: built-in page-mode MESSAGE scenarios, driven by

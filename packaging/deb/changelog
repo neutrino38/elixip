@@ -1,3 +1,13 @@
+kelixip (1.6.3-1) stable; urgency=low
+
+  * Presence: the composite person keeps the extension elements a client puts
+    in <rpid:activities> beside its activity (Trix's <trix:dnd/> and
+    <trix:auto/>). Lost until now, a Trix watching its own presence read
+    "do not disturb" back as busy and kept busy after a reload.
+  * User-Agent is now Kelixip/1.6.3.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 03 Oct 2026 23:30:00 +0200
+
 kelixip (1.6.2-1) stable; urgency=low
 
   * Basic instant messaging (page mode, RFC 3428): a [[domain.chat]] block routes

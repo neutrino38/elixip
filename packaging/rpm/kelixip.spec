@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.2
+Version:        1.6.3
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        3%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -365,6 +365,13 @@ fi
 %{_datadir}/%{name}/sql/conversation
 
 %changelog
+* Sat Oct 03 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-1
+- Presence: the composite person keeps the extension elements a client puts
+  in <rpid:activities> beside its activity (Trix's <trix:dnd/> and
+  <trix:auto/>). Lost until now, a Trix watching its own presence read
+  "do not disturb" back as busy and kept busy after a reload.
+- User-Agent is now Kelixip/1.6.3.
+
 * Wed Sep 30 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.2-1
 - Basic instant messaging (page mode, RFC 3428): a [[domain.chat]] block routes
   a MESSAGE to the `chat` function; a MESSAGE's content is never logged.
