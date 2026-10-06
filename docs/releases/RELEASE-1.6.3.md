@@ -17,32 +17,16 @@ per call leg.
 
 ### Session timers (RFC 4028)
 
-- **Each call dialog negotiates and keeps its own session timer**
-  (`SIP.DialogImpl.SessionTimer`). The two legs of a B2BUA are timed
-  independently.
-- **As UAS**, every 2xx to an INVITE or an UPDATE states the negotiated
-  `Session-Expires` (and `Require: timer` when the peer supports it), whoever
-  composed the response. A request asking for less than `min_se` is answered
-  `422` with our `Min-SE`, before the application sees it.
-- **As UAC**, every INVITE or UPDATE carries `Supported: timer`, a
-  `Session-Expires` and our `Min-SE`. The 2xx states the timer in force; a 2xx
-  stating none turns it off. A `422` sends the request again, once, with the far
-  end's `Min-SE`, without the application seeing it.
-- **Refreshing.** When this node refreshes, it sends an UPDATE without a body at
-  half the interval — or a re-INVITE re-offering its last SDP unchanged to a peer
-  that does not accept UPDATE. Neither the request nor its answer reaches the
-  application. A `491` is retried after the RFC 3261 §14.1 delay, another refusal
-  well before the peer's deadline.
-- **Expiry.** A peer that stops refreshing is sent a BYE with `Reason: SIP
-  ;cause=408 ;text="Session Timer Expired"` shortly before the interval ends. A
-  refresh answered `408` or not at all ends the call the same way; one answered
-  `481` ends it without a BYE. The application receives
-  `{:dialog_terminated, pid, :session_expired}`.
-- **`SBB.Call.bridge/1`** returns `{:bridge, :session_expired, %{leg: :caller |
-  :callee}}` (`:callee_left` with `reason: :session_expired` under
-  `on_callee_hangup: :keep_caller`). The reference scripts (`direct-call*.exs`)
-  and scenarios (`b2bua_basic`, `b2bua_media`, `webrtc-gw`, `customer-service`)
-  handle it.
+- **Each call dialog keeps its own session timer**
+  (`SIP.DialogImpl.SessionTimer`); the two legs of a B2BUA are timed
+  independently. Negotiation (`Session-Expires`, `Min-SE`, `422`), refreshes
+  (UPDATE without a body, or re-INVITE to a peer without UPDATE) and their
+  answers are handled by the dialog, unseen by the application.
+- **Expiry.** A session that is not refreshed ends with a BYE carrying `Reason:
+  SIP ;cause=408 ;text="Session Timer Expired"`; the application receives
+  `{:dialog_terminated, pid, :session_expired}`, and `SBB.Call.bridge/1` returns
+  `{:bridge, :session_expired, %{leg: :caller | :callee}}`. The reference
+  scripts and scenarios handle it.
 
 ### kelixip
 
