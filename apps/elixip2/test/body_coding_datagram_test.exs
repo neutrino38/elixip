@@ -78,10 +78,9 @@ defmodule SIP.Test.BodyCodingDatagram do
 
     test "a multipart is deflated whole, its Content-Type and boundary kept" do
       parts = [
-        # No trailing whitespace: the parser trims a part's data, so a part
-        # ending in a CRLF or a space would not read back as it was written.
-        %{contenttype: "application/vnd.gsma.rcs-ft-http+xml", data: String.trim(@ft_xml)},
-        %{contenttype: "text/plain;charset=UTF-8", data: String.duplicate("légende ", 120) <> "."}
+        # Both end in whitespace of their own, which must read back as written.
+        %{contenttype: "application/vnd.gsma.rcs-ft-http+xml", data: @ft_xml},
+        %{contenttype: "text/plain;charset=UTF-8", data: String.duplicate("légende ", 120)}
       ]
 
       msg = SIP.Msg.Ops.update_sip_msg(message("", "text/plain"), {:body, parts})
@@ -147,6 +146,36 @@ defmodule SIP.Test.BodyCodingDatagram do
 
       assert SIP.Msg.Ops.body_string(req) == "<file/>"
       assert SIPMsg.body_octets(req.body) == body
+    end
+
+    test "a part's own trailing whitespace is kept; the delimiter's line break is not" do
+      body =
+        "--b1\r\nContent-Type: application/xml\r\n\r\n<file/>\r\n\r\n" <>
+          "--b1\r\nContent-Type: text/plain;charset=UTF-8\r\n\r\nla terrasse \r\n--b1--\r\n"
+
+      parts = SIPMsg.parse_multi_part_body("multipart/mixed;boundary=b1", body)
+
+      assert Enum.map(parts, & &1.data) == ["<file/>\r\n", "la terrasse "]
+      assert SIPMsg.multipart_body(parts) == body
+    end
+
+    test "a part with no MIME header, padding after a delimiter, bare LF line breaks" do
+      body =
+        "preamble\r\n--b1  \r\n\r\nno headers\r\n" <>
+          "--b1\nContent-Type: text/plain\n\nline one\nline two\n--b1--\nepilogue"
+
+      parts = SIPMsg.parse_multi_part_body("multipart/mixed;boundary=b1", body)
+
+      assert Enum.map(parts, & &1.data) == ["no headers", "line one\nline two"]
+      assert Enum.map(parts, & &1.contenttype) == ["text/plain; charset=UTF-8", "text/plain"]
+    end
+
+    test "a boundary string inside a part's data, not at a line start, does not split it" do
+      body =
+        "--b1\r\nContent-Type: text/plain\r\n\r\nsee --b1 here\r\n--b1--\r\n"
+
+      [part] = SIPMsg.parse_multi_part_body("multipart/mixed;boundary=b1", body)
+      assert part.data == "see --b1 here"
     end
 
     test "a bare body, a part without boundary, no body" do

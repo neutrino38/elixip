@@ -681,18 +681,34 @@ defmodule SIPMsg do
     |> Map.new()
   end
 
-  # Parse RFC 2046 mime, multipart sub body and put it in a map
+  # Parse one RFC 2046 body part — what lies between two delimiters, the line
+  # break that ends the delimiter line already taken off — into a map.
+  #
+  # The data is kept exactly: not trimmed. A part's content may end in a space
+  # or a line break of its own (a caption, an XML document ending in CRLF), and
+  # it is the sender's; the line break the next delimiter starts with was never
+  # part of it (parse_multi_part_body/2).
   defp parse_sub_body(subbody) do
     [headers, data] =
-      case String.split(String.trim(subbody), "\r\n\r\n", parts: 2) do
-        [h, d] ->
-          [h, d]
+      cond do
+        # No MIME header at all: the part starts with the blank line.
+        String.starts_with?(subbody, "\r\n") ->
+          ["", binary_part(subbody, 2, byte_size(subbody) - 2)]
 
-        [_one] ->
-          raise "mixed/multipart: Invalid body part. Missing empty line between MIME headers and data"
+        String.starts_with?(subbody, "\n") ->
+          ["", binary_part(subbody, 1, byte_size(subbody) - 1)]
+
+        true ->
+          case String.split(subbody, ~r/\r?\n\r?\n/, parts: 2) do
+            [h, d] ->
+              [h, d]
+
+            [_one] ->
+              raise "mixed/multipart: Invalid body part. Missing empty line between MIME headers and data"
+          end
       end
 
-    hlist = String.split(headers, "\r\n")
+    hlist = if headers == "", do: [], else: String.split(headers, ~r/\r?\n/)
 
     # Parse headers of subbody
     {code, _rest, dstmap} =
@@ -718,27 +734,35 @@ defmodule SIPMsg do
   # Every multipart subtype, not `mixed` alone: a list NOTIFY (RFC 4662) is
   # `multipart/related`, and its parameters come in whatever order the sender
   # wrote them — `type=` and `start=` sit beside `boundary=`.
+  #
+  # RFC 2046 §5.1.1: a delimiter is a line break, then `--boundary`, then
+  # optional transport padding and a line break. The line break BEFORE the
+  # dashes belongs to the delimiter, not to the part it ends — so the body is
+  # split on it, and nothing has to be trimmed afterwards. Splitting on the
+  # dashes alone left that line break on the data, and the trim that removed it
+  # took the sender's own trailing whitespace too. A bare LF is accepted where
+  # CRLF is due: some stacks write one.
   def parse_multi_part_body(ctype, body) do
     case multipart_boundary(ctype) do
       boundary when is_binary(boundary) ->
-        # We do have a multipart body
-        # Spilt into the parts according to the boundaries
-        bodies = String.split(body, "--" <> boundary)
-        # prologue, bodies, last boundary
-        if Kernel.length(bodies) < 3 do
-          raise "Invalid MIME multipart SIP message body. Missing boundaries."
-        else
-          # Remove everything before the first boundary
-          bodies = List.delete_at(bodies, 0)
+        # The first delimiter may open the body, with no line break before it.
+        delimiter = ~r/\r?\n--#{Regex.escape(boundary)}/
+        chunks = Regex.split(delimiter, "\r\n" <> body)
 
-          # Remove last boundary
-          bodies = List.delete_at(bodies, -1)
+        # prologue, parts, close delimiter (and epilogue)
+        case chunks do
+          [_preamble | rest] when length(rest) >= 2 ->
+            rest
+            |> Enum.take_while(&(not String.starts_with?(&1, "--")))
+            |> Enum.map(fn chunk ->
+              chunk
+              |> drop_delimiter_line_end()
+              |> parse_sub_body()
+              |> Map.put(:boundary, boundary)
+            end)
 
-          # Parse all sub bodies and return them as a list of maps
-          Enum.map(
-            bodies,
-            fn v -> Map.put(parse_sub_body(v), :boundary, boundary) end
-          )
+          _ ->
+            raise "Invalid MIME multipart SIP message body. Missing boundaries."
         end
 
       _ ->
@@ -746,6 +770,10 @@ defmodule SIPMsg do
         [%{contenttype: ctype, data: body}]
     end
   end
+
+  # What follows `--boundary` on its line: transport padding, then the line break.
+  defp drop_delimiter_line_end(chunk),
+    do: Regex.replace(~r/\A[ \t]*\r?\n/, chunk, "", global: false)
 
   @doc false
   # The boundary of a multipart Content-Type, or nil when the type is not one.

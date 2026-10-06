@@ -662,8 +662,7 @@ When the TLS client certificate option is used, the service trusts
 
 `SIP.MsgTemplate.page_request/2` keeps the `Content-Type` and the body; a
 multipart is carried as its parsed parts under the sender's Content-Type and
-boundary, byte for byte — except that the parser trims trailing whitespace
-from each part's data. The Silo stores the body as it was on the wire
+boundary, byte for byte. The Silo stores the body as it was on the wire
 (`SIPMsg.body_octets/1`), a multipart whole; it kept only the first part
 before chat-media-plan S1. `Content-Encoding` is undone at parsing; the body
 leaves in clear with an unchanged `Content-Type`, except a page that would

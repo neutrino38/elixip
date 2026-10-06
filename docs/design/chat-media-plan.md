@@ -185,10 +185,10 @@ message layer and the tests that pin them.
   `multipart/mixed; boundary=…` — a `related` renamed `mixed` — because
   `page_request/2` dropped the sender's type for a list body. It now keeps
   it, and a bare multipart is relayed **byte for byte**;
-- **not fixed, noted**: the parser trims a part's data, so a part ending in
-  whitespace (a caption ending in a space, an XML ending in CRLF) loses it
-  through any relay. RFC 2046 gives the CRLF before a delimiter to the
-  delimiter, not more; a fix of the parser, outside this plan;
+- fixed after S1: the parser trimmed a part's data, so a part ending in
+  whitespace (a caption ending in a space, an XML ending in CRLF) lost it
+  through any relay. It now splits on the delimiter with the line break
+  before it (RFC 2046 §5.1.1) and keeps the data exactly;
 - tests in `apps/elixip2/test/body_coding_datagram_test.exs`,
   `sbb_page_test.exs` (relay byte for byte, compression on the wire, the
   415 retry) and `apps/kelix_modules/test/silo_test.exs` (the multipart
