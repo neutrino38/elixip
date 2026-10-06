@@ -1103,7 +1103,19 @@ defmodule SIPMsg do
 		end
 	end
 
-	def readable(msg) when is_map(msg) do
+	# User content is replaced before anything else is read: a redacted body is a
+	# placeholder, and there is nothing left to decode (chat-basic-plan C1b).
+	def readable(msg) when is_map(msg) and msg.method == :MESSAGE do
+		if SIP.Msg.Ops.user_content?(msg) do
+			{ safe_serialize(redacted(msg)), Map.get(msg, :decoded_from) }
+		else
+			readable_clear(msg)
+		end
+	end
+
+	def readable(msg) when is_map(msg), do: readable_clear(msg)
+
+	defp readable_clear(msg) do
 		case SIP.Msg.Ops.body_encoding(msg) do
 			coding when coding in [ nil, "identity" ] ->
 				{ safe_serialize(msg), Map.get(msg, :decoded_from) }
@@ -1120,6 +1132,97 @@ defmodule SIPMsg do
 				{ safe_serialize(Map.put(msg, :body, clear)), coding }
 		end
 	end
+
+	@doc """
+	The message with its **user content** replaced by a placeholder — what the
+	journal and the debug logs are given instead of a MESSAGE someone wrote
+	(GDPR; chat-basic-plan C1b). Anything that is not user content
+	(`SIP.Msg.Ops.user_content?/1`) comes back unchanged.
+
+	What goes: the body, and the `Subject` header, which the user writes too.
+	Inside a `message/cpim` envelope only the content goes — the envelope's
+	headers (From, To, DateTime, `imdn.Message-ID`) are addressing and timing,
+	the traffic data the SIP headers already show. The placeholder says what was
+	there without saying what it said:
+
+	    <content not recorded: text/plain, 42 octets>
+
+	`Content-Length` is left as it was: the size of what really went on the wire.
+	"""
+	@spec redacted(map()) :: map()
+	def redacted(msg) when is_map(msg) do
+		if SIP.Msg.Ops.user_content?(msg) do
+			msg
+			|> Map.put(:body, redacted_body(msg))
+			|> Map.new(fn
+				{ key, value } when is_binary(key) and key != "" ->
+					if String.downcase(key) in [ "subject", "s" ],
+						do: { key, "<not recorded>" },
+						else: { key, value }
+
+				other ->
+					other
+			end)
+		else
+			msg
+		end
+	end
+
+	@doc """
+	The text of an outgoing message as a debug log may show it: `wire` itself,
+	unless it is a MESSAGE carrying user content, whose redacted form
+	(`redacted/1`) is returned instead. Only a MESSAGE is parsed again, so the
+	cost is paid by the one method that needs it — and only when the log line is
+	actually written (callers pass it inside a `Logger.debug/1` function).
+	"""
+	@spec loggable(binary()) :: binary()
+	def loggable("MESSAGE " <> _ = wire) do
+		case parse(wire, fn _code, _errmsg, _lineno, _line -> :ok end) do
+			{ :ok, msg } -> safe_serialize(redacted(msg)) || placeholder(nil, byte_size(wire))
+			# A MESSAGE we cannot read back is not shown either: the safe answer
+			# for a line whose content we cannot tell apart from its headers.
+			_ -> placeholder("an unparseable MESSAGE", byte_size(wire))
+		end
+	end
+
+	def loggable(wire) when is_binary(wire), do: wire
+
+	defp redacted_body(msg) do
+		octets = body_octets(Map.get(msg, :body))
+
+		case SIP.Msg.Ops.body_content_type(msg) do
+			"message/cpim" ->
+				case Regex.split(~r/\r?\n\r?\n/, octets, parts: 3, include_captures: true) do
+					[ envelope, sep1, mime, sep2, content ] ->
+						inner = cpim_inner_type(mime)
+						envelope <> sep1 <> mime <> sep2 <> placeholder(inner, byte_size(content))
+
+					_malformed ->
+						placeholder("message/cpim", byte_size(octets))
+				end
+
+			type ->
+				placeholder(type, byte_size(octets))
+		end
+	end
+
+	defp cpim_inner_type(mime_headers) do
+		mime_headers
+		|> String.split(~r/\r?\n/)
+		|> Enum.find_value(fn line ->
+			case String.split(line, ":", parts: 2) do
+				[ name, value ] ->
+					if String.downcase(String.trim(name)) == "content-type",
+						do: value |> String.split(";") |> hd() |> String.trim() |> String.downcase()
+
+				_ ->
+					nil
+			end
+		end)
+	end
+
+	defp placeholder(type, octets),
+		do: "<content not recorded: #{type || "no type"}, #{octets} octets>"
 
 	defp body_octets(body) when is_binary(body), do: body
 	defp body_octets([ %{ data: data } ]) when is_binary(data), do: data

@@ -153,7 +153,7 @@ ln -s ../lib/kelixip/bin/kelixip "$root/usr/sbin/kelixip"
 # (every verb they call is its own), so build_module ships them instead.
 install -d -m 0755 "$root/usr/share/kelixip"
 for exs in "$stage"/scripts/*.exs; do
-  case ${exs##*/} in mcu*.exs | presence-*.exs | registrar-presence.exs) continue ;; esac
+  case ${exs##*/} in mcu*.exs | presence-*.exs | registrar-presence.exs | *-chat.exs) continue ;; esac
   install -m 0644 "$exs" "$root/usr/share/kelixip/"
 done
 
@@ -220,7 +220,7 @@ finish_package "$root" "$DEBDIR/control.in" kelixip DEPENDS="$depends, adduser, 
 # The beam and doc arguments are space-separated lists of globs, each expanded
 # under its own staging directory.
 build_module() {
-  local name="$1" tpl="$3" script_glob="${5:-}"
+  local name="$1" tpl="$3" script_glob="${5:-}" sql="${6:-}"
   local mroot="$WORK/$name" g beam_globs doc_globs
   read -r -a beam_globs <<< "$2"
   read -r -a doc_globs <<< "$4"
@@ -242,6 +242,12 @@ build_module() {
     install -d -m 0755 "$mroot/usr/share/kelixip"
     install -m 0644 "$stage"/scripts/$script_glob "$mroot/usr/share/kelixip/"
   fi
+  # The DDL of a module that owns a schema, for the operator to run (the .spec's
+  # %files mod-silo): the module checks the schema, it never creates it.
+  if [ -n "$sql" ]; then
+    install -d -m 0755 "$mroot/usr/share/kelixip/sql/$sql"
+    install -m 0644 "$stage"/sql/"$sql"/*.sql "$mroot/usr/share/kelixip/sql/$sql/"
+  fi
   finish_package "$mroot" "$tpl" "$name"
 }
 
@@ -259,6 +265,10 @@ build_module kelixip-mod-mcu-presence 'Elixir.Kelix.Mod.McuPresence*.beam' \
   "$DEBDIR/control-mod-mcu-presence.in" 'mcu_presence.md'
 build_module kelixip-mod-dialog-state 'Elixir.Kelix.Mod.DialogState*.beam' \
   "$DEBDIR/control-mod-dialog-state.in" 'dialog_state.md'
+build_module kelixip-mod-silo 'Elixir.Kelix.Mod.Silo*.beam' \
+  "$DEBDIR/control-mod-silo.in" 'silo.md' '*-chat.exs' silo
+build_module kelixip-mod-conversation 'Elixir.Kelix.Mod.Conversation*.beam' \
+  "$DEBDIR/control-mod-conversation.in" 'conversation.md' '' conversation
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

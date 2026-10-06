@@ -588,6 +588,21 @@ defmodule Kelix.Mod.RegistrarTest do
       assert uri.domain == "10.0.0.9"
     end
 
+    # The one header parameter kept: the device's identity, which a page relay
+    # reports the devices it reached by (chat-basic-plan C4). It stays off the
+    # Request-URI all the same.
+    test "the target keeps +sip.instance, as a header parameter only" do
+      req = register("alice", "10.0.0.9", q: 0.7)
+      instance = ~s("<urn:uuid:a11ce000-0000-4000-8000-000000000001>")
+      req = %{req | contact: SIP.Uri.set_header_param(req.contact, "+sip.instance", instance)}
+      Registrar.save(req, @domain)
+
+      assert {:ok, %Peer{uris: [[uri]]}} = Registrar.targets(@domain, invite("alice"))
+      assert SIP.Msg.Ops.device_key(uri) == "urn:uuid:a11ce000-0000-4000-8000-000000000001"
+      assert uri.hparams == %{"+sip.instance" => instance}
+      assert SIP.Uri.serialize_ruri(uri) == {:ok, "sip:alice@10.0.0.9"}
+    end
+
     test "the AOR is matched case-insensitively, like every other lookup" do
       Registrar.save(register("alice", "10.0.0.9"), @domain)
 

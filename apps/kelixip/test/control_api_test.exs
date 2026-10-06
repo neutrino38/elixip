@@ -42,6 +42,23 @@ defmodule Kelix.ControlAPITest do
       assert is_list(body(conn))
     end
 
+    # A row carries the instance's pid, which Jason does not encode: the route
+    # used to answer 500 whenever a scenario was running.
+    test "GET /scenarios lists a running instance, its pid as text" do
+      dom = "api#{System.unique_integer([:positive])}.test"
+      waiter = Path.join(__DIR__, "support/scripts/waiter.exs")
+      route = %{domain: dom, function: :registrar, script: waiter, max_calls: nil}
+      req = %{method: :REGISTER, ruri: %SIP.Uri{userpart: "a", domain: dom}}
+
+      assert {:accept, pid} = Kelix.InstancePool.accept(route, self(), req, [])
+      on_exit(fn -> send(pid, {:scenario_ctl, :shutdown, :test_cleanup}) end)
+
+      conn = call(conn(:get, "/scenarios"))
+      assert conn.status == 200
+      assert %{"pid" => text} = Enum.find(body(conn), &(&1["domain"] == dom))
+      assert text == inspect(pid)
+    end
+
     test "GET /registrations returns a JSON list" do
       conn = call(conn(:get, "/registrations"))
       assert conn.status == 200

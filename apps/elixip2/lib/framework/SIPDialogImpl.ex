@@ -1385,10 +1385,20 @@ defmodule SIP.DialogImpl do
     |> SIP.Dialog.Events.ended(if reason == :cancelled, do: :cancelled, else: :error)
     |> SIP.Dialog.Events.transition(:terminated)
 
-    send_to_app(state, {:dialog_terminated, self(), reason})
+    unless page_dialog?(state), do: send_to_app(state, {:dialog_terminated, self(), reason})
 
     :ok
   end
+
+  # The dialog an out-of-dialog MESSAGE opened on its way in (RFC 3428 §4: page
+  # mode creates no dialog; this one only holds the transaction for 60 s). Its end
+  # says nothing to the application — no call, no leg, no media hangs off it — and
+  # a conversation serving many MESSAGEs would receive one such event per message,
+  # piling up in its mailbox or waking a catch-all clause for nothing
+  # (chat-basic-plan, C3b). An outbound page's dialog is not concerned: its relay
+  # reads the end as the page failing.
+  defp page_dialog?(%SIP.DialogImpl{direction: :inbound, msg: %{method: :MESSAGE}}), do: true
+  defp page_dialog?(_state), do: false
 
   # Take the dialog's client transactions down with it.
   #

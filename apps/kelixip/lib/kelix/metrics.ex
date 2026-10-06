@@ -122,7 +122,21 @@ defmodule Kelix.Metrics do
         tags: [:mcu],
         description: "Media server serviceable (enabled + healthy) — 1/0"
       )
-    ] ++ mcu_metrics()
+    ] ++ mcu_metrics() ++ silo_metrics()
+  end
+
+  # Store-and-forward (the `silo` module, chat-basic-plan C6), defined here for
+  # the reason the mcu's are. The one metric that betrays a registrar script
+  # which forgot to call `Silo.flush`: nothing else notices that mistake.
+  defp silo_metrics() do
+    [
+      sum("kelix.silo.expired_undelivered.total",
+        event_name: [:kelix, :silo, :expired_undelivered],
+        measurement: :count,
+        tags: [:domain],
+        description: "Stored messages that expired without reaching any device"
+      )
+    ]
   end
 
   # Conferencing (the `mcu` module, docs/design/DESIGN-MCU.md#11-observability). Defined here

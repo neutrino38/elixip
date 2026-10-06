@@ -53,6 +53,24 @@ import Kelix.Mod.AuthDb, only: [authenticate: 3, challengeable?: 1]
 The realm used for lookup and digest is the **domain's nominal name** (aliases
 fold to it).
 
+The keys that say where the server is and how to reach it — `driver`, `host`,
+`port`, `ssl`, `ssl_ca_cert_file`, `allow_insecure_db_connection`,
+`connect_timeout_ms` — may instead come from a `[database]` block in
+`config.toml`, shared with every SQL module. A key set in `[module.auth_db]` wins.
+`database`, `username`, `password` and `pool_size` are never inherited.
+
+```toml
+# config.toml
+[database]
+driver = "postgres"
+host   = "db.example.net"
+
+[module.auth_db]
+database = "kamailio"
+username = "kamailio_ro"
+password = "secret"
+```
+
 ## The link to the database
 
 The module's supervised service is a **permanent connection pool**

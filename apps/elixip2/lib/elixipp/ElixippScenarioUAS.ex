@@ -1,14 +1,16 @@
 defmodule Elixip.ScenarioUAS do
   @moduledoc """
   UAS scenario factory used by the `elixipp` tool when it runs a server scenario
-  (`:uas_register`, `:uas_invite` or `:uas_presence`). It is a single GenServer
-  implementing the `SIP.Session.Registrar`, `SIP.Session.Call` and
-  `SIP.Session.Presence` behaviours, so the same quota / monitoring / stats
-  machinery drives registrar, call and presence servers.
+  (`:uas_register`, `:uas_invite`, `:uas_presence` or `:uas_message`). It is a
+  single GenServer implementing the `SIP.Session.Registrar`, `SIP.Session.Call`,
+  `SIP.Session.Presence` and `SIP.Session.Chat` behaviours, so the same quota /
+  monitoring / stats machinery drives registrar, call, presence and page-mode
+  servers.
 
   On each inbound request the dialog layer calls `on_new_registration/3`
-  (REGISTER), `on_new_call/3` (INVITE) or `on_new_subscribe/3` /
-  `on_new_publish/3` (SUBSCRIBE, PUBLISH). This module:
+  (REGISTER), `on_new_call/3` (INVITE), `on_new_subscribe/3` /
+  `on_new_publish/3` (SUBSCRIBE, PUBLISH) or `on_message/3` (an out-of-dialog
+  MESSAGE). This module:
 
     * for an INVITE, rejects with `604 Does Not Exist Anywhere` when the R-URI
       domain does not match the configured `domains` (`:any` = catch-all);
@@ -30,6 +32,7 @@ defmodule Elixip.ScenarioUAS do
   @behaviour SIP.Session.Registrar
   @behaviour SIP.Session.Call
   @behaviour SIP.Session.Presence
+  @behaviour SIP.Session.Chat
   use GenServer
   require Logger
 
@@ -126,6 +129,13 @@ defmodule Elixip.ScenarioUAS do
     GenServer.cast(__MODULE__, {:instance_ended, dialog_id, app_pid})
   end
 
+  # ── SIP.Session.Chat behaviour ────────────────────────────────────────────
+
+  @impl SIP.Session.Chat
+  def on_message(dialog_id, msg_req, transaction_id) do
+    GenServer.call(__MODULE__, {:new_message, dialog_id, msg_req, transaction_id})
+  end
+
   # ── GenServer callbacks ───────────────────────────────────────────────────
 
   @impl GenServer
@@ -172,6 +182,10 @@ defmodule Elixip.ScenarioUAS do
 
   def handle_call({:new_publish, dialog_id, req, _transaction_id}, _from, state) do
     presence_accept_or_reject(state, dialog_id, req, "PUBLISH")
+  end
+
+  def handle_call({:new_message, dialog_id, req, _transaction_id}, _from, state) do
+    accept_or_reject(state, dialog_id, req, "MESSAGE")
   end
 
   def handle_call(:stats, _from, state) do
@@ -250,13 +264,14 @@ defmodule Elixip.ScenarioUAS do
 
   # ── Internals ─────────────────────────────────────────────────────────────
 
-  # Shared quota check + instance spawn for REGISTER and INVITE.
+  # Shared quota check + instance spawn, whatever the request.
   defp accept_or_reject(state, dialog_id, req, kind) do
     max_run_reached = is_integer(state.max_run) and state.total_started >= state.max_run
 
     cond do
       max_run_reached ->
         Logger.debug("ScenarioUAS: max_run #{state.max_run} reached, rejecting #{kind} with 503")
+
         {:reply, {:reject, 503, "Service Unavailable"},
          %{state | total_rejected_quota: state.total_rejected_quota + 1}}
 

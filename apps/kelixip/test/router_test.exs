@@ -5,8 +5,8 @@ defmodule Kelix.RouterTest do
 
   alias Kelix.{Router, Domains}
 
-  # example.com: registrar + presence (no calls)
-  # mydomain.de: registrar + calls (dial-plan)
+  # example.com: registrar + presence (no calls, no chat)
+  # mydomain.de: registrar + calls (dial-plan) + chat
   @domains_toml """
   [[domain]]
   name = "example.com"
@@ -41,6 +41,18 @@ defmodule Kelix.RouterTest do
   [[domain.call]]
   default = true
   script  = "catchall.exs"
+
+  [[domain.chat]]
+  pattern = "mybot"
+  script  = "mybot.exs"
+
+  [[domain.chat]]
+  pattern = "room-."
+  script  = "chatroom.exs"
+
+  [[domain.chat]]
+  default = true
+  script  = "p2p-chat.exs"
   """
 
   setup_all do
@@ -122,9 +134,16 @@ defmodule Kelix.RouterTest do
       assert {:reject, 405, _, _} = Router.resolve(snap, req(:BYE, "x", "example.com"))
     end
 
+    test "MESSAGE → chat when enabled", %{snap: snap} do
+      assert {:route, %{function: :chat, script: "p2p-chat.exs"}} =
+               Router.resolve(snap, req(:MESSAGE, "alice", "mydomain.de"))
+    end
+
     # Page-mode chat is a function of its own with its own blocks (DESIGN-CHAT.md);
-    # a MESSAGE carries no Event, so it can name none of the presence blocks.
-    test "an out-of-dialog MESSAGE is not routed to presence", %{snap: snap} do
+    # a MESSAGE carries no Event, so it can name none of the presence blocks, and a
+    # domain with presence but no chat refuses it. Trix reads this 405 as "this
+    # server does not route messages" (its ADR 0008, D13).
+    test "MESSAGE on a domain without chat → 405, never presence", %{snap: snap} do
       assert {:reject, 405, _, _} = Router.resolve(snap, req(:MESSAGE, "alice", "example.com"))
     end
 
@@ -134,7 +153,6 @@ defmodule Kelix.RouterTest do
       assert {:reject, 405, _, fields} = Router.resolve(snap, req(:MESSAGE, "a", "example.com"))
       assert {"Allow", allow} = List.keyfind(fields, "Allow", 0)
       assert allow == Kelix.Options.allow()
-      refute allow =~ "MESSAGE"
     end
   end
 
@@ -214,12 +232,55 @@ defmodule Kelix.RouterTest do
     end
   end
 
+  describe "step 3 — script (chat rules first-match)" do
+    test "a literal pattern reaches its bot", %{snap: snap} do
+      assert {:route, %{function: :chat, script: "mybot.exs"}} =
+               Router.resolve(snap, req(:MESSAGE, "mybot", "mydomain.de"))
+    end
+
+    test "a wildcard pattern reaches the rooms", %{snap: snap} do
+      assert {:route, %{script: "chatroom.exs"}} =
+               Router.resolve(snap, req(:MESSAGE, "room-42", "mydomain.de"))
+    end
+
+    test "anyone else → the catch-all", %{snap: snap} do
+      assert {:route, %{script: "p2p-chat.exs"}} =
+               Router.resolve(snap, req(:MESSAGE, "bob", "mydomain.de"))
+    end
+
+    test "no catch-all and no match → 404" do
+      {:ok, snap} =
+        Domains.parse("""
+        [[domain]]
+        name = "bots.example"
+
+        [[domain.chat]]
+        pattern = "mybot"
+        script  = "mybot.exs"
+        """)
+
+      capture_log(fn ->
+        assert {:reject, 404, _} = Router.resolve(snap, req(:MESSAGE, "bob", "bots.example"))
+      end)
+    end
+
+    # The regression of 2026-09-22 end to end: a Linphone typing indicator is an
+    # out-of-dialog MESSAGE, and it once killed the dialog before any answer.
+    test "a typing indicator is routed like any MESSAGE", %{snap: snap} do
+      typing =
+        req(:MESSAGE, "bob", "mydomain.de")
+        |> Map.put(:contenttype, "application/im-iscomposing+xml")
+
+      assert {:route, %{function: :chat, script: "p2p-chat.exs"}} = Router.resolve(snap, typing)
+    end
+  end
+
   describe "helpers" do
     test "enabled_methods reflects the domain's functions", %{snap: snap} do
       example = Domains.lookup(snap, "example.com")
       my = Domains.lookup(snap, "mydomain.de")
       assert Enum.sort(Router.enabled_methods(example)) == [:PUBLISH, :REGISTER, :SUBSCRIBE]
-      assert Enum.sort(Router.enabled_methods(my)) == [:INVITE, :REGISTER]
+      assert Enum.sort(Router.enabled_methods(my)) == [:INVITE, :MESSAGE, :REGISTER]
     end
   end
 

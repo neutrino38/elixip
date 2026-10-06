@@ -4,7 +4,7 @@ defmodule SIPParser.MixProject do
   def project do
     [
       app: :elixip2,
-      version: "1.6.1",
+      version: "1.6.2",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -38,8 +38,10 @@ defmodule SIPParser.MixProject do
     [
       # The Finite State Language: the engine every scenario and every kelixip
       # script runs on. It lives in its own repository and ships as the hex
-      # package `finite_state_language` (OTP app `:fsl`, Apache-2.0).
-      {:fsl, "~> 0.4.1", hex: :finite_state_language},
+      # package `finite_state_language` (OTP app `:fsl`, Apache-2.0). 0.5.0 is
+      # the floor: it adds `:start_state`, what a hibernated conversation is
+      # woken with.
+      {:fsl, "~> 0.5.0", hex: :finite_state_language},
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.6"},

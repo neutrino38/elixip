@@ -59,6 +59,7 @@ defmodule Kelix.Config do
           modules: map,
           control_api: map,
           metrics: map,
+          database: map,
           debug: %{
             trace_retention: pos_integer,
             max_traces: pos_integer,
@@ -77,7 +78,7 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.6.1",
+            user_agent: "Kelixip/1.6.2",
             max_calls: nil,
             # The largest inbound SIP message this node accepts, in bytes. Past it a
             # request is answered 513 instead of being parsed. Read by the framework
@@ -118,6 +119,11 @@ defmodule Kelix.Config do
             modules: %{},
             control_api: %{},
             metrics: %{},
+            # `[database]`: where the SQL server is and how to reach it, the
+            # defaults every SQL module's block inherits key by key
+            # (Kelix.DB.Pool.with_defaults/1). Kept as the block's own string keys,
+            # since that is what it is merged into.
+            database: %{},
             # The journals an operator asked for (`kelictl debug <id> on`), kept in
             # memory by Kelix.Traces: for `trace_retention` seconds once written,
             # `max_traces` at most, the oldest dropped first, each cut at
@@ -355,7 +361,7 @@ defmodule Kelix.Config do
          :ok <-
            reject_keys(
              map,
-             ~w(server log listen mediaserver module control_api metrics tls debug),
+             ~w(server log listen mediaserver module control_api metrics tls debug database),
              "config"
            ),
          {:ok, server} <- parse_server(Map.get(map, "server", %{})),
@@ -365,6 +371,7 @@ defmodule Kelix.Config do
          {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")),
          {:ok, tls} <- parse_tls(Map.get(map, "tls")),
          {:ok, debug} <- parse_debug(Map.get(map, "debug", %{})),
+         {:ok, database} <- parse_database(Map.get(map, "database", %{})),
          {:ok, mediaserver} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
@@ -384,7 +391,8 @@ defmodule Kelix.Config do
          control_api: control_api,
          metrics: metrics,
          tls: tls,
-         debug: debug
+         debug: debug,
+         database: database
        }}
     end
   end
@@ -505,6 +513,39 @@ defmodule Kelix.Config do
   end
 
   defp parse_debug(_), do: {:error, "[debug] must be a table"}
+
+  # `[database]` says where and how, never who: an account shared by two modules
+  # is the grant DESIGN-CHAT.md refuses (the subscriber base read-only, the Silo
+  # writing), so the account keys are refused here by name rather than as unknown.
+  @account_keys ~w(database username password)
+
+  defp parse_database(%{} = d) do
+    with :ok <- account_keys_absent(d),
+         :ok <- reject_keys(d, Kelix.DB.Pool.default_keys(), "[database]"),
+         {:ok, _} <- opt_enum(d, "driver", ~w(mysql postgres), nil, "[database]"),
+         {:ok, _} <- opt_string(d, "host", nil, "[database]"),
+         {:ok, _} <- opt_port(d, "port", nil, "[database]"),
+         {:ok, _} <- opt_bool(d, "ssl", nil, "[database]"),
+         {:ok, _} <- opt_string(d, "ssl_ca_cert_file", nil, "[database]"),
+         {:ok, _} <- opt_bool(d, "allow_insecure_db_connection", nil, "[database]"),
+         {:ok, _} <- opt_pos_integer(d, "connect_timeout_ms", "[database]") do
+      {:ok, d}
+    end
+  end
+
+  defp parse_database(_), do: {:error, "[database] must be a table"}
+
+  defp account_keys_absent(d) do
+    case Enum.filter(@account_keys, &Map.has_key?(d, &1)) do
+      [] ->
+        :ok
+
+      keys ->
+        {:error,
+         "[database]: #{Enum.join(keys, ", ")} belong(s) in each module's own block — " <>
+           "every SQL module connects with an account of its own"}
+    end
+  end
 
   # Absent means no checking. Verifying a peer presumes an authority both sides
   # agreed on, which is an interconnect decision and not something a node takes on

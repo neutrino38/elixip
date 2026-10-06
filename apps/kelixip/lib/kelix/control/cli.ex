@@ -563,7 +563,11 @@ defmodule Kelix.Control.CLI do
          # ● : the instance's journal is on (kelictl debug <id> on)
          if(Map.get(&1, :traced), do: "#{&1.id} ●", else: to_string(&1.id)),
          &1.domain,
-         to_string(&1.function),
+         # A conversation is one instance for many MESSAGEs: it says how many.
+         case Map.get(&1, :messages) do
+           nil -> to_string(&1.function)
+           n -> "#{&1.function} (#{n} msg)"
+         end,
          # WHICH scenario runs here — the file domains.toml routed to, the way
          # elixipp's --monitor names the scenario module. The pool knows it even
          # when the FSM view does not, so it is never empty for a live instance.
@@ -615,6 +619,7 @@ defmodule Kelix.Control.CLI do
   end
 
   defp render(:domain, {:ok, d}) do
+    # a node older than the chat function sends no `chat` key
     lines =
       [
         "domain:        #{d.name}",
@@ -627,7 +632,9 @@ defmodule Kelix.Control.CLI do
       ] ++
         format_presence(d.presence) ++
         [if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")] ++
-        format_dial_plan(d.dial_plan)
+        format_dial_plan(d.dial_plan) ++
+        [if(Map.get(d, :chat, []) == [], do: "chat:          (disabled)", else: "chat:")] ++
+        format_dial_plan(Map.get(d, :chat, []))
 
     {0, Enum.join(lines, "\n")}
   end
@@ -742,7 +749,17 @@ defmodule Kelix.Control.CLI do
 
     {0,
      table(
-       ["id", "scenario", "domain", "script", "written (UTC)", "instance", "SIP", "size", "kept for"],
+       [
+         "id",
+         "scenario",
+         "domain",
+         "script",
+         "written (UTC)",
+         "instance",
+         "SIP",
+         "size",
+         "kept for"
+       ],
        rows,
        &[
          to_string(&1.id),
@@ -1230,9 +1247,14 @@ defmodule Kelix.Control.CLI do
     |> Enum.with_index(1)
     |> Enum.map(fn {{pattern, r}, i} ->
       "  #{i}. #{String.pad_trailing(pattern, pw)} -> " <>
-        "#{String.pad_trailing(r.script, sw)}  #{format_script_module(r)}"
+        "#{String.pad_trailing(r.script, sw)}  #{format_script_module(r)}" <>
+        format_idle_timeout(Map.get(r, :idle_timeout))
     end)
   end
+
+  # A chat rule's silence before its conversation ends; a call rule has none.
+  defp format_idle_timeout(seconds) when is_integer(seconds), do: "  idle #{seconds}s"
+  defp format_idle_timeout(_), do: ""
 
   # A script the registry has never loaded has no module yet — say so rather than
   # printing a blank, which would read as "no module" instead of "not loaded".

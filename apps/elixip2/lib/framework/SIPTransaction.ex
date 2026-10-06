@@ -335,7 +335,7 @@ alias SIP.NetUtils
         # keep-alive (RFC 7118: ping "\r\n\r\n", pong "\r\n") or a peer sending
         # non-canonical SIP. Gated by :dump_unparsed_sip (off by default, noisy).
         if Application.get_env(:elixip2, :dump_unparsed_sip, false) do
-          Logger.warning("Unparseable SIP message (#{code}), raw bytes: #{inspect(sipmsgstr)}")
+          Logger.warning("Unparseable SIP message (#{code}), raw bytes: #{inspect(SIPMsg.loggable(sipmsgstr))}")
         end
 
         code

@@ -74,7 +74,7 @@ defmodule SIP.Transport.TCP do
   @spec handle_call({:sendmsg, binary(), :inet.ip_address(), :inet.port_number}, any(), map()) :: {:reply, :ok, map()}
   def handle_call({:sendmsg, msgstr, _destip, _dest_port}, _from, state) do
     destipstr = SIP.NetUtils.ip2string(state.destip)
-    Logger.debug("TCP: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
+    Logger.debug(fn -> "TCP: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> SIPMsg.loggable(msgstr) <> "\r\n-----------------" end)
     case Socket.Stream.send(state.socket, msgstr) do
       :ok -> {:reply, :ok, state}
       {:error, reason} ->

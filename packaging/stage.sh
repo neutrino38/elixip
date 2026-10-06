@@ -96,7 +96,7 @@ mkdir -p "$stage/scripts"
 cp "$REPO"/apps/kelixip/scripts/*.exs "$stage/scripts/"
 
 cp -a "$REPO/packaging/config" "$REPO/packaging/sysconfig" "$REPO/packaging/systemd" \
-   "$REPO/packaging/completion" "$stage/"
+   "$REPO/packaging/completion" "$REPO/packaging/sql" "$stage/"
 
 mkdir -p "$stage/doc"
 cp "$REPO"/docs/kelixip/*.md "$stage/doc/"

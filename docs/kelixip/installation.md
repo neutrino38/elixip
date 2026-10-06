@@ -291,6 +291,27 @@ ssl_ca_cert_file   = ""             # with a CA the server cert is verified; wit
 
 `[module.registrar]` lives in **`domains.toml`**, not here (see below).
 
+#### `[database]` — defaults for the SQL modules
+
+Where the SQL server is and how to reach it, inherited key by key by every
+module that keeps data in SQL (`auth_db`, `silo`). A key set in the module's own
+block wins. Optional; absent, each module block says everything itself.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `driver` | `mysql` \| `postgres` | SQL engine |
+| `host` | string | Database host |
+| `port` | 1..65535 | Database port |
+| `ssl` | bool | `false` asks for cleartext outright |
+| `ssl_ca_cert_file` | path | CA that must sign the server certificate |
+| `allow_insecure_db_connection` | bool | Accept a cleartext link when the server refuses TLS |
+| `connect_timeout_ms` | integer, > 0 | Upper bound on establishing one connection |
+
+`database`, `username` and `password` are refused here: every module connects
+with an account of its own. `pool_size` is refused too — it sizes one module's
+load. See [auth_db.md](modules/auth_db.md#parameters) for how the transport is
+negotiated.
+
 #### `[mediaserver]` — the node's media settings
 
 | Key | Type | Default | Meaning |
@@ -522,16 +543,15 @@ wrong path.
 
 A request is routed by its R-URI host (falling back to the `To` host); no match
 ⇒ `404`. Then the method selects the **function** — `REGISTER` → `registrar`,
-`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH` → `presence` — and a function with no
-block on that domain is **not enabled** ⇒ `405`.
+`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH` → `presence`, an out-of-dialog
+`MESSAGE` → `chat` — and a function with no block on that domain is **not
+enabled** ⇒ `405`.
 
 For presence there is one more step: the request's `Event` header selects which
 `[[domain.presence]]` block serves it, and a package the domain declares none for
 is answered `489 Bad Event` — before any script runs, and carrying `Allow-Events`
 with the packages it does serve.
 
-An out-of-dialog `MESSAGE` is answered `405`: page-mode chat is a function of its
-own and its dispatch is not implemented yet.
 
 ##### Wildcard aliases
 
@@ -620,6 +640,31 @@ Pattern syntax (Asterisk-style, matching the **whole** user-part):
 | `.` | one or more of any character |
 | `!` | zero or more of any character |
 | anything else | itself, literally |
+
+#### `[[domain.chat]]` — page-mode chat
+
+The dial-plan's shape — ordered, first match wins on the R-URI user-part, a
+`pattern` or `default = true`, the catch-all last — for out-of-dialog
+`MESSAGE` requests (RFC 3428). No rule matches ⇒ `404`.
+
+```toml
+  [[domain.chat]]
+  default      = true
+  script       = "p2p-chat.exs"
+  idle_timeout = 300
+```
+
+| Key | Type | Required | Meaning |
+|---|---|---|---|
+| `pattern` / `default` | string / `true` | **one of them** | As in `[[domain.call]]` |
+| `script` | string | **yes** | Scenario script serving the conversation |
+| `idle_timeout` | int > 0 | no | Seconds of silence that end a conversation (default `300`) |
+
+One instance serves a **conversation**: the MESSAGEs of one sender to one
+recipient over one connection. The reference `p2p-chat.exs` authenticates the
+first one, relays each to every device of the recipient, and stores what nobody
+took ([silo.md](modules/silo.md)); pair it with `registrar-chat.exs` as the
+domain's registrar script.
 
 #### `[module.registrar]`
 

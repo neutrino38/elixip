@@ -603,6 +603,58 @@ defmodule Kelix.PresenceScriptTest do
       assert row.presentity_uri == bob_uri()
       assert Presence.watchers("visioassistance.net", "900020123") == []
     end
+
+    # A refresh is sent inside the dialog, to our own Contact, and need not carry
+    # the list again: the list is the one the initial SUBSCRIBE named. Re-reading
+    # both off the refresh answered a NOTIFY naming nobody — the watcher's whole
+    # roster gone at the first refresh.
+    test "a refresh without the list keeps the list and its URI", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri(), @outsider])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      refresh =
+        req
+        |> Map.drop(["Require", "Content-Disposition", :body, :contenttype])
+        |> Map.merge(%{ruri: our_contact(), expires: 1800})
+
+      submit(pid, dialog, refresh)
+      assert_receive {:replied, 200, "OK", fields, _}, 1000
+      assert fields[:expires] == 1800
+      assert_receive {:notified, body, content_type}, 1000
+      {manifest, _parts} = read_list(body, content_type)
+
+      assert manifest.uri == "sip:rls@#{@domain}"
+
+      assert Enum.map(manifest.resources, & &1.uri) |> Enum.sort() ==
+               Enum.sort([bob_uri(), @outsider])
+
+      assert [_watcher] = Presence.watchers(@domain, @presentity)
+    end
+
+    # The same refresh as a UA that repeats its list sends it: the list URI is
+    # still the initial Request-URI, not our Contact.
+    test "a refresh repeating the list keeps the list URI", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri()])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      submit(pid, dialog, Map.put(req, :ruri, our_contact()))
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, body, content_type}, 1000
+      {manifest, _parts} = read_list(body, content_type)
+
+      assert manifest.uri == "sip:rls@#{@domain}"
+      assert Enum.map(manifest.resources, & &1.uri) == [bob_uri()]
+    end
   end
 
   # mcu-presence-plan.md, MP4: a conference room is a presentity. The MCU, the
@@ -962,9 +1014,45 @@ defmodule Kelix.PresenceScriptTest do
     end
   end
 
+  # A refresh as a UA really sends it: inside the dialog, to the remote target —
+  # our own Contact, which names no user. The presentity is the initial
+  # SUBSCRIBE's; reading it off this Request-URI answered 404 to every refresh
+  # (Trix → kelixip, 2026-09-30), and the watcher lost the presence for good.
+  describe "a refresh sent to our Contact" do
+    setup do
+      serve_registrar_domain()
+    end
+
+    test "is granted, and the watcher still watches the same presentity", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      submit(pid, dialog, subscribe())
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      contact = %SIP.Uri{
+        domain: "[2001:db8::1]",
+        port: 8443,
+        params: %{"transport" => "wss"}
+      }
+
+      submit(pid, dialog, Map.put(subscribe(expires: 1800), :ruri, contact))
+      assert_receive {:replied, 200, "OK", fields, _}, 1000
+      assert fields[:expires] == 1800
+      assert_receive {:notified, _, _}, 1000
+      assert [_watcher] = Presence.watchers(@domain, @presentity)
+    end
+  end
+
   # ── the list subscription's own fixtures ─────────────────────────────────────
 
   defp bob_uri, do: "sip:#{@presentity}@#{@domain}"
+
+  # Where an in-dialog refresh is sent: the remote target, our own Contact, which
+  # names no user.
+  defp our_contact,
+    do: %SIP.Uri{domain: "[2001:db8::1]", port: 8443, params: %{"transport" => "wss"}}
 
   # The SUBSCRIBE a client sends to open its buddy list: the list in the body,
   # the Request-URI naming the list and not a presentity.

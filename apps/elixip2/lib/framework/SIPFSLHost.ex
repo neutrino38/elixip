@@ -230,12 +230,13 @@ defmodule SIP.FSL.Host do
     :ok
   end
 
-  # A `:uas_register` or `:uas_presence` child is reached through a factory
-  # registered as the processing module for its method (`Elixip.ScenarioUAS`,
-  # the kelixip Router), not through a per-child dispatcher like the call one
-  # above: there is nothing to register a waiting pid with, so a sub-FSM of
-  # either kind would wait for a request that is routed elsewhere.
-  defp setup_uas_child(type, _pid) when type in [:uas_register, :uas_presence] do
+  # A `:uas_register`, `:uas_presence` or `:uas_message` child is reached
+  # through a factory registered as the processing module for its method
+  # (`Elixip.ScenarioUAS`, the kelixip Router), not through a per-child
+  # dispatcher like the call one above: there is nothing to register a waiting
+  # pid with, so a sub-FSM of any of these kinds would wait for a request that
+  # is routed elsewhere.
+  defp setup_uas_child(type, _pid) when type in [:uas_register, :uas_presence, :uas_message] do
     Logger.warning("spawn_fsm: scenario type #{inspect(type)} is not supported as a sub-FSM yet")
   end
 
@@ -323,6 +324,9 @@ defmodule SIP.FSL.Host do
        (`docs/design/DESIGN-SIPSTACK.md#57-resilience`, R6).
     3. **the inbound request, stashed last**, along with the dialog pid, in the
        slot `reply_invite*` and `last_uas_req/0` serve.
+    4. **a conversation's next MESSAGE**, which reached this instance on a
+       dialog of its own after its transaction had crossed untraced, is written
+       in a running journal (`SIP.Session.Page.note_event/2`).
 
   Spread over three calls injected into every `on_events` clause, that order
   lived in the expansion of a macro. Here it can be read.
@@ -334,6 +338,7 @@ defmodule SIP.FSL.Host do
     sip_ctx
     |> SIP.Session.B2bua.note_leg_event(event)
     |> SIP.Session.CallUAS.auto_store(event)
+    |> SIP.Session.Page.note_event(event)
   end
 
   @doc """
@@ -394,13 +399,35 @@ defmodule SIP.FSL.Host do
   finds no `on_events` to match against.
   """
   @impl true
-  def injected_clauses(ctx), do: [{:media_down, media_down_clause(ctx)}]
+  def injected_clauses(ctx),
+    do: [
+      {:media_down, media_down_clause(ctx)},
+      {:conversation_idle, conversation_clause(ctx, :idle, "conversation idle")},
+      {:conversation_transport_down,
+       conversation_clause(ctx, :transport_down, "conversation transport down")}
+    ]
 
   defp media_down_clause(ctx) do
     [clause] =
       quote do
         {:ms_event, _ref, :server_disconnected} ->
           {:goto, :__shutdown__, "media server down", :media, unquote(ctx)}
+      end
+
+    clause
+  end
+
+  # Two ways a conversation ends under the scenario (chat-basic-plan, C3b, C3c):
+  # silent for its `idle_timeout`, or the connected transport it came in on gone.
+  # Either way the node has already forgotten it, so the next MESSAGE starts
+  # another. A scenario that never considered the case ends there, successfully —
+  # going quiet, or away, is how a chat ends. One that wants to keep its context
+  # matches `{:conversation, _}` itself, and hibernates.
+  defp conversation_clause(ctx, event, desc) do
+    [clause] =
+      quote do
+        {:conversation, unquote(event)} ->
+          {:terminal, :success, unquote(desc), :sip, unquote(ctx)}
       end
 
     clause
@@ -418,6 +445,13 @@ defmodule SIP.FSL.Host do
   """
   @impl true
   def clause_covers?(:media_down, pattern), do: pattern_handles_media_down?(pattern)
+
+  def clause_covers?(:conversation_idle, pattern),
+    do: pattern_handles_conversation?(pattern, :idle)
+
+  def clause_covers?(:conversation_transport_down, pattern),
+    do: pattern_handles_conversation?(pattern, :transport_down)
+
   def clause_covers?(_name, _pattern), do: false
 
   # `{:ms_event, ref, evt}` is a 3-tuple, i.e. `{:{}, _, elems}` in quoted form.
@@ -426,6 +460,12 @@ defmodule SIP.FSL.Host do
 
   # A bare variable or `_`: a catch-all, which catches this too.
   defp pattern_handles_media_down?(pattern), do: variable?(pattern)
+
+  # `{:conversation, event}` is a 2-tuple, a literal pair in quoted form.
+  defp pattern_handles_conversation?({:conversation, event}, wanted),
+    do: event == wanted or variable?(event)
+
+  defp pattern_handles_conversation?(pattern, _wanted), do: variable?(pattern)
 
   defp variable?({name, _meta, ctx_arg}) when is_atom(name) and is_atom(ctx_arg), do: true
   defp variable?(_), do: false

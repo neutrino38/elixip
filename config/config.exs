@@ -15,7 +15,7 @@ config :logger, :file_log,
   level: :info
 
 config :elixip2,
-  useragent: "Elixipp-1.6.1",
+  useragent: "Elixipp-1.6.2",
   optionkeepaliveperiod: 15,
   # The largest inbound SIP message accepted, in BYTES. Past it a request is
   # answered 513 (Message too large) instead of being parsed; a response and an

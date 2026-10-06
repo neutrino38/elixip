@@ -419,8 +419,8 @@ defmodule SIP.Test.FSL.HostTest do
       assert FSL.Host.hook(FSL.Host.Default, :clause_covers?, [:whatever, nil], false) == false
     end
 
-    test "SIP's clause is the media server going away, generously suppressed" do
-      assert [{:media_down, clause}] =
+    test "SIP's first clause is the media server going away, generously suppressed" do
+      assert [{:media_down, clause}, {:conversation_idle, _}, {:conversation_transport_down, _}] =
                SIP.FSL.Host.injected_clauses(Macro.var(:sip_ctx, nil))
 
       assert Macro.to_string(clause) =~ ":server_disconnected"
@@ -436,6 +436,31 @@ defmodule SIP.Test.FSL.HostTest do
       refute covers?.({:{}, [], [:ms_event, {:_, [], nil}, :ice_connected]})
       # …and it says nothing about a clause it was not asked about.
       refute SIP.FSL.Host.clause_covers?(:something_else, {:event, [], nil})
+    end
+
+    # chat-basic-plan, C3b/C3c: a conversation the node has let go of ends the
+    # scenario serving it, successfully, unless the scenario takes the event.
+    test "SIP's other clauses are a conversation going idle or losing its transport" do
+      assert [_media_down, {:conversation_idle, clause}, {:conversation_transport_down, down}] =
+               SIP.FSL.Host.injected_clauses(Macro.var(:sip_ctx, nil))
+
+      assert Macro.to_string(clause) =~ "{:conversation, :idle}"
+      assert Macro.to_string(clause) =~ ":terminal, :success"
+
+      covers? = &SIP.FSL.Host.clause_covers?(:conversation_idle, &1)
+
+      assert covers?.({:conversation, :idle})
+      assert covers?.({:conversation, {:what, [], nil}})
+      assert covers?.({:event, [], nil})
+      refute covers?.({:conversation, :other})
+      refute covers?.({:conversation, :transport_down})
+      refute covers?.({:{}, [], [:page, :failed, {:_, [], nil}]})
+
+      assert Macro.to_string(down) =~ "{:conversation, :transport_down}"
+      down_covers? = &SIP.FSL.Host.clause_covers?(:conversation_transport_down, &1)
+      assert down_covers?.({:conversation, :transport_down})
+      assert down_covers?.({:conversation, {:why, [], nil}})
+      refute down_covers?.({:conversation, :idle})
     end
   end
 end

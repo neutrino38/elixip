@@ -12,7 +12,8 @@ defmodule SIP.Scenario.SipTrace do
     * a scenario `watch/0`es itself when its journal starts;
     * a dialog `bind/3`s itself to its application process when it learns it, and
       a scenario `adopt/1`s a dialog that existed before its journal did (a UAS
-      instance is spawned by the request that created the dialog);
+      instance is spawned by the request that created the dialog), and
+      `delegate/2`s a process that owns a dialog on its behalf (a page relay);
     * the transaction layer calls `sent/3` and `received/4` on every message it
       puts on or takes off the wire, keyed on its `app` pid — the dialog, or the
       scenario itself. A message whose `app` is bound to no watched scenario
@@ -39,8 +40,10 @@ defmodule SIP.Scenario.SipTrace do
   One SIP message, as an `FSL.Journal` `:message` event. The first block is what
   the renderers draw. `body` is the whole message as text, its body decoded
   (`SIPMsg.readable/1`, `decoded_from` naming the coding undone), cut at 8 KiB
-  (`clipped`): what a journal reader unfolds. `method`, `code`, `reason`, `cseq`
-  and `sdp` are the SIP reading of it, kept for whoever inspects the events.
+  (`clipped`): what a journal reader unfolds. `redacted` says the text a person
+  wrote was left out of it — a MESSAGE's content is never recorded (GDPR,
+  `SIPMsg.redacted/1`). `method`, `code`, `reason`, `cseq` and `sdp` are the SIP
+  reading of it, kept for whoever inspects the events.
   """
   @type event :: %{
           kind: :message,
@@ -54,6 +57,7 @@ defmodule SIP.Scenario.SipTrace do
           repeat: boolean(),
           body: String.t() | nil,
           clipped: boolean(),
+          redacted: boolean(),
           decoded_from: String.t() | nil,
           method: atom() | nil,
           code: non_neg_integer() | nil,
@@ -86,6 +90,24 @@ defmodule SIP.Scenario.SipTrace do
   end
 
   @doc """
+  Let `pid` act for the calling scenario: a dialog binding to `pid` as its
+  application binds to the scenario, under the leg `tag` — which wins over the
+  dialog's own, so a fan-out labels each device's lane. For a process a
+  scenario starts to own a dialog on its behalf (`SIP.Session.Page.Relay`).
+
+  No-op when the caller is not traced, so an untraced scenario leaves no row.
+  """
+  @spec delegate(pid(), atom() | binary() | nil) :: :ok
+  def delegate(pid, tag \\ nil) when is_pid(pid) do
+    with tab when tab != nil <- table(),
+         {scenario, _tag} <- scenario_of(tab, self()) do
+      :ets.insert(tab, {{:watch, pid}, {scenario, tag}})
+    end
+
+    :ok
+  end
+
+  @doc """
   Return the events recorded for the calling scenario, oldest first, and forget
   everything about it (events and bindings).
   """
@@ -111,8 +133,8 @@ defmodule SIP.Scenario.SipTrace do
   @spec bind(pid(), pid() | nil, atom() | nil) :: :ok
   def bind(dialog_pid, app_pid, tag) when is_pid(dialog_pid) and is_pid(app_pid) do
     with tab when tab != nil <- table(),
-         {scenario, _tag} <- scenario_of(tab, app_pid) do
-      :ets.insert(tab, {{:watch, dialog_pid}, {scenario, tag}})
+         {scenario, app_tag} <- scenario_of(tab, app_pid) do
+      :ets.insert(tab, {{:watch, dialog_pid}, {scenario, app_tag || tag}})
     end
 
     :ok
@@ -157,6 +179,7 @@ defmodule SIP.Scenario.SipTrace do
         Map.merge(fields, %{
           body: body,
           clipped: clipped,
+          redacted: SIP.Msg.Ops.user_content?(parsed),
           decoded_from: decoded_from,
           kind: :message,
           at: System.monotonic_time(:microsecond),

@@ -153,6 +153,12 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
       {:PUBLISH, _req, _trans, _dlg} ->
         goto(initial_state, "credentials re-submitted")
 
+      # A page comes back as a new MESSAGE — a transaction, often a Call-ID, of
+      # its own — and reaches this instance because the router keys a
+      # conversation on its sender, recipient and flow (chat-basic-plan, C3c).
+      {:MESSAGE, _req, _trans, _dlg} ->
+        goto(initial_state, "credentials re-submitted")
+
       # A caller that cancels the challenged attempt: nothing was forwarded, so
       # there is nothing to cancel but ourselves.
       {:CANCEL, _req, _trans, _dlg} ->

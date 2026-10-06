@@ -1,0 +1,21 @@
+Package: kelixip-mod-silo
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@)
+Description: Store-and-forward for instant messages, for kelixip
+ Page-mode messages (RFC 3428) no device took are stored, and delivered when
+ one of the recipient's devices registers — once per device, in the order they
+ arrived, dated when they were sent. Storage is SQL (MariaDB/MySQL or
+ PostgreSQL), shared by every node of a domain; the schema ships under
+ /usr/share/kelixip/sql/silo/ and is the operator's to create. Enable it with a
+ [module.silo] block in config.toml. Ships the reference chat scripts,
+ p2p-chat.exs and registrar-chat.exs.
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

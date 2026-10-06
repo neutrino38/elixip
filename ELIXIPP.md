@@ -104,18 +104,20 @@ Inside a scenario, a sub-scenario (`spawn_fsm "other.exs"`) is looked up next to
 file that declares it — so a scenario and its children stay a self-contained unit
 wherever you run them from.
 
-Two built-ins ship inside the binary and need no file on the host:
+Four built-ins ship inside the binary and need no file on the host:
 
 ```bash
 elixipp UAC.Invite      # outbound INVITE + media
 elixipp UAC.Register    # REGISTER + keepalive + refresh + un-REGISTER
+elixipp --to sip:bob@127.0.0.1:5070 UAC.Page   # one MESSAGE, or N (page mode)
+elixipp --listen udp:5070 UAS.Page             # answers MESSAGEs
 ```
 
 Their sources are in
 [`apps/elixip2/lib/built-in-scenarios/`](apps/elixip2/lib/built-in-scenarios/).
 The editable copies in [`apps/elixip2/scenarios/`](apps/elixip2/scenarios/) are the
 same logic under a different module name (`UAC.InviteExample`,
-`UAC.RegisterExample`), so both can coexist:
+`UAC.RegisterExample`, `UAC.PageExample`, `UAS.PageExample`), so both can coexist:
 
 | File | What it does |
 |---|---|
@@ -126,6 +128,9 @@ same logic under a different module name (`UAC.InviteExample`,
 | `uas_invite.exs` | **call server**: answers inbound INVITEs |
 | `uac_subscribe.exs` | **watcher**: SUBSCRIBE for `presence`, displays each state, un-SUBSCRIBEs |
 | `uas_presence.exs` | **notifier**: accepts a subscription, NOTIFYs the state, answers a PUBLISH |
+| `uas_message.exs` | **page-mode server**: answers out-of-dialog MESSAGEs |
+| `uac_page.exs` | sends one MESSAGE or N, answers a challenge, checks each final code |
+| `uas_page.exs` | answers each MESSAGE with a chosen code, reports what it got (never the text) |
 | `uac_register_and_uas_invite.exs` | registers, then waits for an inbound call (uses `spawn_fsm`) |
 | `smoke.exs` | no SIP traffic; checks the tool itself end to end |
 | `http_get_example.exs` | an HTTP call from a scenario |
@@ -133,9 +138,10 @@ same logic under a different module name (`UAC.InviteExample`,
 Start from one of these to write your own, and combine either form with `--config`
 to inject real accounts.
 
-## Server (UAS) mode — registrar, call server and notifier
+## Server (UAS) mode — registrar, call server, notifier and messages
 
-A scenario declaring `uas :register`, `uas :invite` or `uas :presence` is a server:
+A scenario declaring `uas :register`, `uas :invite`, `uas :presence` or `uas :message`
+is a server:
 `elixipp` binds the `--listen` sockets and lets inbound requests drive it, one
 instance per dialog.
 
@@ -151,6 +157,9 @@ elixipp --listen udp:5060 uas_invite.exs
 
 # Notifier: answer SUBSCRIBE (and PUBLISH) for the `presence` package
 elixipp --listen udp:5060 uas_presence.exs
+
+# Page mode: answer out-of-dialog MESSAGE (RFC 3428)
+elixipp --listen udp:5060 uas_message.exs
 ```
 
 What to expect:
@@ -211,6 +220,42 @@ to 100 per protocol (`:tcp_max_connections`, `:tls_max_connections`,
 
 Internals, if you need them: [docs/design/DESIGN-SIPSTACK.md#34-listeners](docs/design/DESIGN-SIPSTACK.md#34-listeners),
 [docs/design/DESIGN-SIPSTACK.md#34-listeners](docs/design/DESIGN-SIPSTACK.md#34-listeners).
+
+### Page mode: `UAC.Page` and `UAS.Page`
+
+A MESSAGE exchange between two `elixipp` processes, on one host:
+
+```bash
+# Terminal 1 — the recipient, answering 200 (or --code 480, --code 415…)
+elixipp --listen udp:127.0.0.1:5070 UAS.Page
+
+# Terminal 2 — the sender: three pages, half a second apart
+elixipp --to sip:bob@127.0.0.1:5070 --body "Rendez-vous jeudi" --count 3 --interval 500 UAC.Page
+```
+
+The recipient reports each message as its kind, its sender, its type and its
+size — `200 to im from 1000@example.com (text/plain, 17 octets)` — and never its
+text: what a MESSAGE says stays out of the logs, the journal and the reports.
+
+`UAC.Page` fails the run when a page gets another code than `--expect` (200 by
+default). Against a node that stores what it cannot deliver, `--expect 202`
+checks the store took it, and `--expires N` asks for how long it may keep it.
+A 401 or 407 is answered once per page with the account of `--config`, as a node
+challenging the first message of a conversation expects:
+
+```bash
+elixipp -c accounts.json --to sip:bob@example.com --expect 202 UAC.Page
+```
+
+The options land in the scenario's appdata (`page_to`, `page_body`,
+`page_content_type`, `page_expires`, `page_count`, `page_interval_ms`,
+`page_expect`, `page_code`), over the defaults of its `config` block — a `.exs`
+scenario reads them the same way.
+
+`UAS.Page` does not register: it answers what reaches its listener, addressed to
+it directly. Receiving through a node needs the listener registered from the same
+process, which elixipp's server mode does not do yet — use a softphone on that
+side.
 
 ### Testing kelixip with elixipp
 
@@ -282,6 +327,14 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `--tls-key FILE` | Its private key. Required together with `--tls-cert`. Env: `ELIXIPP_TLS_KEY`. | `certs/private_key.pem` |
 | `--local-port PORT` | (client) Local UDP port to send from. | a free port ≥ 5000 |
 | `--local-addr ADDR` | (client) Local IP advertised in Via/Contact. | first local IPv4 |
+| `--to URI` | (`UAC.Page`) Recipient of the pages. | `sip:2000@example.com` |
+| `--body TEXT` | (`UAC.Page`) Content of the pages. | `Hello from elixipp` |
+| `--content-type TYPE` | (`UAC.Page`) Type of that content. | `text/plain` |
+| `--expires N` | (`UAC.Page`) Lifetime of the content in seconds, as an `Expires` header. | none |
+| `--count N` | (`UAC.Page`) Pages sent per run. | `1` |
+| `--interval MS` | (`UAC.Page`) Delay between two pages. | `1000` |
+| `--expect CODE` | (`UAC.Page`) Final code every page must get. | `200` |
+| `--code CODE` | (`UAS.Page`) Code answered to each MESSAGE. | `200` |
 | `--log-file PATH` | Log file. | `elixipp.log` |
 | `--log-level LEVEL` | `debug` \| `info` \| `warning` \| `error`. `debug` is the one that shows the SIP messages. | `info` |
 | `--log-sequence` | Write a PlantUML sequence diagram per instance. One instance at a time only (refused with `-l > 1`, client or server). | off |
