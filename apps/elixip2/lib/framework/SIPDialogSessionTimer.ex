@@ -29,6 +29,20 @@ defmodule SIP.DialogImpl.SessionTimer do
     * when the peer refreshes and lets the interval lapse, the dialog sends a
       BYE (§10) and ends with `{:dialog_terminated, pid, :session_expired}`.
 
+  ## The UAC side (RFC 4028 §7)
+
+  Every INVITE or UPDATE this dialog sends — the one that creates the call and
+  every re-offer after it, relayed or not — carries `Supported: timer`, a
+  `Session-Expires` and our `Min-SE` (`decorate_request/2`):
+
+    * before any timer is in force, our `expires`, with `refresher=uac` when we
+      want to refresh and no refresher when we leave the choice to the far end;
+    * once one is, its interval and its refresher, unchanged (§7.4);
+    * the 2xx that answers it states the timer in force from then on, or turns
+      it off by stating none (§7.2, `on_uac_response/2`);
+    * a 422 sends the request again asking for the far end's `Min-SE`, once,
+      without the application seeing it (§7.3, `retry_request/2`).
+
   ## Configuration
 
       config :elixip2, :session_timer,
@@ -145,6 +159,146 @@ defmodule SIP.DialogImpl.SessionTimer do
 
   defp peer_supports_timer?(req) do
     "timer" in Ops.supported_extensions(req) or "timer" in Ops.required_extensions(req)
+  end
+
+  # ── The UAC side (RFC 4028 §7) ──────────────────────────────────────────────
+
+  @doc """
+  Decorate an INVITE or an UPDATE this dialog is about to send: `Supported:
+  timer`, a `Session-Expires` and our `Min-SE`.
+
+  The interval is the one in force when there is one — every such request is a
+  session refresh (§7.4), and it restates the timer with the refresher unchanged,
+  named from our side of THIS transaction: `uac` when we refresh. Before any is in
+  force it is our `expires`, with `refresher=uac` when we want to refresh and no
+  refresher at all when we leave the choice to the far end (§7.1).
+
+  A request that already carries a `Session-Expires` is left alone: whoever built
+  it — a test scenario, typically — has stated the timer it wants. A B2BUA never
+  hands one over, since the timer of the other leg is stripped on the way
+  (`SIP.Msg.Ops.strip_session_timer/1`).
+  """
+  @spec decorate_request(struct(), map()) :: map()
+  def decorate_request(state, req) do
+    if enabled?() and Map.get(req, :method) in [:INVITE, :UPDATE] and call_dialog?(state) and
+         Ops.session_expires(req) == nil do
+      cfg = config()
+
+      {interval, refresher} =
+        case state.session_timer do
+          %__MODULE__{interval: interval, refresher: :local} -> {interval, "uac"}
+          %__MODULE__{interval: interval, refresher: :remote} -> {interval, "uas"}
+          _ -> {cfg[:expires], if(cfg[:refresher] == :local, do: "uac")}
+        end
+
+      req
+      |> add_timer_tag()
+      |> put_session_expires(interval, refresher)
+      |> Map.put("Min-SE", Integer.to_string(cfg[:min_se]))
+    else
+      req
+    end
+  end
+
+  @doc """
+  Read the 2xx to an INVITE or an UPDATE we sent (RFC 4028 §7.2): the timer it
+  states is the one in force from now on, the refresher named from the far end's
+  side of the transaction (`uas` is the far end). A 2xx stating none turns the
+  timer off — mid-call included, as §7.2 says.
+  """
+  @spec on_uac_response(struct(), map()) :: struct()
+  def on_uac_response(state, %{response: code, cseq: [_, method]} = rsp)
+      when code in 200..299 and method in [:INVITE, :UPDATE] do
+    if enabled?() and call_dialog?(state) do
+      case Ops.session_expires(rsp) do
+        nil ->
+          %{cancel(state) | session_timer: nil}
+
+        {interval, :uas} ->
+          arm(state, %__MODULE__{interval: interval, refresher: :remote})
+
+        # `uac` — or nothing, which §9 does not allow a UAS to send. Refreshing a
+        # session nobody said who refreshes costs one UPDATE; assuming the far end
+        # does costs the call.
+        {interval, _uac} ->
+          arm(state, %__MODULE__{interval: interval, refresher: :local})
+      end
+    else
+      state
+    end
+  end
+
+  def on_uac_response(state, _rsp), do: state
+
+  @doc """
+  The request to send again after a 422 to `req` (RFC 4028 §7.3): the same, asking
+  for the far end's `Min-SE` as interval and floor. `:none` when the 422 gives
+  nothing to retry with — no `Min-SE`, or one we already asked for, which is what
+  keeps a peer answering 422 forever from being asked forever.
+  """
+  @spec retry_request(map(), map()) :: {:ok, map()} | :none
+  def retry_request(req, %{response: 422} = rsp) do
+    with true <- enabled?(),
+         true <- Map.get(req, :method) in [:INVITE, :UPDATE],
+         min_se when is_integer(min_se) <- Ops.min_se(rsp),
+         asked = Ops.session_expires(req),
+         true <- asked == nil or elem(asked, 0) < min_se do
+      refresher =
+        case asked do
+          {_interval, :uac} -> "uac"
+          {_interval, :uas} -> "uas"
+          _ -> nil
+        end
+
+      {:ok,
+       req
+       |> put_session_expires(min_se, refresher)
+       |> drop_headers(["min-se"])
+       |> Map.put("Min-SE", Integer.to_string(min_se))}
+    else
+      _ -> :none
+    end
+  end
+
+  def retry_request(_req, _rsp), do: :none
+
+  defp put_session_expires(req, interval, refresher) do
+    value =
+      if refresher,
+        do: "#{interval};refresher=#{refresher}",
+        else: Integer.to_string(interval)
+
+    req
+    |> drop_headers(["session-expires", "x"])
+    |> Map.put("Session-Expires", value)
+  end
+
+  defp drop_headers(msg, lowercase_names) do
+    msg
+    |> Map.keys()
+    |> Enum.filter(&(is_binary(&1) and String.downcase(&1) in lowercase_names))
+    |> then(&Map.drop(msg, &1))
+  end
+
+  # `Supported` is parsed to the `:supported` atom as a list; a request built by
+  # hand may carry it as a string. Either way `timer` joins what is there.
+  defp add_timer_tag(req) do
+    cond do
+      "timer" in Ops.supported_extensions(req) ->
+        req
+
+      is_list(Map.get(req, :supported)) ->
+        Map.update!(req, :supported, &(&1 ++ ["timer"]))
+
+      is_binary(Map.get(req, :supported)) ->
+        Map.update!(req, :supported, &(&1 <> ", timer"))
+
+      true ->
+        case Enum.find(Map.keys(req), &(is_binary(&1) and String.downcase(&1) == "supported")) do
+          nil -> Map.put(req, :supported, ["timer"])
+          key -> Map.update!(req, key, &(to_string(&1) <> ", timer"))
+        end
+    end
   end
 
   @doc """
