@@ -839,7 +839,10 @@ defmodule SIP.Session.B2bua do
   defp no_media_plane?({:b2bua, :media_setup_failed, reason}), do: no_media_plane?(reason)
   defp no_media_plane?({:b2bua, :reoffer_answer_failed, reason}), do: no_media_plane?(reason)
   defp no_media_plane?({:b2bua, :reoffer_relay_failed, reason}), do: no_media_plane?(reason)
-  defp no_media_plane?({leg, reason}) when leg in [:inbound, :outbound], do: no_media_plane?(reason)
+
+  defp no_media_plane?({leg, reason}) when leg in [:inbound, :outbound],
+    do: no_media_plane?(reason)
+
   defp no_media_plane?(:no_media_server), do: true
   defp no_media_plane?({:error, :no_media_server}), do: true
   defp no_media_plane?({:media_down, _reason}), do: true
@@ -1604,7 +1607,10 @@ defmodule SIP.Session.B2bua do
 
   defp expand_targets(%Peer{fork: :parallel} = peer) do
     Enum.map(peer.uris, fn entry ->
-      entry |> List.wrap() |> Enum.flat_map(&srv_expand(&1, peer)) |> Enum.map(&resolve_and_mark/1)
+      entry
+      |> List.wrap()
+      |> Enum.flat_map(&srv_expand(&1, peer))
+      |> Enum.map(&resolve_and_mark/1)
     end)
   end
 
@@ -1930,7 +1936,8 @@ defmodule SIP.Session.B2bua do
         Logger.info(
           dialogpid: sip_ctx.dialogpid,
           module: __MODULE__,
-          message: "BYE from the #{from_leg} leg not relayed: the #{other_leg(from_leg)} is already closing"
+          message:
+            "BYE from the #{from_leg} leg not relayed: the #{other_leg(from_leg)} is already closing"
         )
 
         SIP.Context.set(sip_ctx, :lasterr, :ok)

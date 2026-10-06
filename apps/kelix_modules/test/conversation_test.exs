@@ -97,7 +97,9 @@ defmodule Kelix.Mod.ConversationTest do
       pid = deliver(snap, message(dom, "hibernate now", port: 5060))
       assert_down(pid, :normal)
       assert active(dom) == 0
-      assert [%{resume: "awaiting_answer"}] = Enum.filter(Conversation.list(), &(&1.domain == dom))
+
+      assert [%{resume: "awaiting_answer"}] =
+               Enum.filter(Conversation.list(), &(&1.domain == dom))
 
       woken = deliver(snap, message(dom, "the answer", port: 6000))
       assert_receive {:woken, ^woken, 2}, 1_000

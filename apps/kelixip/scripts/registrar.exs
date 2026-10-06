@@ -61,7 +61,8 @@ defmodule Kelix.Registrar do
         # :registerexpire rather than a fresh 5 s.
         goto(back, if(stale, do: "401 stale", else: "401 challenge"))
 
-      :ok -> goto(save_registration, "REGISTER auth OK")
+      :ok ->
+        goto(save_registration, "REGISTER auth OK")
 
       # Answer and keep waiting — give a small grace window for the UA to send
       # a correct REGISTER

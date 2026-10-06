@@ -57,7 +57,7 @@ defmodule UAC.InviteWebRTC do
     send_INVITE("sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver,
       timeout: 90,
       webrtc: :yes,
-      media: [ :audio, :video, :text ],
+      media: [:audio, :video, :text],
       text_transport: :ws
     )
 
@@ -72,7 +72,7 @@ defmodule UAC.InviteWebRTC do
         send_auth_INVITE(rsp, "sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver,
           timeout: 90,
           webrtc: :yes,
-          media: [ :audio, :video, :text ],
+          media: [:audio, :video, :text],
           text_transport: :ws
         )
 
@@ -101,7 +101,8 @@ defmodule UAC.InviteWebRTC do
     on_events do
       # ICE/DTLS came up (real EndpointConnectedEvent on mendooze, simulated on
       # the Mockup): the media path is ready.
-      {:ms_event, _conn, :ice_connected} -> goto(call_established, "media connected")
+      {:ms_event, _conn, :ice_connected} ->
+        goto(call_established, "media connected")
 
       # Media negotiation/setup failed (bad remote SDP, no common codec, a
       # control RPC error…). Trace the cause and hang up instead of waiting for

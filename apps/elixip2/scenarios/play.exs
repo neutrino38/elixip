@@ -85,7 +85,7 @@ defmodule UAS.Example.Call.Play do
   # On a media failure reply_invite_with_sdp replies 500 and sets lasterr, so the
   # first transition out of here aborts.
   state answering do
-    reply_invite_with_sdp(200, [media: :tc, webrtc: :if_offered])
+    reply_invite_with_sdp(200, media: :tc, webrtc: :if_offered)
 
     on_events do
       {:CANCEL, _req, _trans, _dlg} ->
@@ -151,7 +151,7 @@ defmodule UAS.Example.Call.Play do
 
       # In-dialog UPDATE.
       {:UPDATE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200, [media: :tc])
+        reply_invite_with_sdp(200, media: :tc)
         goto(loop, "UPDATE")
 
       {:BYE, req, _trans, _dlg} ->

@@ -35,7 +35,8 @@ defmodule UAS.Example.Call.Record do
           _ -> goto(ringing, "INVITE")
         end
 
-      {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("UAS Invite stopped gracefully")
+      {:scenario_ctl, :shutdown, _reason} ->
+        scenario_aborted("UAS Invite stopped gracefully")
     after
       60_000 -> scenario_failure("no INVITE received")
     end
@@ -75,6 +76,7 @@ defmodule UAS.Example.Call.Record do
       webrtc: :if_offered,
       prefer_codecs: [video: ["H264"]]
     )
+
     # media_start_echo()
     # wait_video: start all tracks on the first video I-frame; echo: loop the
     # received video back to the caller while recording.
@@ -94,16 +96,16 @@ defmodule UAS.Example.Call.Record do
         goto(loop, "re-INVITE")
 
       {:ms_event, _recorder, :recorder_started} ->
-        goto loop, "recorder started"
+        goto(loop, "recorder started")
 
       # In-dialog UPDATE.
       {:UPDATE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200, [media: :tc])
+        reply_invite_with_sdp(200, media: :tc)
         goto(loop, "UPDATE")
 
       {:BYE, req, _trans, _dlg} ->
         reply_request(req, 200, "OK")
-        media_stop();
+        media_stop()
         scenario_success("BYE")
 
       # Caller cancelled before / around answer: the IST already sent 200 (CANCEL)
@@ -111,9 +113,9 @@ defmodule UAS.Example.Call.Record do
       {:CANCEL, _req, _trans, _dlg} ->
         scenario_success("caller cancelled")
 
-      {:scenario_ctl, :shutdown, _reason } ->
+      {:scenario_ctl, :shutdown, _reason} ->
         send_BYE()
-        goto hanging_up, "shutdown"
+        goto(hanging_up, "shutdown")
 
       {:dialog_terminated, _dlg, _reason} ->
         scenario_success("call ended")
@@ -123,13 +125,14 @@ defmodule UAS.Example.Call.Record do
   end
 
   state hanging_up do
-    media_stop();
+    media_stop()
+
     on_events do
       {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_success("Clean shutdown")
     after
       10_000 -> scenario_failure("BYE not answered")
     end
-   end
+  end
 
   # Cooperative shutdown catch-all. The two states that know what a wind-down
   # means for them handle it themselves above (wait_invite aborts, in_call sends

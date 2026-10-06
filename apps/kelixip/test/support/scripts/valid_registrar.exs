@@ -2,7 +2,7 @@
 # handles cooperative shutdown explicitly (on_shutdown block) — passes §5.3.
 defmodule KelixTest.ValidRegistrar do
   use SIP.Scenario
-  uas :register
+  uas(:register)
 
   state initial_state do
     scenario_success("ok")

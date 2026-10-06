@@ -20,9 +20,13 @@ defmodule SIP.Transport.TCP do
   def init({dest_ip, dest_port}), do: init({dest_ip, dest_port, nil})
 
   def init({dest_ip, dest_port, _domain}) do
-    initial_state = %{t_isreliable: true,
-      upperlayer: nil, destip: dest_ip, destport: dest_port,
-      buffer: %SIP.Transport.Depack{}}
+    initial_state = %{
+      t_isreliable: true,
+      upperlayer: nil,
+      destip: dest_ip,
+      destport: dest_port,
+      buffer: %SIP.Transport.Depack{}
+    }
 
     try do
       state = SIP.Transport.ImplHelpers.connect(initial_state, :tcp)
@@ -30,8 +34,13 @@ defmodule SIP.Transport.TCP do
     rescue
       err in Socket.Error ->
         dest_ip_str = if is_tuple(dest_ip), do: NetUtils.ip2string(dest_ip), else: dest_ip
-        Logger.debug([module: __MODULE__, dest: "#{dest_ip_str}:#{dest_port}",
-                      message: "Failed to connect socket: #{err.message}"])
+
+        Logger.debug(
+          module: __MODULE__,
+          dest: "#{dest_ip_str}:#{dest_port}",
+          message: "Failed to connect socket: #{err.message}"
+        )
+
         {:stop, :cnxerror}
     end
   end
@@ -40,50 +49,56 @@ defmodule SIP.Transport.TCP do
   def init({:inbound, socket, localip, localport, peer_ip, peer_port}) do
     state = %{
       t_isreliable: true,
-      upperlayer:   nil,
-      destip:       peer_ip,
-      destport:     peer_port,
-      buffer:       %SIP.Transport.Depack{},
-      socket:       socket,
-      localip:      localip,
-      localport:    localport
+      upperlayer: nil,
+      destip: peer_ip,
+      destport: peer_port,
+      buffer: %SIP.Transport.Depack{},
+      socket: socket,
+      localip: localip,
+      localport: localport
     }
+
     {:ok, state}
   end
 
   # Set the upper layer handler for transactions to process
 
   @impl true
-  def handle_call( {:setupperlayer, ul_pid }, _from, state) when is_pid(ul_pid) do
-    { :reply, :ok, Map.put(state, :upperlayer, ul_pid) }
+  def handle_call({:setupperlayer, ul_pid}, _from, state) when is_pid(ul_pid) do
+    {:reply, :ok, Map.put(state, :upperlayer, ul_pid)}
   end
 
-  def handle_call( {:setupperlayer, ul_func }, _from, state) when is_function(ul_func, 2) do
-    { :reply, :ok, Map.put(state, :upperlayer, ul_func) }
+  def handle_call({:setupperlayer, ul_func}, _from, state) when is_function(ul_func, 2) do
+    {:reply, :ok, Map.put(state, :upperlayer, ul_func)}
   end
 
-  def handle_call( {:setupperlayer, nil }, _from, state) do
-    { :reply, :ok, Map.put(state, :upperlayer, nil) }
+  def handle_call({:setupperlayer, nil}, _from, state) do
+    {:reply, :ok, Map.put(state, :upperlayer, nil)}
   end
 
   def handle_call(:getlocalipandport, _from, state) do
-    { :reply, { :ok, state.localip, state.localport }, state}
+    {:reply, {:ok, state.localip, state.localport}, state}
   end
 
-
-  @spec handle_call({:sendmsg, binary(), :inet.ip_address(), :inet.port_number}, any(), map()) :: {:reply, :ok, map()}
+  @spec handle_call({:sendmsg, binary(), :inet.ip_address(), :inet.port_number()}, any(), map()) ::
+          {:reply, :ok, map()}
   def handle_call({:sendmsg, msgstr, _destip, _dest_port}, _from, state) do
     destipstr = SIP.NetUtils.ip2string(state.destip)
-    Logger.debug(fn -> "TCP: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> SIPMsg.loggable(msgstr) <> "\r\n-----------------" end)
+
+    Logger.debug(fn ->
+      "TCP: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <>
+        SIPMsg.loggable(msgstr) <> "\r\n-----------------"
+    end)
+
     case Socket.Stream.send(state.socket, msgstr) do
-      :ok -> {:reply, :ok, state}
+      :ok ->
+        {:reply, :ok, state}
+
       {:error, reason} ->
-        Logger.debug([module: __MODULE__, message: "failed to send message. Error: #{reason}"])
+        Logger.debug(module: __MODULE__, message: "failed to send message. Error: #{reason}")
         {:reply, :transporterror, state}
     end
   end
-
-
 
   # Activates the socket once the accept Task has transferred ownership.
   # Only meaningful for inbound connections; outbound sockets are already active.
@@ -95,29 +110,55 @@ defmodule SIP.Transport.TCP do
 
   # Handle data reception
   @impl true
-  def handle_info({:tcp, socket, data}, state ) do
-    buf = SIP.Transport.Depack.on_data_received(state.buffer, data,
-      fn what, msg ->
+  def handle_info({:tcp, socket, data}, state) do
+    buf =
+      SIP.Transport.Depack.on_data_received(state.buffer, data, fn what, msg ->
         case what do
-          :ping -> nil
-          :msg -> SIP.Transport.ImplHelpers.process_incoming_message(state, msg, "TCP", __MODULE__, socket, state.destip, state.destport)
+          :ping ->
+            nil
+
+          :msg ->
+            SIP.Transport.ImplHelpers.process_incoming_message(
+              state,
+              msg,
+              "TCP",
+              __MODULE__,
+              socket,
+              state.destip,
+              state.destport
+            )
 
           # The depacketizer refused to frame further: answer what we can out of
           # the header block it hands up, then take this connection down. It has
           # deliberately not read the octets Content-Length announced, so nothing
           # further along this stream is a message boundary any more.
           :too_large ->
-            SIP.Transport.ImplHelpers.refuse_and_close(state, 513, msg, "TCP", state.destip, state.destport)
+            SIP.Transport.ImplHelpers.refuse_and_close(
+              state,
+              513,
+              msg,
+              "TCP",
+              state.destip,
+              state.destport
+            )
 
           :bad_frame ->
-            SIP.Transport.ImplHelpers.refuse_and_close(state, 400, msg, "TCP", state.destip, state.destport)
+            SIP.Transport.ImplHelpers.refuse_and_close(
+              state,
+              400,
+              msg,
+              "TCP",
+              state.destip,
+              state.destport
+            )
         end
       end)
-    { :noreply, %{ state | buffer: buf } }
+
+    {:noreply, %{state | buffer: buf}}
   end
 
   def handle_info({:tcp_closed, _socket}, state) do
-    Logger.debug([module: __MODULE__, message: "Cnx disconnected. stopping transport instance"])
+    Logger.debug(module: __MODULE__, message: "Cnx disconnected. stopping transport instance")
     {:stop, :normal, state}
   end
 

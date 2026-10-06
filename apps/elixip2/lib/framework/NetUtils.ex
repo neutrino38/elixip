@@ -7,125 +7,153 @@ defmodule SIP.NetUtils do
   @doc "Create a network address, given an IP and an network length"
   def cidr_network({i1, i2, i3, i4}, bits) when is_integer(bits) and bits <= 32 do
     zeroBits = 8 - rem(bits, 8)
-    last = (0xff >>> zeroBits) <<< zeroBits
+    last = (0xFF >>> zeroBits) <<< zeroBits
 
     case div(bits, 8) do
-        0 ->
-            {band(i1,last), 0, 0, 0};
-        1 ->
-            {i1, band(i2, last), 0, 0};
-        2 ->
-            {i1, i2, band(i3, last), 0};
-        3 ->
-            {i1, i2, i3, band(i3, last)};
-        4 ->
-            {i1, i2, i3, i4}
+      0 ->
+        {band(i1, last), 0, 0, 0}
+
+      1 ->
+        {i1, band(i2, last), 0, 0}
+
+      2 ->
+        {i1, i2, band(i3, last), 0}
+
+      3 ->
+        {i1, i2, i3, band(i3, last)}
+
+      4 ->
+        {i1, i2, i3, i4}
     end
   end
 
   # IPV6 version
-  def cidr_network({i1, i2, i3, i4, i5, i6, i7, i8}, bits) when is_integer(bits) and bits <= 128 do
+  def cidr_network({i1, i2, i3, i4, i5, i6, i7, i8}, bits)
+      when is_integer(bits) and bits <= 128 do
     zeroBits = 16 - rem(bits, 16)
-    last = (0xffff >>> zeroBits) <<< zeroBits
+    last = (0xFFFF >>> zeroBits) <<< zeroBits
 
     case div(bits, 16) do
-        0 ->
-            {band(i1,last), 0, 0, 0, 0, 0, 0 ,0};
-        1 ->
-            {i1, band(i2, last), 0, 0, 0, 0, 0 ,0};
-        2 ->
-            {i1, i2, band(i3, last), 0, 0, 0, 0 ,0};
-        3 ->
-            {i1, i2, i3, band(i4, last),  0, 0, 0 ,0};
-        4 ->
-            {i1, i2, i3, i4, band(i5, last), 0, 0, 0}
-        5 ->
-            {i1, i2, i3, i4, i5, band(i6, last), 0, 0}
-        6 ->
-            {i1, i2, i3, i4, i5, i6, band(i7, last), 0}
-        7 ->
-            {i1, i2, i3, i4, i5, i6, i7, band(i8, last)}
-        8 ->
-            {i1, i2, i3, i4, i5, i6, i7, band(i8, last)}
+      0 ->
+        {band(i1, last), 0, 0, 0, 0, 0, 0, 0}
 
+      1 ->
+        {i1, band(i2, last), 0, 0, 0, 0, 0, 0}
+
+      2 ->
+        {i1, i2, band(i3, last), 0, 0, 0, 0, 0}
+
+      3 ->
+        {i1, i2, i3, band(i4, last), 0, 0, 0, 0}
+
+      4 ->
+        {i1, i2, i3, i4, band(i5, last), 0, 0, 0}
+
+      5 ->
+        {i1, i2, i3, i4, i5, band(i6, last), 0, 0}
+
+      6 ->
+        {i1, i2, i3, i4, i5, i6, band(i7, last), 0}
+
+      7 ->
+        {i1, i2, i3, i4, i5, i6, i7, band(i8, last)}
+
+      8 ->
+        {i1, i2, i3, i4, i5, i6, i7, band(i8, last)}
     end
   end
 
-
   def cidr_netmask({_i1, _i2, _i3, _i4}, bits) when is_integer(bits) and bits <= 32 do
     zero_bits = 8 - rem(bits, 8)
-    last = Bitwise.bsl(0xff, zero_bits) |>  Bitwise.band(0xFF)
+    last = Bitwise.bsl(0xFF, zero_bits) |> Bitwise.band(0xFF)
 
     case div(bits, 8) do
       0 ->
         {last, 0, 0, 0}
+
       1 ->
-        {0xff, last, 0, 0}
+        {0xFF, last, 0, 0}
+
       2 ->
-        {0xff, 0xff, last, 0}
+        {0xFF, 0xFF, last, 0}
+
       3 ->
-        {0xff, 0xff, 0xff, last}
+        {0xFF, 0xFF, 0xFF, last}
+
       4 ->
-        {0xff, 0xff, 0xff, 0xff}
+        {0xFF, 0xFF, 0xFF, 0xFF}
     end
   end
 
-  def cidr_netmask({_i1, _i2, _i3, _i4,_i5, _i6, _i7, _i8}, bits) when is_integer(bits) and bits <= 128 do
+  def cidr_netmask({_i1, _i2, _i3, _i4, _i5, _i6, _i7, _i8}, bits)
+      when is_integer(bits) and bits <= 128 do
     zero_bits = 16 - rem(bits, 16)
-    last = Bitwise.bsl(0xffff, zero_bits) |>  Bitwise.band(0xFFFF)
+    last = Bitwise.bsl(0xFFFF, zero_bits) |> Bitwise.band(0xFFFF)
 
     case div(bits, 16) do
       0 ->
         {last, 0, 0, 0, 0, 0, 0, 0}
+
       1 ->
-        {0xffff, last, 0, 0, 0, 0, 0, 0}
+        {0xFFFF, last, 0, 0, 0, 0, 0, 0}
+
       2 ->
-        {0xffff, 0xffff, last, 0, 0, 0, 0, 0}
+        {0xFFFF, 0xFFFF, last, 0, 0, 0, 0, 0}
+
       3 ->
-        {0xffff, 0xffff, 0xffff, last, 0, 0, 0, 0}
+        {0xFFFF, 0xFFFF, 0xFFFF, last, 0, 0, 0, 0}
+
       4 ->
-        {0xffff, 0xffff, 0xffff, 0xffff, last, 0, 0, 0}
+        {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, last, 0, 0, 0}
+
       5 ->
-        {0xffff, 0xffff, 0xffff, 0xffff, 0xffff, last, 0, 0}
+        {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, last, 0, 0}
+
       6 ->
-        {0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, last, 0}
+        {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, last, 0}
+
       7 ->
-        {0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, last}
+        {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, last}
+
       8 ->
-        {0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff}
+        {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF}
     end
   end
 
   # Get the IP routes from the OS (here windows)
   @spec get_ip_routes(:win32) :: {:error, Jason.DecodeError.t()} | {:ok, any()}
-  def get_ip_routes( :win32 ) do
-    route_cmd = ~c"powershell -Command \"Get-NetRoute | Select-Object DestinationPrefix, NextHop, RouteMetric | ConvertTo-Json\""
+  def get_ip_routes(:win32) do
+    route_cmd =
+      ~c"powershell -Command \"Get-NetRoute | Select-Object DestinationPrefix, NextHop, RouteMetric | ConvertTo-Json\""
+
     routes_str = List.to_string(:os.cmd(route_cmd))
-    { :ok, routes } = Jason.decode(routes_str)
-    routes = Enum.map(routes, fn r ->
-      [ prefaddr, masklen ] = String.split(r["DestinationPrefix"], "/")
-      { :ok, prefaddr } = :inet.parse_address(String.to_charlist(prefaddr))
-      { :ok, nexthop }  = :inet.parse_address(String.to_charlist(r["NextHop"]))
+    {:ok, routes} = Jason.decode(routes_str)
 
-      { prefaddr, String.to_integer(masklen), nexthop, r["RouteMetric"] }
-    end)
+    routes =
+      Enum.map(routes, fn r ->
+        [prefaddr, masklen] = String.split(r["DestinationPrefix"], "/")
+        {:ok, prefaddr} = :inet.parse_address(String.to_charlist(prefaddr))
+        {:ok, nexthop} = :inet.parse_address(String.to_charlist(r["NextHop"]))
 
-    { :ok, Enum.uniq(routes) }
+        {prefaddr, String.to_integer(masklen), nexthop, r["RouteMetric"]}
+      end)
+
+    {:ok, Enum.uniq(routes)}
   end
 
-#  Format of interface info list :
-#  [
-#    flags: [:up, :running],
-#    addr: {10754, 33856, 17729, 52593, 43051, 16384, 51495, 58403},
-#    netmask: {65535, 65535, 65535, 65535, 0, 0, 0, 0},
-#    addr: {10754, 33856, 17729, 52593, 23715, 41032, 27665, 44847},
-#    netmask: {65535, 65535, 65535, 65535, 0, 0, 0, 0},
-#    addr: {65152, 0, 0, 0, 19775, 10967, 53520, 7709},
-#    netmask: {65535, 65535, 65535, 65535, 0, 0, 0, 0},
-#    addr: {192, 168, 255, 219},
-#    netmask: {255, 255, 255, 0},
-#    hwaddr: [240, 158, 74, 220, 237, 58]
-#  ]
+  #  Format of interface info list :
+  #  [
+  #    flags: [:up, :running],
+  #    addr: {10754, 33856, 17729, 52593, 43051, 16384, 51495, 58403},
+  #    netmask: {65535, 65535, 65535, 65535, 0, 0, 0, 0},
+  #    addr: {10754, 33856, 17729, 52593, 23715, 41032, 27665, 44847},
+  #    netmask: {65535, 65535, 65535, 65535, 0, 0, 0, 0},
+  #    addr: {65152, 0, 0, 0, 19775, 10967, 53520, 7709},
+  #    netmask: {65535, 65535, 65535, 65535, 0, 0, 0, 0},
+  #    addr: {192, 168, 255, 219},
+  #    netmask: {255, 255, 255, 0},
+  #    hwaddr: [240, 158, 74, 220, 237, 58]
+  #  ]
 
   @doc """
   The family of an IP address tuple: `:ipv4`, `:ipv6`, or `nil` for anything
@@ -372,7 +400,7 @@ defmodule SIP.NetUtils do
   end
 
   def get_local_ipv4() do
-    hd(SIP.NetUtils.get_local_ips( [ :ipv4 ])) |> :inet.ntoa( ) |> List.to_string()
+    hd(SIP.NetUtils.get_local_ips([:ipv4])) |> :inet.ntoa() |> List.to_string()
   end
 
   @doc "Convert an IP address into a string. Wrapper for the erlang inet module ntoa() function"
@@ -382,6 +410,7 @@ defmodule SIP.NetUtils do
         ) :: binary() | {:error, :einval}
   def ip2string(ipaddr) when is_tuple(ipaddr) do
     ret = :inet.ntoa(ipaddr)
+
     if is_list(ret) do
       to_string(ret)
     else
@@ -441,7 +470,8 @@ defmodule SIP.NetUtils do
   Note the check is inherently racy: the port could be taken by another
   process between the check and the actual bind.
   """
-  @spec pick_free_port(:udp | :tcp, pos_integer()) :: {:ok, :inet.port_number()} | {:error, :nofreeport}
+  @spec pick_free_port(:udp | :tcp, pos_integer()) ::
+          {:ok, :inet.port_number()} | {:error, :nofreeport}
   def pick_free_port(proto, min_port \\ 5000)
       when proto in [:udp, :tcp] and min_port > 0 and min_port <= @max_port do
     pick_free_port(proto, min_port, @free_port_attempts)

@@ -120,8 +120,8 @@ defmodule SIP.Test.Peer do
   @doc "Challenge `req` with a Digest 401/407."
   @spec challenge(map(), 401 | 407, non_neg_integer(), binary()) :: action()
   def challenge(req, code, after_ms \\ 50, realm \\ "elioz.net") do
-    {:inject,
-     SIP.Msg.Ops.challenge_request(req, code, "Digest", realm, "SHA256", [], @totag), after_ms}
+    {:inject, SIP.Msg.Ops.challenge_request(req, code, "Digest", realm, "SHA256", [], @totag),
+     after_ms}
   end
 
   @doc "Push an event to the probe attached to the transport."

@@ -75,8 +75,7 @@ defmodule SIP.DialogImpl.KeepAlive do
   end
 
   def send_keepalive(state = %SIP.DialogImpl{}) do
-
-    ruri = %SIP.Uri{ domain: state.msg.to.domain }
+    ruri = %SIP.Uri{domain: state.msg.to.domain}
 
     # No `Supported` header: it carries option tags (100rel, path, outbound…), not
     # methods, and "OPTIONS, REGISTER" claimed two option tags that do not exist. A

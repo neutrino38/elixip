@@ -70,6 +70,7 @@ defmodule Kelix.ConfigTest do
                  networks: [],
                  advertise: nil
                }
+
       assert tls.proto == :tls and tls.port == 5061
       assert tls.cert == "/etc/kelixip/tls/fullchain.pem"
       assert tls.key == "/etc/kelixip/tls/privkey.pem"
@@ -573,6 +574,7 @@ defmodule Kelix.ConfigTest do
       assert Application.get_env(:elixip2, MediaServer.Mendooze)[:video_bandwidth_kbps] == 1500
     end
   end
+
   describe "[tls] — the outbound leg's policy" do
     test "absent means no check: verifying a peer is an interconnect decision" do
       assert {:ok, cfg} = Config.parse("")
@@ -612,6 +614,7 @@ defmodule Kelix.ConfigTest do
 
     test "apply_app_env/1 is what the outbound leg actually reads" do
       previous = Application.fetch_env(:elixip2, :tls_verify)
+
       on_exit(fn ->
         case previous do
           {:ok, v} -> Application.put_env(:elixip2, :tls_verify, v)
@@ -628,6 +631,7 @@ defmodule Kelix.ConfigTest do
       refute Application.get_env(:elixip2, :tls_cacertfile)
     end
   end
+
   describe "[[listen]] tag and networks — which side a listener sits on" do
     defp listener(extra) do
       Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\n#{extra}))
@@ -654,7 +658,9 @@ defmodule Kelix.ConfigTest do
 
     test "stated networks REPLACE the detection rather than adding to it" do
       assert {:ok, cfg} =
-               listener(~s(addr = "127.0.0.1"\ntag = "internal"\nnetworks = ["10.0.0.0/8", "fd00::/8"]))
+               listener(
+                 ~s(addr = "127.0.0.1"\ntag = "internal"\nnetworks = ["10.0.0.0/8", "fd00::/8"])
+               )
 
       assert Config.internal_networks(cfg) ==
                [{{10, 0, 0, 0}, 8}, {{0xFD00, 0, 0, 0, 0, 0, 0, 0}, 8}]
@@ -711,6 +717,7 @@ defmodule Kelix.ConfigTest do
       assert SIP.NetUtils.net_side({8, 8, 8, 8}) == :public
     end
   end
+
   describe "[[listen]] advertise — the address published instead of the bound one" do
     test "absent by default" do
       assert {:ok, cfg} = listener("")

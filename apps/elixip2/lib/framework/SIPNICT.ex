@@ -9,7 +9,7 @@ defmodule SIP.NICT do
   # Callbacks
 
   @impl true
-  def init({ sipmsg, app_pid, ring_timeout }) do
+  def init({sipmsg, app_pid, ring_timeout}) do
     t_mod = sipmsg.ruri.tp_module
     t_pid = sipmsg.ruri.tp_pid
 
@@ -17,35 +17,56 @@ defmodule SIP.NICT do
     sipmsg = SIP.Transport.add_contact_header(t_mod, t_pid, sipmsg)
 
     # Create GenServer state
-    initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,
-                       t_isreliable: apply(t_mod, :is_reliable, []), destip: sipmsg.ruri.destip,
-                       destport: sipmsg.ruri.destport, state: :sending }
+    initial_state = %SIP.Transac{
+      msg: sipmsg,
+      tmod: t_mod,
+      tpid: t_pid,
+      app: app_pid,
+      timeout: ring_timeout,
+      t_isreliable: apply(t_mod, :is_reliable, []),
+      destip: sipmsg.ruri.destip,
+      destport: sipmsg.ruri.destport,
+      state: :sending
+    }
 
     # Sendout the message using the transport
     case sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->
-        Logger.info([ transid: sipmsg.transid, module: __MODULE__,
-                      message: "Sent #{sipmsg.method} #{sipmsg.ruri}"])
-        state = if not state.t_isreliable do
-          schedule_timer_A(state)
-        else
-          state
-        end
+        Logger.info(
+          transid: sipmsg.transid,
+          module: __MODULE__,
+          message: "Sent #{sipmsg.method} #{sipmsg.ruri}"
+        )
+
+        state =
+          if not state.t_isreliable do
+            schedule_timer_A(state)
+          else
+            state
+          end
 
         # Arm timer F - RFC 3261 - Section 17.1.2.2
         # Maximum time to answer a request
         state = schedule_timer_F(state)
-        { :ok, state }
+        {:ok, state}
 
-      { :invalid_sip_msg, _state } ->
-        Logger.error([ transid: sipmsg.transid, module: __MODULE__,
-                        message: "Fail to serialize SIP message."])
-        { :stop, "Fail to serialize message" }
+      {:invalid_sip_msg, _state} ->
+        Logger.error(
+          transid: sipmsg.transid,
+          module: __MODULE__,
+          message: "Fail to serialize SIP message."
+        )
 
-      { code, _state } ->
-          Logger.error([ transid: sipmsg.transid, module: __MODULE__,
-          message: "Transport error. Fail to send SIP request  #{code}"])
-          { :stop, "Fail to send SIP request" }
+        {:stop, "Fail to serialize message"}
+
+      {code, _state} ->
+        Logger.error(
+          transid: sipmsg.transid,
+          module: __MODULE__,
+          message: "Transport error. Fail to send SIP request  #{code}"
+        )
+
+        {:stop, "Fail to send SIP request"}
     end
   end
 
@@ -55,48 +76,63 @@ defmodule SIP.NICT do
     cancel(state)
   end
 
-  def handle_call(:gettransport, _from, state ) do
-    { :reply, { state.tmod, state.tpid }, state }
+  def handle_call(:gettransport, _from, state) do
+    {:reply, {state.tmod, state.tpid}, state}
   end
 
   def handle_call(:ack, _from, state) do
-    Logger.warning([ transid: state.msg.transid, module: __MODULE__,
-                     message: "Sending ACK is not supported for a non invite client transaction"])
-    { :reply, :unsupported, state }
+    Logger.warning(
+      transid: state.msg.transid,
+      module: __MODULE__,
+      message: "Sending ACK is not supported for a non invite client transaction"
+    )
+
+    {:reply, :unsupported, state}
   end
 
   @impl true
-   # Process SIP response from transport layer
-  def handle_cast({ :onsipmsg, siprsp, remoteip, remoteport }, state) do
+  # Process SIP response from transport layer
+  def handle_cast({:onsipmsg, siprsp, remoteip, remoteport}, state) do
     SIP.Scenario.SipTrace.received(state, siprsp, remoteip, remoteport)
+
     cond do
       siprsp.method != false ->
-        Logger.warning([ transid: state.msg.transid, message: "Received an #{siprsp.method} SIP request. But this is a client transaction'"])
+        Logger.warning(
+          transid: state.msg.transid,
+          message: "Received an #{siprsp.method} SIP request. But this is a client transaction'"
+        )
+
         {:noreply, state}
 
       # The response matches the inital req
       state.msg.cseq == siprsp.cseq ->
         new_state = handle_UAS_sip_response(state, siprsp)
-        new_state = if siprsp.response >= 200 do
-          schedule_timer_K(new_state, 5000) |> cancel_timer_F()
-        else
-          new_state
-        end
-        {:noreply, new_state}
 
+        new_state =
+          if siprsp.response >= 200 do
+            schedule_timer_K(new_state, 5000) |> cancel_timer_F()
+          else
+            new_state
+          end
+
+        {:noreply, new_state}
 
       # The response matches the CANCEL req
       # A CSeq is a LIST everywhere it is built ([seqno, method] —
       # fix_outbound_request/3, the parser, `match?([_, :INVITE], rsp.cseq)`), so
       # comparing it to a TUPLE could never match: the 200 answering our own
       # CANCEL fell through to the clause below instead.
-      siprsp.cseq == [ hd(state.msg.cseq), :CANCEL ] ->
+      siprsp.cseq == [hd(state.msg.cseq), :CANCEL] ->
         new_state = handle_cancel_response(state, siprsp)
         {:noreply, new_state}
 
       true ->
-        Logger.warning([ transid: state.msg.transid, module: __MODULE__,
-                       message: "Response CSeq #{inspect(siprsp.cseq)} does not match transaction requests'"])
+        Logger.warning(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Response CSeq #{inspect(siprsp.cseq)} does not match transaction requests'"
+        )
+
         {:noreply, state}
     end
   end
@@ -104,14 +140,14 @@ defmodule SIP.NICT do
   @impl true
   # Handle request retransmission
   # We should use timerE here. We use timerA instead
-  def handle_info({ :timerA, ms }, state) do
-    handle_timer({ :timerA, ms }, state)
+  def handle_info({:timerA, ms}, state) do
+    handle_timer({:timerA, ms}, state)
   end
 
   # Handle other timers
   # - timer F - request timeout. UAS did not respond on time
   # - timer K - normal transaction end
-  def handle_info({ :timeout, _tref, timer } , state) do
+  def handle_info({:timeout, _tref, timer}, state) do
     handle_timer(timer, state, __MODULE__)
   end
 end

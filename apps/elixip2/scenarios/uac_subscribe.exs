@@ -147,7 +147,8 @@ defmodule UAC.SubscribeExample do
   # the very event package the notifier wrote it with, so no scenario re-derives
   # a content type or an XML parser (CLAUDE.md, *Writing a scenario*).
   defp label(prefix, {:ok, %SIP.Presence.Doc{} = doc}) do
-    "#{prefix}: " <> Enum.join([SIP.Presence.Doc.status(doc) | SIP.Presence.Doc.contacts(doc)], " ")
+    "#{prefix}: " <>
+      Enum.join([SIP.Presence.Doc.status(doc) | SIP.Presence.Doc.contacts(doc)], " ")
   end
 
   # The final NOTIFY states a termination in its Subscription-State and carries

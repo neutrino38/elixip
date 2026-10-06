@@ -8,77 +8,117 @@ defmodule SIP.IST do
   # Callbacks
 
   @impl true
-  def init({ t_mod, t_pid, remote_ip, remote_port, sipmsg, upperlayer }) do
-    initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: nil, timeout: 0,
-                      t_isreliable: apply(t_mod, :is_reliable, []), destip: remote_ip,
-                      destport: remote_port, state: :trying, upperlayer: upperlayer }
+  def init({t_mod, t_pid, remote_ip, remote_port, sipmsg, upperlayer}) do
+    initial_state = %SIP.Transac{
+      msg: sipmsg,
+      tmod: t_mod,
+      tpid: t_pid,
+      app: nil,
+      timeout: 0,
+      t_isreliable: apply(t_mod, :is_reliable, []),
+      destip: remote_ip,
+      destport: remote_port,
+      state: :trying,
+      upperlayer: upperlayer
+    }
 
     # state = if not initial_state.t_isreliable, do: schedule_timer_A(initial_state), else: initial_state
 
     # Asynchornously process the request
     GenServer.cast(self(), :sipreq)
-    { :ok, initial_state }
+    {:ok, initial_state}
   end
 
   @impl true
   # Handle ACK sent by UAC
-  def handle_cast( {:onsipmsg, req, remoteip, remoteport }, state) when is_map(req) and req.method == :ACK do
+  def handle_cast({:onsipmsg, req, remoteip, remoteport}, state)
+      when is_map(req) and req.method == :ACK do
     SIP.Scenario.SipTrace.received(state, req, remoteip, remoteport)
     # TODO, check the IP/port against the  IP/port of the original request
     if state.state == :confirmed do
-      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
-                      message: "ACK received. confirmed -> terminated"])
+      Logger.debug(
+        transid: state.msg.transid,
+        module: __MODULE__,
+        message: "ACK received. confirmed -> terminated"
+      )
 
       # todo: should we notify the upper layer ?
       # probably yes because the ACK may carry and SDP body ...
 
       newstate = Map.put(state, :state, :terminated) |> cancel_timer_H()
+
       if state.t_isreliable do
         # All is done. Kill the transaction
-        { :stop, :normal, newstate }
+        {:stop, :normal, newstate}
       else
         # Unreliable transport ? Arm timer K to handle retransmissions
         # According to RFC 3261, it should be timer J here. But whatever ...
-        { :noreply, schedule_timer_K(newstate, :default) }
+        {:noreply, schedule_timer_K(newstate, :default)}
       end
     else
-      { :noreply, state }
+      {:noreply, state}
     end
   end
 
   # Handle CANCEL
-  def handle_cast({:onsipmsg, req, remoteip, remoteport }, state) when is_map(req) and req.method == :CANCEL do
+  def handle_cast({:onsipmsg, req, remoteip, remoteport}, state)
+      when is_map(req) and req.method == :CANCEL do
     SIP.Scenario.SipTrace.received(state, req, remoteip, remoteport)
-    state = if state.state in [ :trying, :proceeding ] do
-      Logger.info([ transid: state.msg.transid,  module: __MODULE__,
-                    message: "Received CANCEL - cancelling this transaction"])
-      # Reply to CANCEL request
-      cancel_resp = SIP.Msg.Ops.reply_to_request(req, 200, "OK", [], state.totag)
-      sendout_msg(state, cancel_resp)
-      Logger.info([ transid: state.msg.transid,  module: __MODULE__,
-                    message: "Replied 200 OK to CANCEL"])
-      # Terminate transaction - timers are handled inside reply_to_UAC
-      { _code, new_state } = reply_to_UAC(state, state.msg, 487, "Request interrupted", [], state.totag);
 
-      # The IST keeps its RFC handling (200 to CANCEL + 487 to the INVITE, no
-      # round-trip to the app), but now notifies the dialog layer so it can
-      # surface the CANCEL to the app and tear the early dialog down. state.app
-      # is the dialog pid (set by process_UAS_request); guard in case processing
-      # failed and it was never set.
-      if is_pid(new_state.app) do
-        GenServer.cast(new_state.app, {:sipmsg, req, self()})
+    state =
+      if state.state in [:trying, :proceeding] do
+        Logger.info(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Received CANCEL - cancelling this transaction"
+        )
+
+        # Reply to CANCEL request
+        cancel_resp = SIP.Msg.Ops.reply_to_request(req, 200, "OK", [], state.totag)
+        sendout_msg(state, cancel_resp)
+
+        Logger.info(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Replied 200 OK to CANCEL"
+        )
+
+        # Terminate transaction - timers are handled inside reply_to_UAC
+        {_code, new_state} =
+          reply_to_UAC(state, state.msg, 487, "Request interrupted", [], state.totag)
+
+        # The IST keeps its RFC handling (200 to CANCEL + 487 to the INVITE, no
+        # round-trip to the app), but now notifies the dialog layer so it can
+        # surface the CANCEL to the app and tear the early dialog down. state.app
+        # is the dialog pid (set by process_UAS_request); guard in case processing
+        # failed and it was never set.
+        if is_pid(new_state.app) do
+          GenServer.cast(new_state.app, {:sipmsg, req, self()})
+        end
+
+        new_state
+      else
+        Logger.debug(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "CANCEL rejected in state #{state.state}"
+        )
+
+        # RFC 3261: 9.2 Processing CANCEL Requests
+        cancel_resp =
+          SIP.Msg.Ops.reply_to_request(
+            req,
+            481,
+            "Call/Transaction Does Not Exist",
+            [],
+            state.totag
+          )
+
+        sendout_msg(state, cancel_resp)
+        state
       end
 
-      new_state
-    else
-      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
-                      message: "CANCEL rejected in state #{state.state}"])
-      # RFC 3261: 9.2 Processing CANCEL Requests
-      cancel_resp = SIP.Msg.Ops.reply_to_request(req, 481, "Call/Transaction Does Not Exist", [], state.totag)
-      sendout_msg(state, cancel_resp)
-      state
-    end
-    { :noreply, state }
+    {:noreply, state}
   end
 
   # INVITE retransmission from the UAC (RFC 3261 §17.2.1). Everything carrying our
@@ -90,41 +130,69 @@ defmodule SIP.IST do
   # lookup on a media server, a database — is retransmitted into with nothing on the
   # wire yet. Absorb it while we have no response, resend the last one once we have:
   # the retransmission means the UAC has not seen it.
-  def handle_cast({:onsipmsg, req, remoteip, remoteport }, state) when is_map(req) and req.method == :INVITE do
+  def handle_cast({:onsipmsg, req, remoteip, remoteport}, state)
+      when is_map(req) and req.method == :INVITE do
     SIP.Scenario.SipTrace.received(state, req, remoteip, remoteport, retransmit: true)
+
     case Map.get(state, :rspstr) do
       rspstr when is_binary(rspstr) ->
-        Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
-                       message: "Retransmitting last response to INVITE"])
+        Logger.debug(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Retransmitting last response to INVITE"
+        )
+
         SIP.Scenario.SipTrace.sent(state, rspstr, retransmit: true)
         sendout_msg(state, rspstr)
 
       _ ->
-        Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
-                       message: "Absorbing INVITE retransmission (no response yet)"])
+        Logger.debug(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Absorbing INVITE retransmission (no response yet)"
+        )
     end
-    { :noreply, state }
+
+    {:noreply, state}
   end
 
-  def handle_cast({:onsipmsg, req, remoteip, remoteport }, state) when is_map(req) when is_atom(req.method) do
+  def handle_cast({:onsipmsg, req, remoteip, remoteport}, state)
+      when is_map(req)
+      when is_atom(req.method) do
     SIP.Scenario.SipTrace.received(state, req, remoteip, remoteport)
-    Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
-                    message: "Ignoring unsupported SIP request #{req.method}"])
-    { :noreply, state }
+
+    Logger.warning(
+      transid: state.msg.transid,
+      module: __MODULE__,
+      message: "Ignoring unsupported SIP request #{req.method}"
+    )
+
+    {:noreply, state}
   end
 
-  def handle_cast({:onsipmsg, rsp, remoteip, remoteport }, state) when is_map(rsp) when rsp.method == false do
+  def handle_cast({:onsipmsg, rsp, remoteip, remoteport}, state)
+      when is_map(rsp)
+      when rsp.method == false do
     SIP.Scenario.SipTrace.received(state, rsp, remoteip, remoteport)
-    Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
-                    message: "Ignoring unsupported SIP response #{rsp.response}"])
-    { :noreply, state }
+
+    Logger.warning(
+      transid: state.msg.transid,
+      module: __MODULE__,
+      message: "Ignoring unsupported SIP response #{rsp.response}"
+    )
+
+    {:noreply, state}
   end
 
   # This is invoked at NIST transaction creation to forward the request to upperlayer
   # asynchronously
   def handle_cast(:sipreq, state) do
-    Logger.info([ transid: state.msg.transid,  module: __MODULE__,
-                    message: "SIP Request #{state.msg.method} received"])
+    Logger.info(
+      transid: state.msg.transid,
+      module: __MODULE__,
+      message: "SIP Request #{state.msg.method} received"
+    )
+
     case process_UAS_request(state) do
       # Request accepted by the upper layer. Arm the 100 Trying of RFC 3261 §17.2.1
       # — sent only if the TU has still answered nothing 200 ms from now.
@@ -137,15 +205,13 @@ defmodule SIP.IST do
       # come back. Standing alone — or with a TU that is slow for a good reason, a
       # DID lookup on a media server, a database — it fires and quenches the INVITE
       # retransmissions that until now arrived with nothing yet on the wire.
-      { :ok, state } -> { :noreply, state |> schedule_timer_ringing() |> schedule_timer_100() }
-
+      {:ok, state} -> {:noreply, state |> schedule_timer_ringing() |> schedule_timer_100()}
       # In case of failure, timerK is scheduled by internal_reply()
-      { :upperlayerfailure, state } -> { :noreply, state }
-
+      {:upperlayerfailure, state} -> {:noreply, state}
       # The dialog layer answered on its own. No INVITE takes that path today (only
       # an out-of-dialog OPTIONS does, which is a NIST), but the shape is handled
       # here too so a future one cannot fall through to an unmatched case.
-      { :answered, state } -> { :noreply, state }
+      {:answered, state} -> {:noreply, state}
     end
   end
 
@@ -159,14 +225,18 @@ defmodule SIP.IST do
   #
   # `nil` as the totag, and reply_to_request/5 would drop one anyway: a 100 goes
   # out untagged (§17.2.1 downgrades tag insertion to SHOULD NOT there).
-  def handle_info({ :timeout, _tref, :timer100 } , state)  do
+  def handle_info({:timeout, _tref, :timer100}, state) do
     if state.state == :trying do
-      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
-                      message: "TU silent after 200 ms: sending 100 Trying (RFC 3261 §17.2.1)"])
-      { _rc, new_state } = reply_to_UAC(state, state.msg, 100, "Trying", [], nil)
-      { :noreply, new_state }
+      Logger.debug(
+        transid: state.msg.transid,
+        module: __MODULE__,
+        message: "TU silent after 200 ms: sending 100 Trying (RFC 3261 §17.2.1)"
+      )
+
+      {_rc, new_state} = reply_to_UAC(state, state.msg, 100, "Trying", [], nil)
+      {:noreply, new_state}
     else
-      { :noreply, state }
+      {:noreply, state}
     end
   end
 
@@ -180,41 +250,46 @@ defmodule SIP.IST do
   # `state.state` is `:proceeding` by then in every real case, our own automatic
   # 100 Trying having moved it there 200 ms in; `:trying` is kept for the TU that
   # answered the 100 itself and nothing after.
-  def handle_info({ :timeout, _tref, :timer_ringing } , state)  do
-    if state.state in [ :trying, :proceeding ] do
-      { _rc, new_state } = reply_to_UAC(state, state.msg, 408, "Timeout", [], state.totag)
+  def handle_info({:timeout, _tref, :timer_ringing}, state) do
+    if state.state in [:trying, :proceeding] do
+      {_rc, new_state} = reply_to_UAC(state, state.msg, 408, "Timeout", [], state.totag)
       notify_dialog_layer(new_state, :timer_ringing, __MODULE__)
-      { :noreply, new_state }
+      {:noreply, new_state}
     else
       # Final response already sent; timer H owns the ACK timeout
-      { :noreply, state }
+      {:noreply, state}
     end
   end
 
   # other timers
   # - Timer K - kill the transaction
-  def handle_info({ :timeout, _tref, timer } , state)  do
+  def handle_info({:timeout, _tref, timer}, state) do
     handle_timer(timer, state, __MODULE__)
   end
 
   # Handle SIP response retransmission for unreliable transport
   # - should be timerG here but we are using timerA
-  def handle_info({ :timerA, ms }, state) do
+  def handle_info({:timerA, ms}, state) do
     # Resending last final response in case of an unreliable transport
-    handle_UAS_timerA({ :timerA, ms }, state)
+    handle_UAS_timerA({:timerA, ms}, state)
   end
 
-  #Implementation of reply transaction interface
+  # Implementation of reply transaction interface
   @impl true
-  def handle_call({ resp_code, reason, upd_fields, totag }, _from, state) when is_integer(resp_code) do
-    { code, new_state } = reply_to_UAC(state, state.msg, resp_code, reason, upd_fields, totag);
-    { :reply, code, new_state }
+  def handle_call({resp_code, reason, upd_fields, totag}, _from, state)
+      when is_integer(resp_code) do
+    {code, new_state} = reply_to_UAC(state, state.msg, resp_code, reason, upd_fields, totag)
+    {:reply, code, new_state}
   end
 
   @impl true
   def handle_call(:ack, _from, state) do
-    Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
-                    message: "Cannot ACK an Invite Server Transaction"])
-      { :reply, :notsupported, state }
+    Logger.warning(
+      transid: state.msg.transid,
+      module: __MODULE__,
+      message: "Cannot ACK an Invite Server Transaction"
+    )
+
+    {:reply, :notsupported, state}
   end
 end

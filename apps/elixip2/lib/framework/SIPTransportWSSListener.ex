@@ -31,9 +31,9 @@ defmodule SIP.Transport.WSSListener do
   def transport_str, do: @transport_str
 
   @default_max_connections 100
-  @handshake_timeout       10_000
-  @default_certfile        "certs/certificate.pem"
-  @default_keyfile         "certs/private_key.pem"
+  @handshake_timeout 10_000
+  @default_certfile "certs/certificate.pem"
+  @default_keyfile "certs/private_key.pem"
 
   # RFC 6455 §4.1 magic suffix for Sec-WebSocket-Accept computation.
   @ws_magic "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -65,61 +65,87 @@ defmodule SIP.Transport.WSSListener do
   # explicit addr the family comes from the address.
   @impl true
   def init({addr, port, opts}) do
-    family   = SIP.NetUtils.address_family(addr) || Keyword.get(opts, :family, :ipv4)
+    family = SIP.NetUtils.address_family(addr) || Keyword.get(opts, :family, :ipv4)
     localip = resolve_localip(addr, family)
-    max_conn = Keyword.get(opts, :max_connections,
-      Application.get_env(:elixip2, :wss_max_connections, @default_max_connections))
-    certfile = Keyword.get(opts, :certfile,
-      Application.get_env(:elixip2, :tls_certfile, @default_certfile))
-    keyfile  = Keyword.get(opts, :keyfile,
-      Application.get_env(:elixip2, :tls_keyfile, @default_keyfile))
+
+    max_conn =
+      Keyword.get(
+        opts,
+        :max_connections,
+        Application.get_env(:elixip2, :wss_max_connections, @default_max_connections)
+      )
+
+    certfile =
+      Keyword.get(
+        opts,
+        :certfile,
+        Application.get_env(:elixip2, :tls_certfile, @default_certfile)
+      )
+
+    keyfile =
+      Keyword.get(opts, :keyfile, Application.get_env(:elixip2, :tls_keyfile, @default_keyfile))
+
     bind_addr = wildcard_of(addr, family)
 
     # listen/2 binds passive and with SO_REUSEADDR on its own. No `version:`: the
     # bind address carries its family, and `:all` still binds 0.0.0.0 (see
     # SIP.Transport.TCPListener, and step 4 of docs/design/multi-interface.md).
-    ssl_opts = [
-      packet: :raw,
-      local: [address: bind_addr],
-      cert: [path: certfile],
-      key: [path: keyfile],
-      versions: [:"tlsv1.2", :"tlsv1.3"]
-    ] ++ v6only_opt(family)
+    ssl_opts =
+      [
+        packet: :raw,
+        local: [address: bind_addr],
+        cert: [path: certfile],
+        key: [path: keyfile],
+        versions: [:"tlsv1.2", :"tlsv1.3"]
+      ] ++ v6only_opt(family)
 
     case localip && Socket.SSL.listen(port, ssl_opts) do
       {:ok, listen_socket} ->
         {_bound_ip, actual_port} = Socket.local!(listen_socket)
         listener_pid = self()
         Task.start_link(fn -> accept_loop(listen_socket, listener_pid) end)
-        Logger.info([module: __MODULE__,
-                     message: "WSS listener started on #{SIP.NetUtils.sip_host(localip)}:#{actual_port}"])
+
+        Logger.info(
+          module: __MODULE__,
+          message: "WSS listener started on #{SIP.NetUtils.sip_host(localip)}:#{actual_port}"
+        )
+
         state = %{
-          localip:         localip,
-          localport:       actual_port,
-          socket:          listen_socket,
-          upperlayer:      nil,
+          localip: localip,
+          localport: actual_port,
+          socket: listen_socket,
+          upperlayer: nil,
           max_connections: max_conn,
-          connections:     %{}
+          connections: %{}
         }
+
         {:ok, state}
 
       nil ->
-        Logger.error([module: __MODULE__,
-                      message: "No local #{family} address to advertise. Check your network configuration"])
+        Logger.error(
+          module: __MODULE__,
+          message: "No local #{family} address to advertise. Check your network configuration"
+        )
+
         {:stop, :networkdown}
 
       {:error, reason} ->
-        Logger.error([module: __MODULE__,
-                      message: "Failed to bind WSS socket on port #{port}: #{inspect(reason)}"])
+        Logger.error(
+          module: __MODULE__,
+          message: "Failed to bind WSS socket on port #{port}: #{inspect(reason)}"
+        )
+
         {:stop, reason}
     end
   end
 
   @impl true
-  def handle_call({:setupperlayer, ul}, _from, state) when is_pid(ul) or is_function(ul, 2) or is_nil(ul) do
+  def handle_call({:setupperlayer, ul}, _from, state)
+      when is_pid(ul) or is_function(ul, 2) or is_nil(ul) do
     Enum.each(state.connections, fn {_ref, {_ip, _port, pid}} ->
       GenServer.call(pid, {:setupperlayer, ul})
     end)
+
     {:reply, :ok, %{state | upperlayer: ul}}
   end
 
@@ -133,7 +159,9 @@ defmodule SIP.Transport.WSSListener do
 
   def handle_call({:sendmsg, msg, dest_ip, dest_port}, _from, state) do
     case find_connection(state.connections, dest_ip, dest_port) do
-      nil -> {:reply, {:error, :no_connection}, state}
+      nil ->
+        {:reply, {:error, :no_connection}, state}
+
       pid ->
         result = GenServer.call(pid, {:sendmsg, msg, dest_ip, dest_port})
         {:reply, result, state}
@@ -144,13 +172,19 @@ defmodule SIP.Transport.WSSListener do
   # Returns {:ok, conn_pid} on success or :rejected when the limit is reached.
   def handle_call({:spawn_connection, ws_socket, peer_ip, peer_port}, _from, state) do
     if map_size(state.connections) >= state.max_connections do
-      Logger.warning([module: __MODULE__,
-        message: "WSS connection limit (#{state.max_connections}) reached — rejecting inbound connection"])
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "WSS connection limit (#{state.max_connections}) reached — rejecting inbound connection"
+      )
+
       ws_abort(ws_socket)
       {:reply, :rejected, state}
     else
-      case GenServer.start_link(SIP.Transport.WSS,
-             {:inbound, ws_socket, state.localip, state.localport, peer_ip, peer_port}) do
+      case GenServer.start_link(
+             SIP.Transport.WSS,
+             {:inbound, ws_socket, state.localip, state.localport, peer_ip, peer_port}
+           ) do
         {:ok, conn_pid} ->
           unless is_nil(state.upperlayer) do
             GenServer.call(conn_pid, {:setupperlayer, state.upperlayer})
@@ -158,13 +192,21 @@ defmodule SIP.Transport.WSSListener do
 
           ref = Process.monitor(conn_pid)
           connections = Map.put(state.connections, ref, {peer_ip, peer_port, conn_pid})
-          Logger.debug([module: __MODULE__,
-            message: "Accepted WSS connection from #{SIP.NetUtils.ip2string(peer_ip)}:#{peer_port}"])
+
+          Logger.debug(
+            module: __MODULE__,
+            message:
+              "Accepted WSS connection from #{SIP.NetUtils.ip2string(peer_ip)}:#{peer_port}"
+          )
+
           {:reply, {:ok, conn_pid}, %{state | connections: connections}}
 
         {:error, reason} ->
-          Logger.error([module: __MODULE__,
-            message: "Failed to start WSS connection handler: #{inspect(reason)}"])
+          Logger.error(
+            module: __MODULE__,
+            message: "Failed to start WSS connection handler: #{inspect(reason)}"
+          )
+
           ws_abort(ws_socket)
           {:reply, :rejected, state}
       end
@@ -194,31 +236,41 @@ defmodule SIP.Transport.WSSListener do
           {:ok, ssl_socket} ->
             case do_ws_upgrade(ssl_socket) do
               {:ok, ws_socket, peer_ip, peer_port} ->
-                case GenServer.call(listener_pid,
-                       {:spawn_connection, ws_socket, peer_ip, peer_port}) do
+                case GenServer.call(
+                       listener_pid,
+                       {:spawn_connection, ws_socket, peer_ip, peer_port}
+                     ) do
                   {:ok, conn_pid} ->
                     GenServer.cast(conn_pid, :activate_socket)
+
                   :rejected ->
-                    :ok   # Listener already closed the socket.
+                    # Listener already closed the socket.
+                    :ok
                 end
 
               {:error, reason} ->
-                Logger.warning([module: __MODULE__,
-                  message: "WSS WebSocket upgrade failed: #{inspect(reason)}"])
+                Logger.warning(
+                  module: __MODULE__,
+                  message: "WSS WebSocket upgrade failed: #{inspect(reason)}"
+                )
+
                 Socket.close(ssl_socket)
             end
 
           {:error, reason} ->
-            Logger.warning([module: __MODULE__,
-              message: "WSS TLS handshake failed: #{inspect(reason)}"])
+            Logger.warning(
+              module: __MODULE__,
+              message: "WSS TLS handshake failed: #{inspect(reason)}"
+            )
         end
+
         accept_loop(listen_socket, listener_pid)
 
       {:error, :closed} ->
         :ok
 
       {:error, reason} ->
-        Logger.warning([module: __MODULE__, message: "WSS accept error: #{inspect(reason)}"])
+        Logger.warning(module: __MODULE__, message: "WSS accept error: #{inspect(reason)}")
         accept_loop(listen_socket, listener_pid)
     end
   end
@@ -260,22 +312,27 @@ defmodule SIP.Transport.WSSListener do
       protocol_header = if offers_sip, do: "Sec-WebSocket-Protocol: sip\r\n", else: ""
 
       :ssl.setopts(ssl_socket, [{:packet, :raw}])
-      :ssl.send(ssl_socket,
+
+      :ssl.send(
+        ssl_socket,
         "HTTP/1.1 101 Switching Protocols\r\n" <>
-        "Upgrade: websocket\r\n" <>
-        "Connection: Upgrade\r\n" <>
-        "Sec-WebSocket-Accept: #{accept_key}\r\n" <>
-        "Sec-WebSocket-Version: 13\r\n" <>
-        protocol_header <> "\r\n")
+          "Upgrade: websocket\r\n" <>
+          "Connection: Upgrade\r\n" <>
+          "Sec-WebSocket-Accept: #{accept_key}\r\n" <>
+          "Sec-WebSocket-Version: 13\r\n" <>
+          protocol_header <> "\r\n"
+      )
 
       ws_socket = %Socket.Web{
-        socket:    ssl_socket,
-        version:   13,
-        path:      path,
-        key:       ws_key,
-        mask:      nil,     # server MUST NOT mask outgoing frames (RFC 6455 §5.1)
+        socket: ssl_socket,
+        version: 13,
+        path: path,
+        key: ws_key,
+        # server MUST NOT mask outgoing frames (RFC 6455 §5.1)
+        mask: nil,
         protocols: if(offers_sip, do: ["sip"], else: [])
       }
+
       {:ok, ws_socket, peer_ip, peer_port}
     rescue
       e -> {:error, e}
@@ -293,10 +350,11 @@ defmodule SIP.Transport.WSSListener do
         # A field may be sent more than once when its value is a list (RFC 7230
         # §3.2.2) — Sec-WebSocket-Protocol is one, and keeping only the last
         # occurrence loses the subprotocol the client actually wanted.
-        value = case Map.get(headers, key) do
-          nil      -> to_string(value)
-          previous -> previous <> ", " <> to_string(value)
-        end
+        value =
+          case Map.get(headers, key) do
+            nil -> to_string(value)
+            previous -> previous <> ", " <> to_string(value)
+          end
 
         read_http_request(ssl_socket, path, Map.put(headers, key, value))
 
@@ -339,8 +397,8 @@ defmodule SIP.Transport.WSSListener do
     connections
     |> Map.values()
     |> Enum.find_value(fn {ip, port, pid} ->
-         if ip == dest_ip and port == dest_port, do: pid
-       end)
+      if ip == dest_ip and port == dest_port, do: pid
+    end)
   end
 
   # Closes the underlying SSL socket of a %Socket.Web{} struct.

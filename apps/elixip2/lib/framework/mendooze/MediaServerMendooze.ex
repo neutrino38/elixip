@@ -360,9 +360,14 @@ defmodule MediaServer.Mendooze do
     available =
       decoded
       |> Enum.filter(fn {_n, p} -> p.available end)
-      |> Enum.map_join(", ", fn {n, p} -> "#{n}=#{p.announced}#{if p.default, do: " (default)"}" end)
+      |> Enum.map_join(", ", fn {n, p} ->
+        "#{n}=#{p.announced}#{if p.default, do: " (default)"}"
+      end)
 
-    Logger.info("Mendooze: #{base_url} announces #{if available == "", do: "no profile", else: available}")
+    Logger.info(
+      "Mendooze: #{base_url} announces #{if available == "", do: "no profile", else: available}"
+    )
+
     decoded
   end
 

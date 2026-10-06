@@ -233,7 +233,12 @@ defmodule Kelix.P2PChatScriptTest do
 
     Mockup.inject(tp, register.(cseq, nil))
     challenge = final_response(401).wwwauthenticate
-    Mockup.inject(tp, register.(cseq + 1, credentials(challenge, "bob", "REGISTER", "sip:#{@domain}")))
+
+    Mockup.inject(
+      tp,
+      register.(cseq + 1, credentials(challenge, "bob", "REGISTER", "sip:#{@domain}"))
+    )
+
     final_response(200)
   end
 

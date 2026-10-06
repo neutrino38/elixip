@@ -35,11 +35,12 @@ defmodule UAS.InviteExample do
     on_events do
       {:INVITE, _req, _trans, _dlg} ->
         # auto_store stashed the request; reply_invite reads it back.
-        media_connect();
+        media_connect()
         reply_invite(180, "Ringing")
         goto(answering, "INVITE")
 
-      {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("UAS Invite stopped gracefully")
+      {:scenario_ctl, :shutdown, _reason} ->
+        scenario_aborted("UAS Invite stopped gracefully")
     after
       60_000 -> scenario_failure("no INVITE received")
     end
@@ -48,7 +49,7 @@ defmodule UAS.InviteExample do
   state answering do
     # Negotiate the SDP answer with the media server and send 200 OK. On a media
     # failure this replies 500 and sets lasterr, so the goto below aborts.
-    reply_invite_with_sdp(200, [media: :tc])
+    reply_invite_with_sdp(200, media: :tc)
     # media_start_echo()
     # wait_video: start all tracks on the first video I-frame; echo: loop the
     # received video back to the caller while recording.
@@ -68,7 +69,7 @@ defmodule UAS.InviteExample do
         goto(loop, "re-INVITE")
 
       {:ms_event, _recorder, :recorder_started} ->
-        goto loop, "recorder started"
+        goto(loop, "recorder started")
 
       # The media plane went away under an established call: the recording is
       # over and there is nothing left to carry the call, so hang up rather than
@@ -78,11 +79,11 @@ defmodule UAS.InviteExample do
       # clause, and a UAS more than most: it is the side left holding the call.
       {:ms_event, _server, :server_disconnected} ->
         send_BYE()
-        goto hanging_up, "media server disconnected"
+        goto(hanging_up, "media server disconnected")
 
       # In-dialog UPDATE.
       {:UPDATE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200, [media: :tc])
+        reply_invite_with_sdp(200, media: :tc)
         goto(loop, "UPDATE")
 
       # In-dialog INFO — in practice a media_control picture_fast_update, which
@@ -97,7 +98,7 @@ defmodule UAS.InviteExample do
 
       {:BYE, req, _trans, _dlg} ->
         reply_request(req, 200, "OK")
-        media_stop();
+        media_stop()
         scenario_success("BYE")
 
       # Caller cancelled before / around answer: the IST already sent 200 (CANCEL)
@@ -105,9 +106,9 @@ defmodule UAS.InviteExample do
       {:CANCEL, _req, _trans, _dlg} ->
         scenario_success("caller cancelled")
 
-      {:scenario_ctl, :shutdown, _reason } ->
+      {:scenario_ctl, :shutdown, _reason} ->
         send_BYE()
-        goto hanging_up, "shutdown"
+        goto(hanging_up, "shutdown")
 
       {:dialog_terminated, _dlg, _reason} ->
         scenario_success("call ended")
@@ -121,13 +122,14 @@ defmodule UAS.InviteExample do
     # WITH the media server gone, and only the former skips dead handles and
     # swallows their errors. It also releases the peer connection and the server
     # handle, which media_stop/0 leaves behind.
-    media_cleanup_ressources();
+    media_cleanup_ressources()
+
     on_events do
       {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_success("Clean shutdown")
     after
       10_000 -> scenario_failure("BYE not answered")
     end
-   end
+  end
 
   # Cooperative shutdown catch-all. The two states that know what a wind-down
   # means for them handle it themselves above (wait_invite aborts, in_call sends
