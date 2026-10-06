@@ -164,3 +164,48 @@ defmodule SIP.Test.PresencePublishDocument do
     end
   end
 end
+
+defmodule SIP.Test.PublicationPublisher do
+  @moduledoc """
+  `SIP.Publication.same_publisher?/2` and `connection/1`: the publisher is the
+  flow a PUBLISH came in on — the connection over TCP/TLS/WSS, the source
+  address over UDP — since the request itself names no device.
+  """
+
+  use ExUnit.Case, async: true
+
+  defp pub(flow), do: %SIP.Publication{flow: flow}
+
+  defp connected(pid),
+    do: %{received: {:wss, {10, 0, 0, 7}, 40_000}, tp_pid: pid, tp_module: SIP.Transport.WSS}
+
+  defp udp(port),
+    do: %{received: {:udp, {10, 0, 0, 7}, port}, tp_pid: self(), tp_module: SIP.Transport.UDP}
+
+  test "over a connection, the connection is the publisher — not the address" do
+    other = spawn(fn -> :ok end)
+    assert SIP.Publication.same_publisher?(pub(connected(self())), pub(connected(self())))
+    refute SIP.Publication.same_publisher?(pub(connected(self())), pub(connected(other)))
+  end
+
+  # One UDP transport instance serves every peer: its pid names nobody.
+  test "over UDP, the source address and port are" do
+    assert SIP.Publication.same_publisher?(pub(udp(5070)), pub(udp(5070)))
+    refute SIP.Publication.same_publisher?(pub(udp(5070)), pub(udp(5080)))
+  end
+
+  test "an unknown flow is nobody's" do
+    refute SIP.Publication.same_publisher?(pub(nil), pub(nil))
+
+    refute SIP.Publication.same_publisher?(
+             pub(%{received: nil, tp_pid: nil, tp_module: nil}),
+             pub(nil)
+           )
+  end
+
+  test "only a connection-oriented flow binds a publication" do
+    assert SIP.Publication.connection(pub(connected(self()))) == self()
+    assert SIP.Publication.connection(pub(udp(5070))) == nil
+    assert SIP.Publication.connection(pub(nil)) == nil
+  end
+end

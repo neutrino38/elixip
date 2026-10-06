@@ -34,7 +34,7 @@ defmodule Kelix.Metrics.Emit do
     :telemetry.execute([:kelix, :registrar, :event], %{count: 1}, %{domain: domain, event: event})
   end
 
-  @doc "A presence collection event (`:published | :removed | :expired`)."
+  @doc "A presence collection event (`:published | :removed | :expired | :disconnected`)."
   @spec presence_event(String.t(), atom) :: :ok
   def presence_event(domain, event) do
     :telemetry.execute([:kelix, :presence, :event], %{count: 1}, %{domain: domain, event: event})

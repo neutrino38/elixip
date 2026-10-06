@@ -87,6 +87,41 @@ defmodule SIP.Test.Rlmi do
     end
   end
 
+  describe "SIP.Msg.Ops.recipient_list/1" do
+    @list ~s(<resource-lists xmlns="urn:ietf:params:xml:ns:resource-lists"><list><entry uri="sip:bob@example.com"/></list></resource-lists>)
+
+    test "a recipient-list body is the list" do
+      msg = %{
+        "Content-Disposition" => "recipient-list",
+        contenttype: "application/resource-lists+xml",
+        body: @list
+      }
+
+      assert {:ok, ["sip:bob@example.com"]} = SIP.Msg.Ops.recipient_list(msg)
+    end
+
+    test "no disposition is no list" do
+      assert :none = SIP.Msg.Ops.recipient_list(%{})
+    end
+
+    # Linphone's unsubscribe: the disposition copied from the initial SUBSCRIBE,
+    # no body under it. A refresh may omit the list (RFC 5367).
+    test "a recipient-list disposition over no body is no list" do
+      assert :none = SIP.Msg.Ops.recipient_list(%{"Content-Disposition" => "recipient-list"})
+    end
+
+    test "a recipient-list disposition over another body is an error" do
+      msg = %{
+        "Content-Disposition" => "recipient-list",
+        contenttype: "application/pidf+xml",
+        body: "<presence/>"
+      }
+
+      assert {:error, {:not_a_resource_list, "application/pidf+xml"}} =
+               SIP.Msg.Ops.recipient_list(msg)
+    end
+  end
+
   describe "the RLMI manifest" do
     defp manifest(opts) do
       %Rlmi{

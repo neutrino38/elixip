@@ -5,8 +5,9 @@ defmodule Kelix.Router do
   Three steps: **domain** (R-URI host, else To host → `name`/`aliases`) →
   **function** (method → registrar/calls/presence/chat, must be enabled) →
   **script** (the function's script, the first-match of the dial-plan for `calls`
-  or of the `[[domain.chat]]` rules for `chat`, or the `[[domain.presence]]` block
-  naming the request's event package). No global
+  or of the `[[domain.chat]]` rules for `chat`, or — in the `[[domain.presence]]`
+  block naming the request's event package — the first-match of its SUBSCRIBE
+  rules, or its `publish` script). No global
   routing script — runtime-data routing lives inside the selected script.
 
   Step 3 is where the **489 Bad Event** is raised, before any script runs: a
@@ -28,7 +29,7 @@ defmodule Kelix.Router do
 
   alias Kelix.{Domains, Domain, DialRule, PresenceBlock, InstancePool, Conversations}
 
-  @type function_kind :: :registrar | :calls | :presence | :chat
+  @type function_kind :: :registrar | :calls | :presence | :chat | :options
   @type route :: %{
           domain: Domain.t(),
           function: function_kind,
@@ -75,10 +76,11 @@ defmodule Kelix.Router do
     # registration the framework answers an INVITE 500 ("no call server defined")
     # however complete the domain's dial plan is.
     :ok = SIP.Session.ConfigRegistry.set_call_processing_module(__MODULE__)
-    # Out-of-dialog OPTIONS do not go through the dial-plan: they are answered
-    # directly by Kelix.Options (200 with our Allow, or 503 while draining). Without
-    # a module registered the framework answers 500, which upstream reads as "node
-    # broken" — so this registration is what makes kelixip pingable at all.
+    # Out-of-dialog OPTIONS are answered by Kelix.Options (200 with our Allow, or
+    # 503 while draining) unless a [[domain.options]] rule hands them to a script,
+    # which then comes back here through `dispatch/3`. Without a module registered
+    # the framework answers 500, which upstream reads as "node broken" — so this
+    # registration is what makes kelixip pingable at all.
     :ok = SIP.Session.ConfigRegistry.set_options_processing_module(Kelix.Options)
     # SUBSCRIBE and PUBLISH take the same resolve → quota → spawn path; what
     # differs is the step-3 reading of `Event`. Without this registration the
@@ -131,6 +133,62 @@ defmodule Kelix.Router do
   @impl SIP.Session.Chat
   def on_message(dialog_id, msgreq, _transaction_id), do: dispatch(dialog_id, msgreq)
 
+  # ── OPTIONS: the core answers, unless a [[domain.options]] rule claims it ─────
+
+  @doc """
+  Who serves an out-of-dialog OPTIONS, decided before any dialog exists:
+
+    * `{:route, route}` — a `[[domain.options]]` rule names a script;
+    * `:core` — `Kelix.Options` answers it: the host matches no domain, the domain
+      declares no rule, or the R-URI has no user-part and no `keepalive` rule;
+    * `{:reject, 404, reason}` — a user-part no rule matches, as for a call.
+
+  An unknown host is `:core`, not 404: a load balancer pinging an address is
+  asking whether the node is up, not whether it serves that name. And the
+  `default` rule never serves an R-URI without a user-part: `options-probe-ua.exs`
+  would answer the load balancer's ping 480.
+
+  The drain is not decided here: `Kelix.Options` answers 503 before asking.
+  """
+  @spec resolve_options(Domains.t(), map) :: {:route, route} | :core | reject
+  def resolve_options(%Domains{} = domains, req) when is_map(req) do
+    host = req_host(req)
+
+    with %Domain{} = domain <- host && Domains.lookup(domains, host),
+         {:ok, script} <- pick_options_script(domain, ruri_user(req), req) do
+      {:route, %{domain: domain, function: :options, script: script, event_package: nil}}
+    else
+      {:reject, _, _} = reject -> reject
+      _ -> :core
+    end
+  end
+
+  defp pick_options_script(%Domain{options_keepalive: nil}, user, _req)
+       when user in [nil, ""],
+       do: :core
+
+  defp pick_options_script(%Domain{options_keepalive: script}, user, _req)
+       when user in [nil, ""],
+       do: {:ok, script}
+
+  defp pick_options_script(%Domain{options: []}, _user, _req), do: :core
+
+  defp pick_options_script(%Domain{options: rules, name: name}, user, req) do
+    case Enum.find(rules, &DialRule.matches?(&1, user)) do
+      %DialRule{script: s} ->
+        {:ok, s}
+
+      nil ->
+        log_reject(
+          req,
+          "destination #{req_uri_str(req)} does not match any options rule declared " <>
+            "in domain #{name} (#{length(rules)} [[domain.options]] rule(s) tried)"
+        )
+
+        {:reject, 404, "Not Found"}
+    end
+  end
+
   @doc """
   Full dispatch of an out-of-dialog request: resolve (this module) then reserve a
   slot + spawn via `Kelix.InstancePool`. Returns `{:accept, pid}` or
@@ -142,7 +200,21 @@ defmodule Kelix.Router do
   @spec dispatch(pid | nil, map, Domains.t() | nil) ::
           {:accept, pid} | {:reject, integer, String.t()} | {:reject, integer, String.t(), list}
   def dispatch(dialog_id, req, domains \\ nil) do
-    case resolve(domains || Domains.current(), req) do
+    domains = domains || Domains.current()
+
+    resolved =
+      if Map.get(req, :method) == :OPTIONS,
+        do: resolve_options(domains, req),
+        else: resolve(domains, req)
+
+    case resolved do
+      # The configuration was reloaded between `Kelix.Options.on_options/2` routing
+      # this OPTIONS to a script and its dialog reaching us: the answer is the one
+      # the core would have given, carried by the refusal of the dialog.
+      :core ->
+        {:reply, code, reason, fields} = Kelix.Options.core_answer()
+        {:reject, code, reason, fields}
+
       {:reject, code, reason} ->
         reject_metric(req, code)
         {:reject, code, reason}
@@ -200,6 +272,7 @@ defmodule Kelix.Router do
   end
 
   # method → function label for a routing reject (SUBSCRIBE/PUBLISH/… → :presence)
+  defp method_function(%{method: :OPTIONS}), do: :options
   defp method_function(req), do: Map.get(@method_function, Map.get(req, :method), :unknown)
 
   # Config overrides injected into every spawned instance: the domain name (so the
@@ -347,8 +420,8 @@ defmodule Kelix.Router do
   @doc """
   Resolve a request against a domains snapshot.
 
-  Returns `{:route, %{domain, function, script, rule}}` — `rule` the dial-plan or
-  chat rule that matched, `nil` for the other functions — or a `{:reject, code, reason}`:
+  Returns `{:route, %{domain, function, script, rule}}` — `rule` the dial-plan,
+  chat or SUBSCRIBE rule that matched, `nil` for the other functions — or a `{:reject, code, reason}`:
   `404` (no domain / no dial-plan match), `405` (method's function not enabled, or
   no script declared for it on the package asked for). An event package the domain
   does not serve is `{:reject, 489, reason, [{"Allow-Events", …}]}` — the one
@@ -448,28 +521,30 @@ defmodule Kelix.Router do
   # its `Event` header. Read through `SIP.Msg.Ops` like every other header
   # (CLAUDE.md, *Message Layer*) — a second reading here is how two answers to one
   # question start, and the instance's own `accept_subscription/1` is the first.
+  #
+  # Within the block, a SUBSCRIBE goes through the block's rules exactly as an
+  # INVITE goes through the dial-plan: first match on the R-URI user part, 404
+  # when none. A PUBLISH has one script, or none (405).
   defp pick_script(%Domain{} = domain, :presence, req) do
-    method = Map.get(req, :method)
+    case {presence_block(domain, req), Map.get(req, :method)} do
+      {%PresenceBlock{subscribe: rules}, :SUBSCRIBE} ->
+        first_match(rules, domain, "presence.subscribe", req)
 
-    case presence_block(domain, req) do
-      %PresenceBlock{} = block ->
-        case PresenceBlock.script_for(block, method) do
-          script when is_binary(script) ->
-            {:ok, script, nil}
+      {%PresenceBlock{publish: script}, :PUBLISH} when is_binary(script) ->
+        {:ok, script, nil}
 
-          nil ->
-            # The package is served, this method on it is not: a `dialog` block
-            # with no `publish` script is subscribed to and published by nobody.
-            log_reject(
-              req,
-              "event package #{inspect(block.event_package)} is served on domain " <>
-                "#{domain.name}, but no #{method} script is declared for it"
-            )
+      {%PresenceBlock{} = block, method} ->
+        # The package is served, this method on it is not: a `dialog` block
+        # with no `publish` script is subscribed to and published by nobody.
+        log_reject(
+          req,
+          "event package #{inspect(block.event_package)} is served on domain " <>
+            "#{domain.name}, but no #{method} script is declared for it"
+        )
 
-            method_not_allowed()
-        end
+        method_not_allowed()
 
-      nil ->
+      {nil, _method} ->
         refuse_event_package(domain, req)
     end
   end

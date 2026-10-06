@@ -39,7 +39,9 @@ defmodule Kelix.Mod.Conversation do
   `wake/1` never returns an expired snapshot either.
 
   `kelictl conversation list` shows what is set aside — its parties, the state
-  it resumes in, when it expires — never the data it kept.
+  it resumes in, when it expires — never the data it kept. `kelictl
+  conversation show` shows the database link, how many conversations are set
+  aside, and what this node hibernated, woke and swept since it started.
   """
   use GenServer
   @behaviour Kelix.Module
@@ -51,6 +53,7 @@ defmodule Kelix.Mod.Conversation do
   @sweep_ms 60_000
   @recheck_ms 5_000
   @config_keys ~w(module default_ttl max_ttl) ++ Kelix.DB.Pool.link_keys()
+  @counters [:hibernated, :woken, :expired]
 
   @type key :: Kelix.Mod.Conversation.Store.key()
   @type snapshot :: %{
@@ -117,6 +120,21 @@ defmodule Kelix.Mod.Conversation do
   def describe_control() do
     [
       %{
+        name: "show",
+        rest: {:get, "/db"},
+        rw: :r,
+        args: [],
+        render: %{
+          kind: :detail,
+          fields: ~w(state schema host port database username driver tls certificate transport
+                     pool_size query_timeout_ms error conversations domains default_ttl max_ttl
+                     since_start)
+        },
+        help:
+          "The conversation store's database link — does it answer, where, encrypted? — " <>
+            "how many conversations are set aside, and what this node did since it started"
+      },
+      %{
         name: "list",
         rest: {:get, "/conversations"},
         rw: :r,
@@ -135,7 +153,25 @@ defmodule Kelix.Mod.Conversation do
     end
   end
 
+  # `show` never fails on a base that is down: "down, and here is why" is its
+  # answer, and the counters of this node are there whatever the base says.
+  def handle_control("show", _args) do
+    link = Kelix.DB.Pool.describe(@conn, @conn, "conversation", &held/0, show_timeout())
+
+    case Kelix.Module.safe_call(__MODULE__, :status) do
+      %{} = status -> {:ok, Map.merge(link, status)}
+      {:error, _} -> {:ok, link}
+    end
+  end
+
   def handle_control(command, _args), do: {:error, {:unknown_command, command}}
+
+  defp held() do
+    with {:ok, ctx} <- context(), do: ctx.store.stats(ctx.handle, now())
+  end
+
+  defp show_timeout(),
+    do: Kelix.ModuleRegistry.call_timeout(__MODULE__, Kelix.Module.default_call_timeout_ms())
 
   # ── Facades ──────────────────────────────────────────────────────────────────
 
@@ -153,6 +189,7 @@ defmodule Kelix.Mod.Conversation do
 
       case ctx.store.put(ctx.handle, key, entry) do
         :ok ->
+          count(:hibernated)
           {:ok, ttl}
 
         {:error, reason} ->
@@ -175,6 +212,7 @@ defmodule Kelix.Mod.Conversation do
   def wake({_d, _r, _f, _t} = key) do
     with {:ok, ctx} <- context(),
          {:ok, entry} <- ctx.store.take(ctx.handle, key, now()) do
+      count(:woken)
       {:ok, Map.delete(entry, :expires_at)}
     else
       {:error, reason} when reason not in [:down, :timeout] ->
@@ -210,6 +248,8 @@ defmodule Kelix.Mod.Conversation do
 
   defp context(), do: Kelix.Module.safe_call(__MODULE__, :context)
 
+  defp count(key), do: GenServer.cast(__MODULE__, {:count, key, 1})
+
   # ── GenServer ────────────────────────────────────────────────────────────────
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -222,7 +262,8 @@ defmodule Kelix.Mod.Conversation do
       default_ttl: Keyword.get(opts, :default_ttl, @default_ttl),
       max_ttl: Keyword.get(opts, :max_ttl, @max_ttl),
       sweep_ms: Keyword.get(opts, :sweep_ms, @sweep_ms),
-      schema: :unchecked
+      schema: :unchecked,
+      counters: Map.new(@counters, &{&1, 0})
     }
 
     case check_schema(state) do
@@ -270,8 +311,21 @@ defmodule Kelix.Mod.Conversation do
 
   def handle_call(:context, _from, state), do: {:reply, {:error, :down}, state}
 
+  def handle_call(:status, _from, state) do
+    {:reply,
+     %{
+       schema: state.schema,
+       default_ttl: state.default_ttl,
+       max_ttl: state.max_ttl,
+       since_start: state.counters
+     }, state}
+  end
+
   def handle_call({:reload, opts}, _from, state),
     do: {:reply, :ok, %{state | default_ttl: opts[:default_ttl], max_ttl: opts[:max_ttl]}}
+
+  @impl true
+  def handle_cast({:count, key, n}, state), do: {:noreply, bump(state, key, n)}
 
   @impl true
   def handle_info(:recheck, %{schema: :unchecked} = state) do
@@ -282,30 +336,39 @@ defmodule Kelix.Mod.Conversation do
   end
 
   def handle_info(:sweep, state) do
-    if state.schema == :ok do
-      case state.store.sweep(state.handle, now()) do
-        {:ok, 0} ->
-          :ok
+    state =
+      if state.schema == :ok do
+        case state.store.sweep(state.handle, now()) do
+          {:ok, 0} ->
+            state
 
-        {:ok, swept} ->
-          Logger.info(
-            module: __MODULE__,
-            message: "#{swept} hibernated conversation(s) expired"
-          )
+          {:ok, swept} ->
+            Logger.info(
+              module: __MODULE__,
+              message: "#{swept} hibernated conversation(s) expired"
+            )
 
-        {:error, reason} ->
-          Logger.warning(
-            module: __MODULE__,
-            message: "conversation: sweep failed: #{short(reason)}"
-          )
+            bump(state, :expired, swept)
+
+          {:error, reason} ->
+            Logger.warning(
+              module: __MODULE__,
+              message: "conversation: sweep failed: #{short(reason)}"
+            )
+
+            state
+        end
+      else
+        state
       end
-    end
 
     Process.send_after(self(), :sweep, state.sweep_ms)
     {:noreply, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp bump(state, key, n), do: %{state | counters: Map.update!(state.counters, key, &(&1 + n))}
 
   # ── internals ────────────────────────────────────────────────────────────────
 

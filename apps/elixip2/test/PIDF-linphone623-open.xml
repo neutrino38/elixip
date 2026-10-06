@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid" xmlns:pidfonline="http://www.linphone.org/xsds/pidfonline.xsd" entity="sip:bob@weshwesh.eu" xmlns="urn:ietf:params:xml:ns:pidf">
+ <tuple id="wfu78u">
+  <status>
+   <basic>open</basic>
+   <pidfonline:online/>
+  </status>
+  <contact priority="0.8">sip:bob@weshwesh.eu</contact>
+  <timestamp>2026-10-01T19:04:01Z</timestamp>
+ </tuple>
+</presence>

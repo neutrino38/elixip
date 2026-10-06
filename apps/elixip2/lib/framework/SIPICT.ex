@@ -42,7 +42,7 @@ defmodule SIP.ICT do
         Logger.info(
           transid: sipmsg.transid,
           module: __MODULE__,
-          message: "Sent INVITE to #{sipmsg.ruri}"
+          message: "Sent INVITE to #{SIP.Uri.ruri_string(sipmsg.ruri)}"
         )
 
         state =

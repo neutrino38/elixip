@@ -20,7 +20,7 @@ defmodule SIP.Publication do
 
   ## It is a kamailio row
 
-  Every field below but the last four is a column of kamailio 6.1's `presentity`
+  Every field below but the last five is a column of kamailio 6.1's `presentity`
   table, carrying that column's value under that column's name
   (docs/design/DESIGN-PRESENCE.md, *The data model is kamailio's*), for the same
   reason `%SIP.Subscription{}` is an `active_watchers` row: a struct designed
@@ -69,7 +69,10 @@ defmodule SIP.Publication do
     # and the document that package made of it.
     package: nil,
     content_type: nil,
-    doc: nil
+    doc: nil,
+    # Where the PUBLISH came from (`SIP.Msg.Ops.arrival_flow/1`): the publisher,
+    # as far as the network tells — see `same_publisher?/2`.
+    flow: nil
   ]
 
   @type t :: %__MODULE__{}
@@ -103,6 +106,43 @@ defmodule SIP.Publication do
   @spec resource(t()) :: {binary() | nil, binary() | nil, binary() | nil}
   def resource(%__MODULE__{} = pub), do: {pub.username, pub.domain, pub.event}
 
+  @doc """
+  Did `a` and `b` come from the same publisher?
+
+  PUBLISH names no device — no Contact, no `+sip.instance` — and `sender` is the
+  From, which every device of a user shares. What does tell one publisher from
+  another is the flow it publishes over (`SIP.Msg.Ops.flow_peer/1`): the
+  connection, else the source address and port. An unknown flow is nobody's.
+  """
+  @spec same_publisher?(t(), t()) :: boolean()
+  def same_publisher?(%__MODULE__{} = a, %__MODULE__{flow: flow}), do: published_over?(a, flow)
+
+  @doc """
+  Was `pub` published by whoever sent a request over `flow`
+  (`SIP.Msg.Ops.arrival_flow/1`)? The reading of `same_publisher?/2`, for a
+  request that is not a PUBLISH — the REGISTER of the device that published.
+  """
+  @spec published_over?(t(), map() | nil) :: boolean()
+  def published_over?(%__MODULE__{flow: own}, flow) do
+    case SIP.Msg.Ops.flow_peer(flow) do
+      nil -> false
+      peer -> peer == SIP.Msg.Ops.flow_peer(own)
+    end
+  end
+
+  @doc """
+  The connection this publication is bound to — the transport instance it came
+  in on, over a connection-oriented transport — or `nil`. The publication cannot
+  outlive it: the publisher is gone with it, and no unPUBLISH will follow.
+  """
+  @spec connection(t()) :: pid() | nil
+  def connection(%__MODULE__{flow: flow}) do
+    case SIP.Msg.Ops.flow_peer(flow) do
+      {:connection, pid} -> pid
+      _ -> nil
+    end
+  end
+
   @doc "The presentity as a URI, the way `active_watchers.presentity_uri` holds it."
   @spec presentity_uri(t()) :: binary()
   def presentity_uri(%__MODULE__{username: user, domain: domain}),
@@ -132,6 +172,18 @@ defmodule SIP.Publication do
   """
   @spec new_etag() :: binary()
   def new_etag, do: SIP.Msg.Ops.generate_from_or_to_tag()
+
+  @doc """
+  A fresh `ruid`: the publication's own identifier, minted once on its initial
+  PUBLISH and kept across its refreshes and modifications — where the entity-tag
+  changes every time.
+
+  It names the publication's tuples in a composite document
+  (`SIP.Presence.Doc.compose/2`), so it is spelt with characters an XML `NCName`
+  accepts after a prefix: lower-case hexadecimal.
+  """
+  @spec new_ruid() :: binary()
+  def new_ruid, do: :crypto.strong_rand_bytes(6) |> Base.encode16(case: :lower)
 
   @doc "The epoch second, the way kamailio counts it (`time(NULL)`)."
   @spec now() :: integer()
@@ -392,6 +444,7 @@ defmodule SIP.Session.Publish do
       received_time: SIP.Publication.now(),
       body: body,
       sender: sender(req),
+      flow: SIP.Msg.Ops.arrival_flow(req),
       operation: operation,
       package: package,
       content_type: content_type,

@@ -100,7 +100,17 @@ defmodule Kelix.PresenceRls do
       # 406 / 420 / 423 have already gone out. A watcher whose Accept cannot
       # carry a list asks again, one subscription per buddy.
       {:error, code} ->
-        goto(wait_subscribe, "#{code}")
+        goto(refused, "#{code}")
+    end
+  end
+
+  # A refusal ends the request, not the subscription: a refused refresh leaves
+  # the list subscription running until its last granted lifetime (RFC 6665
+  # §4.1.2.2), and only `subscribed` pushes its states and handles its end.
+  state refused do
+    case last_subscription() do
+      nil -> goto(wait_subscribe, "no subscription yet")
+      _running -> goto(subscribed, "the subscription runs on")
     end
   end
 

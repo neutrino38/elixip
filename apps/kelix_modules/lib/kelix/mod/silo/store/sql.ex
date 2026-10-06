@@ -224,6 +224,31 @@ defmodule Kelix.Mod.Silo.Store.SQL do
   end
 
   @impl true
+  def stats(h, now) do
+    sql =
+      "SELECT COUNT(*), COUNT(DISTINCT domain, aor), COALESCE(SUM(size), 0), " <>
+        "COALESCE(SUM(CASE WHEN claimed_until > ? THEN 1 ELSE 0 END), 0) " <>
+        "FROM silo_message WHERE expires_at > ?"
+
+    with {:ok, %{rows: [[count, aors, bytes, claimed]]}} <-
+           query(h, stats_sql(h, sql), [now, now]) do
+      {:ok,
+       %{
+         messages: to_int(count),
+         aors: to_int(aors),
+         bytes: to_int(bytes),
+         claimed: to_int(claimed)
+       }}
+    end
+  end
+
+  # `COUNT(DISTINCT a, b)` is MySQL's; PostgreSQL counts a row value.
+  defp stats_sql(%{driver: :postgres}, sql),
+    do: String.replace(sql, "COUNT(DISTINCT domain, aor)", "COUNT(DISTINCT (domain, aor))")
+
+  defp stats_sql(_h, sql), do: sql
+
+  @impl true
   def purge(h, domain, aor) do
     transaction(h, fn conn ->
       ids =

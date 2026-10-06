@@ -97,6 +97,30 @@ name = "sip.linphone.org"
   subscribe     = "presence-rls.exs"
 ```
 
+When the list URI is on the account's own domain — Linphone's `rls_uri` is a
+setting, `sip:rls@example.com` — route it with a SUBSCRIBE rule of that domain's
+block instead. Every other SUBSCRIBE reaches the catch-all:
+
+```toml
+# domains.toml
+[[domain]]
+name = "example.com"
+
+  [[domain.presence]]
+  event-package = "presence"
+  publish       = "presence-publish.exs"
+
+    [[domain.presence.subscribe]]
+    pattern = "rls"
+    script  = "presence-rls.exs"
+
+    [[domain.presence.subscribe]]
+    default = true
+    script  = "presence-subscribe.exs"
+```
+
+The two forms can coexist on one node.
+
 The script authenticates the watcher on the realm of its own `From`, then watches
 every entry of the list on the entry's own domain. The answer is one NOTIFY
 carrying an RLMI manifest and one PIDF part per buddy; state changes that follow
@@ -109,12 +133,13 @@ an entry with no state is reported `terminated;reason=noresource`.
 
 The state notified for a resource is, in order:
 
-1. the live document its presentity PUBLISHed;
+1. the [composite](#the-composite-state) of what its presentity's devices
+   PUBLISHed, and of its registered devices that publish nothing;
 2. a state another module reported for it with `report/4` — a conference room,
    reported by [`mcu_presence`](mcu_presence.md), or a user on the phone, reported
    by [`dialog_state`](dialog_state.md);
-3. **open** while one of the user's devices is registered, as reported by the
-   registrar script (see [Registrations as presence](#registrations-as-presence));
+3. **open**, one tuple per registered device, as reported by the registrar script
+   (see [Registrations as presence](#registrations-as-presence));
 4. on a domain with a `[domain.registrar]` block and for a user known to
    `auth_db`: **closed**;
 5. otherwise no state (`nil`): a domain with no registrar, a domain this node does
@@ -129,6 +154,47 @@ from [`dialog_state`](dialog_state.md) — then, for a user `auth_db` knows, an
 A resource with no state ends its subscription: the reference scripts notify
 `terminated;reason=noresource`, when the SUBSCRIBE is accepted as well as when the
 state goes while it is watched.
+
+### The composite state
+
+A `presence` document is composed from every device of the presentity:
+
+- **tuples** — one per device: the tuples each live publication carries, and one
+  **open** tuple per registered device that publishes nothing, offering its
+  contact. The presentity is open when one device is;
+- **person** — the activity, its marks and the note of the last publication that
+  carried a document. A document with no activity clears them; a refresh leaves
+  them. They stay after the device that set them goes, while another publication
+  of the presentity remains.
+
+A **mark** is an element of a client's own namespace inside `<rpid:activities>`,
+beside the RPID activity — Trix's `<trix:dnd/>` ("do not disturb") and
+`<trix:auto/>` ("set by a rule"). Marks are returned as empty elements in their
+own namespace, after the activity; at most eight per document are kept.
+
+```xml
+<rpid:activities>
+  <rpid:busy/>
+  <trix:dnd/>
+</rpid:activities>
+```
+
+A device that both registers and publishes counts once: its publication. Tuple ids
+are the module's own, and stable for a device across its refreshes and
+modifications.
+
+Watchers are notified when the composite changes. A refresh, or a device
+republishing what the composite already says, sends no NOTIFY.
+
+```
+Bob's phone publishes away, then closes; his desk phone only registers
+  → open (one tuple, the desk phone's contact), away
+Bob's phone publishes again with no activity
+  → open (two tuples), no activity
+```
+
+Other packages are not composed: the publication whose state changed last is
+notified.
 
 ### Registrations as presence
 
@@ -147,11 +213,13 @@ name = "example.com"
 ```
 
 The subscriber is open while at least one of its devices holds a registration,
-and closed when the last one goes. A registration that is not refreshed is
+and closed when the last one goes. Each registered device is one tuple of the
+[composite](#the-composite-state). A registration that is not refreshed is
 reported when it lapses in the registrar; a refused refresh (403, 423, 400, 503)
-leaves the registration running, and its lapse is reported the same way. Its watchers are NOTIFYed on each change;
-refreshing a registration notifies nothing, and neither does a change while a
-PUBLISH is live.
+leaves the registration running, and its lapse is reported the same way. Its
+watchers are NOTIFYed when a device joins or leaves the composite; refreshing a
+registration notifies nothing, and neither does a device that publishes over the
+flow it registered on.
 
 A domain served by `registrar.exs` reports nothing: its subscribers are closed
 unless they publish. The script needs the `registrar`, `auth_db` and `presence`
@@ -177,7 +245,7 @@ Per-domain block — `[[domain.presence]]` (activates the function for a domain)
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `event-package` | string | **required** | The package this block serves (`presence`, `dialog`, …) |
-| `subscribe` | string | **required** | Script serving SUBSCRIBE for this package |
+| `subscribe` | string, or rules | **required** | Script serving SUBSCRIBE for this package, or `[[domain.presence.subscribe]]` rules: `pattern` (or `default = true`, last) and `script`, first match wins, no match ⇒ `404` |
 | `publish` | string | — | Script serving PUBLISH; absent ⇒ `405` |
 
 ## Facades
@@ -211,6 +279,16 @@ resource. The publication is the one `check_publish/1` handed the script.
 
 A refresh keeps the document it refreshes and moves only its lifetime; a
 modification replaces it.
+
+A publisher is identified by the flow its PUBLISH arrives on: the connection over
+TCP, TLS or WSS, the source address and port over UDP. Each publisher holds one
+publication per resource: an initial PUBLISH from a publisher that already holds
+one replaces it.
+
+Over TCP, TLS or WSS a publication is bound to its connection. When the
+connection drops, the publications that arrived over it are removed and their
+watchers notified, as for a removal. A refresh that arrives over a new connection
+moves the publication to it.
 
 ### `watch/2`
 
@@ -270,9 +348,16 @@ or registration not refreshed.
 `kelictl registration remove` and `DELETE /domains/<domain>/registrations/<aor>`
 call it when the presence module is loaded.
 
-None states open or closed: the module asks the registrar whether any device of
-the AOR still holds a registration, leaving out the ending dialog's own bindings
-(`Kelix.Mod.Registrar.registered?/3`).
+None states open or closed: the module asks the registrar which devices of the
+AOR still hold a registration, leaving out the ending dialog's own bindings
+(`Kelix.Mod.Registrar.devices/3`).
+
+An un-REGISTER reported by `registration_changed/1` also removes, on every event
+package of the AOR, the publications of the device that sent it — the publisher
+on the same flow. Publications of the AOR's other devices are kept.
+`registration_ended/1` does the same — the registration was not refreshed, or its
+connection dropped — unless the device still holds a binding over the same flow
+through another REGISTER dialog.
 
 ### `exists?/2`
 
@@ -326,7 +411,7 @@ subscribing.
 | Command | REST | Description |
 |---|---|---|
 | `kelictl presence list D` | `GET /modules/presence/presentities` | One row per presentity: what its watchers are told, and who says so |
-| `kelictl presence show bob@D` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
+| `kelictl presence show bob@D` | `GET /modules/presence/presentities/bob` | One presentity: its composite state, the states it is composed of, its watchers |
 | `kelictl presence watchers bob@D` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
 | `kelictl presence remove bob@D` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
 
@@ -341,9 +426,27 @@ magali.buu    open    on_the_phone  1      1         publish, dialog_state, regi
 ```
 
 `status` and `activity` are what a watcher of the `presence` package is told —
-a live publication wins over a reported state. `calls` counts the dialogs a
+the composite, which wins over a reported state. `calls` counts the dialogs a
 watcher of the `dialog` package is told of, `watchers` the live subscriptions, and
 `sources` names who states something about the presentity.
+
+`show` heads the detail of one presentity with the same composite, then lists
+every state it is composed of:
+
+```
+Presentity uri: sip:bob@weshwesh.eu
+Status:         open
+Activity:       away
+Note:           -
+Calls:          -
+States:
+  event     source     status  activity  ruid          etag              expires  sender                       content_type
+  presence  publish    open    away      5e6951922044  3743925564391211  3525     "Bob" <sip:bob@weshwesh.eu>  application/pidf+xml
+  presence  registrar  open    -         rd77570d604b1 -                 -        sip:bob@192.0.2.10           -
+Watchers:
+  watcher                     event     status  expires  callid
+  sip:magali.buu@weshwesh.eu  presence  active  3364     7spik6itdff9ode3hi13
+```
 
 `show` and `watchers` give the detail, under kamailio's column names —
 `presentity_uri`, `event`, `etag`, `expires`, `status`, `callid`.
@@ -351,9 +454,10 @@ watcher of the `dialog` package is told of, `watchers` the live subscriptions, a
 A state has a `source`: `publish` for a PUBLISH, `registrar` for a registration
 reported by the registrar script (see
 [Registrations as presence](#registrations-as-presence)), and the name a module
-reported it under — `mcu` for a conference room. A `registrar` or module state has
-no `etag`, `expires` nor `sender`, and is shown beside a live publication of the
-same presentity, which it does not override.
+reported it under — `mcu` for a conference room. A `registrar` state is one row per
+registered device, its tuple key as `ruid` and its contact as `sender`; a module
+state has no `ruid` nor `sender`. Neither has an `etag` nor `expires`. A `publish`
+row's `ruid` is the stable key its tuples are named after.
 
 `activity` is the RPID activity of a `presence` document (`on_the_phone`, `away`…),
 empty when the document states none.
@@ -373,7 +477,7 @@ from its own state:
 When the last publication goes — a removal, or a lifetime that lapsed — the
 document pushed is the [state](#state-of-a-resource) that follows: a reported
 state, open or closed from the registrations, or `nil` where none applies. A
-reported state or a registration that changes on a watched resource is pushed the
+reported state or a registration that changes what a watcher is told is pushed the
 same way. What to notify for `nil` is the script's decision; the reference
 scripts end the subscription with `noresource`.
 
@@ -488,9 +592,10 @@ end
 
 - **Full state only.** Partial state (`application/pidf-diff+xml`, RFC 5262) is
   not emitted.
-- **No composition.** Several publishers may hold state for one presentity at the
-  same time, each with its own entity-tag; what is notified is the most recent
-  publication, not a composite of them.
+- **Devices behind a proxy.** A publisher is identified by the flow its PUBLISH
+  arrives on. When a proxy relays several devices of one user over a single
+  connection, they are one publisher: each initial PUBLISH replaces the other
+  devices' publication, and the connection's end removes them all.
 - **In memory.** The collection does not survive a restart, and is local to one
   node.
 

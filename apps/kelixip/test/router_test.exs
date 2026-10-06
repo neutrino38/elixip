@@ -17,12 +17,31 @@ defmodule Kelix.RouterTest do
 
   [[domain.presence]]
   event-package = "presence"
-  subscribe = "presence-subscribe.exs"
   publish = "presence-publish.exs"
+
+    [[domain.presence.subscribe]]
+    pattern = "rls"
+    script = "presence-rls.exs"
+
+    [[domain.presence.subscribe]]
+    pattern = "9XXX"
+    script = "conf-subscribe.exs"
+
+    [[domain.presence.subscribe]]
+    default = true
+    script = "presence-subscribe.exs"
 
   [[domain.presence]]
   event-package = "dialog"
   subscribe = "dialog-subscribe.exs"
+
+  # Rules and no catch-all: a SUBSCRIBE matching none of them is a 404.
+  [[domain.presence]]
+  event-package = "conference"
+
+    [[domain.presence.subscribe]]
+    pattern = "XXXX"
+    script = "conference.exs"
 
   [[domain]]
   name = "mydomain.de"
@@ -192,7 +211,8 @@ defmodule Kelix.RouterTest do
 
       # What the watcher could have asked for instead — without it the refusal is
       # one the client can only retry identically (RFC 6665 §4.4.7).
-      assert {"Allow-Events", "presence, dialog"} = List.keyfind(fields, "Allow-Events", 0)
+      assert {"Allow-Events", "presence, dialog, conference"} =
+               List.keyfind(fields, "Allow-Events", 0)
     end
 
     # No Event header at all: the package is what says which state is being asked
@@ -209,8 +229,63 @@ defmodule Kelix.RouterTest do
                Router.resolve(snap, event_req(:PUBLISH, "bob", "example.com", "dialog"))
     end
 
+    # SUBSCRIBE is routed like a call: the block's rules, first match on the
+    # R-URI user part. A resource list (RFC 4662) and a range of conference rooms
+    # are rules like any other.
+    test "a SUBSCRIBE reaches the first rule matching its user part", %{snap: snap} do
+      assert {:route, %{script: "presence-rls.exs", function: :presence}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "rls", "example.com", "presence"))
+
+      assert {:route, %{script: "conf-subscribe.exs"}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "9876", "example.com", "presence"))
+
+      assert {:route, %{script: "presence-subscribe.exs"}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "bob", "example.com", "presence"))
+    end
+
+    test "a SUBSCRIBE matching no rule is 404", %{snap: snap} do
+      assert {:route, %{script: "conference.exs"}} =
+               Router.resolve(
+                 snap,
+                 event_req(:SUBSCRIBE, "1234", "example.com", "conference")
+               )
+
+      log =
+        capture_log(fn ->
+          assert {:reject, 404, "Not Found"} =
+                   Router.resolve(
+                     snap,
+                     event_req(:SUBSCRIBE, "bob", "example.com", "conference")
+                   )
+        end)
+
+      assert log =~ "does not match any presence.subscribe rule"
+    end
+
+    # The user part is case-sensitive (RFC 3261 §19.1.4): `RLS` is not the list.
+    test "the list user part is matched exactly", %{snap: snap} do
+      assert {:route, %{script: "presence-subscribe.exs"}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "RLS", "example.com", "presence"))
+    end
+
+    # The rules are SUBSCRIBE's: a PUBLISH stays on the publish script, which
+    # answers for the AOR it names.
+    test "a PUBLISH to a list URI is not routed to the list script", %{snap: snap} do
+      assert {:route, %{script: "presence-publish.exs"}} =
+               Router.resolve(snap, event_req(:PUBLISH, "rls", "example.com", "presence"))
+    end
+
+    # The rules belong to their block: another package's SUBSCRIBE to the same URI
+    # is that package's.
+    test "SUBSCRIBE rules are per event package", %{snap: snap} do
+      assert {:route, %{script: "dialog-subscribe.exs"}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "rls", "example.com", "dialog"))
+    end
+
     test "allow_events/1 is composed from the domain's blocks, in order", %{snap: snap} do
-      assert Router.allow_events(Domains.lookup(snap, "example.com")) == "presence, dialog"
+      assert Router.allow_events(Domains.lookup(snap, "example.com")) ==
+               "presence, dialog, conference"
+
       assert Router.allow_events(Domains.lookup(snap, "mydomain.de")) == ""
     end
   end
@@ -391,6 +466,81 @@ defmodule Kelix.RouterTest do
 
       assert log =~
                "destination sip:1234@d.com does not match any call rule declared in domain d.com"
+    end
+  end
+
+  # An OPTIONS is decided before any dialog exists, and most of them are the core's:
+  # a script serves one only when a [[domain.options]] rule claims it.
+  describe "resolve_options/2" do
+    @options_toml """
+    [[domain]]
+    name = "opt.com"
+
+    [[domain.options]]
+    keepalive = true
+    script    = "options-keepalive.exs"
+
+    [[domain.options]]
+    pattern = "conf-."
+    script  = "options-mcu.exs"
+
+    [[domain.options]]
+    default = true
+    script  = "options-probe-ua.exs"
+
+    [[domain]]
+    name = "probe.com"
+
+    [[domain.options]]
+    pattern = "XXXX"
+    script  = "options-probe-ua.exs"
+
+    [[domain]]
+    name = "bare.com"
+    """
+
+    setup do
+      {:ok, snap} = Domains.parse(@options_toml)
+      %{opts: snap}
+    end
+
+    test "sip:domain goes to the keepalive rule", %{opts: snap} do
+      assert {:route, %{function: :options, script: "options-keepalive.exs"}} =
+               Router.resolve_options(snap, req(:OPTIONS, nil, "opt.com"))
+    end
+
+    test "a user-part goes through the rules in order", %{opts: snap} do
+      assert {:route, %{script: "options-mcu.exs"}} =
+               Router.resolve_options(snap, req(:OPTIONS, "conf-42", "opt.com"))
+
+      assert {:route, %{script: "options-probe-ua.exs"}} =
+               Router.resolve_options(snap, req(:OPTIONS, "alice", "opt.com"))
+    end
+
+    # Otherwise options-probe-ua.exs would answer the load balancer's ping 480.
+    test "without a keepalive rule, sip:domain is the core's — never the default", %{opts: snap} do
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, nil, "probe.com"))
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, "", "probe.com"))
+    end
+
+    test "an unknown host is the core's, not a 404", %{opts: snap} do
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, nil, "10.0.0.1"))
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, "alice", "nope.net"))
+    end
+
+    test "a domain declaring no rule leaves every OPTIONS to the core", %{opts: snap} do
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, "alice", "bare.com"))
+      assert :core = Router.resolve_options(snap, req(:OPTIONS, nil, "bare.com"))
+    end
+
+    test "a user-part no rule matches is a 404, as for a call", %{opts: snap} do
+      log =
+        capture_log(fn ->
+          assert {:reject, 404, _} =
+                   Router.resolve_options(snap, req(:OPTIONS, "alice", "probe.com"))
+        end)
+
+      assert log =~ "does not match any options rule declared in domain probe.com"
     end
   end
 end

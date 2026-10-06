@@ -111,6 +111,20 @@ defmodule Kelix.Mod.Silo.Store do
   @callback list(handle, domain :: String.t(), aor :: String.t(), now :: integer) ::
               {:ok, [meta]} | {:error, term}
 
+  @doc """
+  What the whole store holds, live by `now`: how many messages, for how many
+  AORs, how many bytes, and how many a flush holds right now (`kelictl silo show`).
+  """
+  @callback stats(handle, now :: integer) ::
+              {:ok,
+               %{
+                 messages: non_neg_integer,
+                 aors: non_neg_integer,
+                 bytes: non_neg_integer,
+                 claimed: non_neg_integer
+               }}
+              | {:error, term}
+
   @doc "Delete every message of the AOR. How many."
   @callback purge(handle, domain :: String.t(), aor :: String.t()) ::
               {:ok, non_neg_integer} | {:error, term}

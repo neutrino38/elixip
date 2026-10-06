@@ -54,9 +54,10 @@ defmodule Kelix.Mod.Presence do
 
   A presence state is first what its presentity PUBLISHed. When nothing live is
   published, it is the state another module **reported** for it (see *Reported
-  states*); failing that, **open** while the presentity is registered — which the
-  registrar script says, through `registration_changed/1` and
-  `registration_ended/1` — and, on a domain that has a registrar, **closed** for a
+  states*); failing that, **open** while the presentity is registered — one open
+  tuple per registered device, which the registrar script reports through
+  `registration_changed/1` and `registration_ended/1` — and, on a domain that has
+  a registrar, **closed** for a
   subscriber `Kelix.Mod.AuthDb` knows. Anywhere else — a domain with no
   registrar, a domain this node does not serve, a user nobody provisioned — there
   is no state, `nil`, which a notifier reports as `noresource`.
@@ -69,8 +70,9 @@ defmodule Kelix.Mod.Presence do
   time (docs/design/dialog-state-plan.md, decision 7). Any other package has no
   state.
 
-  A registration that opens or closes a watched resource nobody publishes is
-  pushed like a publication. The collection never follows the registrar on its
+  A registration that changes what a watcher is told — a resource nobody
+  publishes opening or closing, a device without a publication joining or leaving
+  the composite — is pushed like a publication. The collection never follows the registrar on its
   own: a domain whose registrar script does not report (`registrar.exs`) shows its
   subscribers closed.
 
@@ -88,13 +90,51 @@ defmodule Kelix.Mod.Presence do
   Watchers are pushed when the **resolved** state of the resource changes, and
   only then: a source repeating what it said costs nobody a NOTIFY.
 
-  ## Composition is not done here
+  ## One publication per publisher, bound to its connection
 
   Several publishers may hold state for one presentity at the same time (RFC 3903
-  §4.1, which is why the entity-tag is part of `presentity`'s key). v1 emits
-  **full state from the most recent publication** rather than composing them: the
-  composite state is its own phase, and a wrong composition is worse than an
-  honest "the last thing said about this resource".
+  §4.1, which is why the entity-tag is part of `presentity`'s key). A publisher
+  is told apart by the flow it publishes over (`SIP.Publication.same_publisher?/2`):
+  a publisher holds **one** publication per resource, and an initial PUBLISH
+  from a publisher that already holds one replaces it — a client that lost its
+  entity-tag across a reconnection starts over, it does not add a second state
+  beside the first.
+
+  Over a connection-oriented transport a publication lasts as long as the
+  connection it came in on: the connection is monitored, and when it drops, what
+  was published over it goes and the watchers are told, as for a removal. A
+  client that disconnects without unpublishing leaves nothing behind.
+
+  ## The composite state
+
+  What a watcher of the `presence` package is told is **one** document composed
+  of every live publication of the resource (`SIP.Presence.Doc.compose/2`, RFC
+  4479's two levels):
+
+    * the **tuples** are the union of the publications' tuples — Bob is open as
+      soon as one of his devices is. Each publication's tuples are named after
+      its `ruid`, minted on its initial PUBLISH and kept across its refreshes and
+      modifications, so a device that did not move keeps its tuple ids;
+    * a **registered device that publishes nothing** adds one open tuple, its
+      binding's contact: Bob is reachable on the desk phone that only registers
+      while his mobile publishes. A device is told publishing by the flow, as a
+      publisher is (`SIP.Publication.published_over?/2`): a binding whose flow
+      carries a live publication adds nothing — the publication speaks for it;
+    * the **person** — activity, marks and note — is one state per resource, held here:
+      every publication that carries a document sets it, and a document with no
+      activity clears it (the field clients say "available" by saying nothing).
+      A refresh carries no document and leaves it. It survives the departure of
+      the device that set it, and goes with the resource's last publication.
+
+  A device subscribed to its own presentity is told the composite, and has
+  nothing to republish.
+
+  Watchers are pushed when the composite **changes**: a refresh, or a device
+  republishing what the composite already says, costs nobody a NOTIFY. The
+  tuples' timestamps do not count (`SIP.Presence.Doc.same_state?/2`).
+
+  Any other package is not composed: its state is the document of the
+  publication whose state changed last.
   """
   use GenServer
   @behaviour Kelix.Module
@@ -106,21 +146,28 @@ defmodule Kelix.Mod.Presence do
   #   states     %{domain => :ets.tid}  resource => [%SIP.Publication{}], one per etag
   #   watchers   %{domain => :ets.tid}  resource => %{pid => %SIP.Subscription{}}
   #   mons       %{monitor_ref => {domain, resource, pid}}  watcher instances
-  #   registered MapSet of `presence` resources whose presentity holds a binding,
-  #              as the registrar script reported it
+  #   registered %{resource => [device]}, the `presence` resources whose presentity
+  #              holds a binding that reaches a device, as the registrar script
+  #              reported it; a device is %{key, contact, flow} (`device/1`)
   #   reported   %{resource => %{source => %{doc, pid, seq, known?}}}, the states
   #              `report/5` stated; `known?` is whether the subscriber base knows
   #              the presentity, asked in the reporter's process at report time
   #   reporters  %{pid => monitor_ref} of the processes that reported a state
+  #   connections %{pid => monitor_ref} of the transport instances publications
+  #              came in on (connection-oriented transports only)
+  #   persons    %{resource => %SIP.Presence.Doc{}}, the person state of a
+  #              `presence` resource (activity, note), see *The composite state*
   #   panel_subs %{domain => MapSet(pid)} subscribed via `subscribe_presentities/2`
   #   panel_mons %{monitor_ref => {domain, pid}}, dropped on death without an
   #              explicit `unsubscribe_presentities/2`
   defstruct states: %{},
             watchers: %{},
             mons: %{},
-            registered: MapSet.new(),
+            registered: %{},
             reported: %{},
             reporters: %{},
+            connections: %{},
+            persons: %{},
             panel_subs: %{},
             panel_mons: %{},
             sweep_ms: @sweep_ms
@@ -220,10 +267,10 @@ defmodule Kelix.Mod.Presence do
         args: [%{name: "domain", required: true}, %{name: "aor", required: true}],
         render: %{
           kind: :detail,
-          fields: ~w(presentity_uri states watchers),
+          fields: ~w(presentity_uri status activity note calls states watchers),
           nested: %{
             "states" => %{
-              columns: ~w(event source status activity etag expires sender content_type)
+              columns: ~w(event source status activity ruid etag expires sender content_type)
             },
             "watchers" => %{columns: ~w(watcher event status expires callid)}
           }
@@ -261,20 +308,26 @@ defmodule Kelix.Mod.Presence do
   this view and quite different on the wire.
   """
   @impl Kelix.Module
+  def handle_control(command, %{"args" => tokens} = args) when is_list(tokens) do
+    # The core binds the bare tokens to the declared arguments and hands back
+    # the ones left over; none of these commands takes more, so a surplus token
+    # is refused rather than silently dropped (`list D bob` is not a filter).
+    case Enum.reject(tokens, &String.contains?(&1, "=")) do
+      [] -> handle_control(command, Map.delete(args, "args"))
+      surplus -> {:error, "unexpected argument: #{Enum.join(surplus, " ")}"}
+    end
+  end
+
   def handle_control("list", %{"domain" => domain}), do: {:ok, overview(domain)}
 
   def handle_control("watchers", %{"domain" => domain, "aor" => aor}),
     do: {:ok, watchers(domain, aor)}
 
   def handle_control("show", %{"domain" => domain, "aor" => aor}) do
-    states = Enum.filter(presentities(domain), &(aor_of(&1.presentity_uri) == downcase(aor)))
-    watchers = watchers(domain, aor)
-
-    if states == [] and watchers == [] do
-      {:error, :not_found}
-    else
-      {:ok,
-       %{presentity_uri: "sip:#{downcase(aor)}@#{domain}", states: states, watchers: watchers}}
+    case presentity(domain, aor) do
+      nil -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+      detail -> {:ok, detail}
     end
   end
 
@@ -292,15 +345,6 @@ defmodule Kelix.Mod.Presence do
       _ -> {:error, {:unknown_command, command}}
     end
   end
-
-  defp aor_of(uri) when is_binary(uri) do
-    case SIP.Uri.parse(uri) do
-      {:ok, %SIP.Uri{userpart: user}} -> downcase(user)
-      _ -> nil
-    end
-  end
-
-  defp aor_of(_uri), do: nil
 
   # ── facades ─────────────────────────────────────────────────────────────────
 
@@ -451,6 +495,11 @@ defmodule Kelix.Mod.Presence do
   while another holds a binding. Watchers of the resource are pushed when the
   status changes and nothing live is published; a refreshing REGISTER pushes
   nothing.
+
+  An un-REGISTER is also the device's unPUBLISH: what the device that sent it
+  published about the AOR — on every event package — goes, and the watchers are
+  told. The device is told by the flow the REGISTER came over, as a publisher is
+  (`SIP.Publication.published_over?/2`); another device's publications stay.
   """
   @spec registration_changed(%SIP.Context{}) :: :ok | {:error, :down | :timeout}
   def registration_changed(%SIP.Context{} = sip_ctx), do: report_registration(sip_ctx, nil)
@@ -472,6 +521,11 @@ defmodule Kelix.Mod.Presence do
 
   The bindings of the ending dialog no longer count, even if the registrar has not
   dropped them yet; the presentity stays open while another device holds one.
+
+  A device whose registration ended is gone, and so is what it published: its
+  publications go as for an un-REGISTER (`registration_changed/1`) — unless the
+  device still holds a binding of its own over the same flow, through another
+  REGISTER dialog.
   """
   @spec registration_ended(%SIP.Context{}) :: :ok | {:error, :down | :timeout}
   def registration_ended(%SIP.Context{} = sip_ctx),
@@ -488,8 +542,38 @@ defmodule Kelix.Mod.Presence do
          user when is_binary(user) <- SIP.Msg.Ops.to_username(req) do
       resource = resource_key({user, sip_ctx.domain, "presence"})
       Kelix.Module.safe_call(__MODULE__, {:registration, resource, ending_dialog})
+
+      flow = SIP.Msg.Ops.arrival_flow(req)
+
+      if device_gone?(req, sip_ctx.domain, user, flow, ending_dialog),
+        do: Kelix.Module.safe_call(__MODULE__, {:unpublish, resource, flow}),
+        else: :ok
     else
       _no_register -> :ok
+    end
+  end
+
+  # An un-REGISTER is the device leaving; so is the end of its registration,
+  # unless another dialog of the same device still holds a binding over the same
+  # flow. Asked here, in the caller's process: the registrar is another module.
+  defp device_gone?(req, _domain, _user, _flow, nil), do: SIP.Msg.Ops.unregister?(req)
+
+  defp device_gone?(_req, domain, user, flow, ending_dialog) do
+    peer = SIP.Msg.Ops.flow_peer(flow)
+
+    with true <- Code.ensure_loaded?(Kelix.Mod.Registrar),
+         bindings when is_list(bindings) <- Kelix.Mod.Registrar.bindings(domain, user) do
+      not Enum.any?(bindings, fn binding ->
+        binding.dialog_pid != ending_dialog and
+          SIP.Msg.Ops.flow_peer(%{
+            received: binding.received,
+            tp_pid: binding.flow_pid,
+            tp_module: binding.flow_module
+          }) == peer
+      end)
+    else
+      # no registrar to ask, or it cannot answer: the device is not known gone
+      _ -> false
     end
   end
 
@@ -617,6 +701,16 @@ defmodule Kelix.Mod.Presence do
   def overview(domain),
     do: Kelix.Module.safe_call(__MODULE__, {:overview, served_domain(domain)})
 
+  @doc """
+  One presentity (`kelictl presence show`): what a watcher of its `presence`
+  package is told (`status`, `activity`, `note` — the composite state), the dialogs
+  of its resolved `dialog` document (`calls`), then every state it is composed of
+  and its watchers. `nil` when nothing is held about the AOR.
+  """
+  @spec presentity(String.t(), String.t()) :: map | nil | {:error, :down | :timeout}
+  def presentity(domain, aor),
+    do: Kelix.Module.safe_call(__MODULE__, {:presentity, served_domain(domain), downcase(aor)})
+
   @doc "The live watchers of an AOR, as rendered rows (`kelictl presence watchers`)."
   @spec watchers(String.t(), String.t()) :: [map] | {:error, :down | :timeout}
   def watchers(domain, aor),
@@ -726,6 +820,21 @@ defmodule Kelix.Mod.Presence do
     {:reply, rows, state}
   end
 
+  def handle_call({:presentity, domain, aor}, _from, state) do
+    detail =
+      case panel_row(state, domain, aor) do
+        nil ->
+          nil
+
+        row ->
+          row
+          |> Map.take([:presentity_uri, :status, :activity, :note, :states, :watchers])
+          |> Map.put(:calls, calls(state, domain, aor))
+      end
+
+    {:reply, detail, state}
+  end
+
   def handle_call({:watchers, domain, aor}, _from, state) do
     rows =
       for {{user, _dom, _event}, subs} <- table_contents(state.watchers, domain),
@@ -776,20 +885,29 @@ defmodule Kelix.Mod.Presence do
   # of one AOR reporting at once are then answered in turn, each reading the store
   # as the other left it, and the last push is the true one.
   def handle_call({:registration, {user, domain, _event} = resource, ending_dialog}, _from, state) do
-    open? =
-      Code.ensure_loaded?(Kelix.Mod.Registrar) and
-        Kelix.Mod.Registrar.registered?(domain, user, ending_dialog)
+    devices =
+      if Code.ensure_loaded?(Kelix.Mod.Registrar),
+        do:
+          Kelix.Mod.Registrar.devices(domain, user, ending_dialog)
+          |> Enum.map(&device/1)
+          |> Enum.uniq_by(& &1.key)
+          |> Enum.sort_by(& &1.key),
+        else: []
 
-    {:reply, :ok, set_registered(state, resource, open?)}
+    {:reply, :ok, set_registered(state, resource, devices)}
   end
+
+  def handle_call({:unpublish, resource, flow}, _from, state),
+    do: {:reply, :ok, unpublish_device(state, resource, flow)}
 
   # a watcher instance died with its dialog: it watches nothing any more — or a
   # panel subscriber went away
   @impl true
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
-    case Map.get(state.reporters, pid) do
-      ^ref -> {:noreply, withdraw_reporter(state, pid)}
-      _ -> {:noreply, watcher_down(state, ref)}
+    cond do
+      Map.get(state.reporters, pid) == ref -> {:noreply, withdraw_reporter(state, pid)}
+      Map.get(state.connections, pid) == ref -> {:noreply, connection_down(state, pid)}
+      true -> {:noreply, watcher_down(state, ref)}
     end
   end
 
@@ -821,6 +939,7 @@ defmodule Kelix.Mod.Presence do
     tid = ensure_table(state.states, rdomain)
     state = %{state | states: Map.put(state.states, rdomain, tid)}
     held = live_publications(lookup_list(tid, resource))
+    before = known_state(state, resource)
 
     case plan_publication(pub, held) do
       {:error, 412} ->
@@ -837,21 +956,45 @@ defmodule Kelix.Mod.Presence do
 
       {:remove, previous} ->
         store(tid, resource, List.delete(held, previous))
-        {{:ok, nil, 0}, fan_out(state, resource, :removed)}
+        {{:ok, nil, 0}, fan_out(state, resource, :removed, before)}
 
       {:store, previous, stored} ->
-        store(tid, resource, List.delete(held, previous) ++ [stored])
+        store(tid, resource, place(held, previous, stored))
 
-        {{:ok, stored.etag, SIP.Publication.remaining(stored)},
-         fan_out(state, resource, :published)}
+        state =
+          state
+          |> hold_person(resource, stored)
+          |> monitor_connection(stored)
+          |> fan_out(resource, :published, before)
+
+        {{:ok, stored.etag, SIP.Publication.remaining(stored)}, state}
     end
+  end
+
+  # The list is kept in the order the states CHANGED, the most recent last — which
+  # is what `current_doc/2` reads. A refresh changes no state: it keeps its place.
+  # Anything else goes last. Either way, the publisher's other publications of the
+  # resource go (one per publisher, see the moduledoc) — a refresh that moved to a
+  # new connection meets there the one its client published before it found its
+  # old tag again.
+  defp place(held, previous, stored) do
+    held =
+      if stored.operation == :refresh,
+        do: Enum.map(held, &if(&1 == previous, do: stored, else: &1)),
+        else: List.delete(held, previous) ++ [stored]
+
+    Enum.reject(held, &(&1 != stored and SIP.Publication.same_publisher?(&1, stored)))
   end
 
   # What a PUBLISH asks of the collection, RFC 3903 §4.1 read against what is
   # held. The four operations are `check_publish/1`'s reading of the request; what
   # is added here is the only thing it could not know — whether we hold the tag.
-  defp plan_publication(%SIP.Publication{operation: :initial} = pub, _held),
-    do: {:store, nil, issue(pub)}
+  # An initial PUBLISH from a publisher that already holds a state replaces it,
+  # and keeps its `ruid`: it is the same device, starting over.
+  defp plan_publication(%SIP.Publication{operation: :initial} = pub, held) do
+    previous = Enum.find(held, &SIP.Publication.same_publisher?(&1, pub))
+    {:store, previous, issue(%{pub | ruid: ruid_of(previous)})}
+  end
 
   defp plan_publication(%SIP.Publication{} = pub, held) do
     case Enum.find(held, &(&1.etag == pub.etag)) do
@@ -864,15 +1007,109 @@ defmodule Kelix.Mod.Presence do
 
   # A refresh carries no body: what is published stays, only its lifetime moves.
   # A modification carries one, and it is the new state.
+  # It may come over a new connection: the publication follows it.
   defp replace(%SIP.Publication{operation: :refresh} = pub, previous),
-    do: {:store, previous, issue(%{previous | expires: pub.expires})}
+    do:
+      {:store, previous,
+       issue(%{previous | expires: pub.expires, flow: pub.flow, operation: :refresh})}
 
-  defp replace(%SIP.Publication{} = pub, previous), do: {:store, previous, issue(pub)}
+  defp replace(%SIP.Publication{} = pub, previous),
+    do: {:store, previous, issue(%{pub | ruid: previous.ruid})}
 
   # Every successful publication gets a NEW tag (RFC 3903 §4.1): the one the
-  # publisher presented is spent, and the next refresh must present this one.
-  defp issue(%SIP.Publication{} = pub),
-    do: %{pub | etag: SIP.Publication.new_etag(), received_time: SIP.Publication.now()}
+  # publisher presented is spent, and the next refresh must present this one. The
+  # `ruid` is minted once, on the initial PUBLISH, and kept: it names the
+  # publication's tuples in the composite, which must not move with the tag.
+  defp issue(%SIP.Publication{} = pub) do
+    %{
+      pub
+      | etag: SIP.Publication.new_etag(),
+        ruid: pub.ruid || SIP.Publication.new_ruid(),
+        received_time: SIP.Publication.now()
+    }
+  end
+
+  defp ruid_of(nil), do: nil
+  defp ruid_of(%SIP.Publication{ruid: ruid}), do: ruid
+
+  # Decision 1 of presence-composite-plan.md: every publication that carries a
+  # document states the person — a document with no activity states "none",
+  # which is how the field clients say "available". A refresh carries none.
+  defp hold_person(state, {user, rdomain, _event} = resource, %SIP.Publication{
+         operation: operation,
+         doc: %SIP.Presence.Doc{} = doc
+       })
+       when operation != :refresh do
+    person = %SIP.Presence.Doc{
+      entity: "sip:#{user}@#{rdomain}",
+      activity: doc.activity,
+      marks: doc.marks,
+      note: doc.note
+    }
+
+    %{state | persons: Map.put(state.persons, resource, person)}
+  end
+
+  defp hold_person(state, _resource, _pub), do: state
+
+  # ── the connections publications came in on ─────────────────────────────────
+
+  # Monitored until it drops, whatever becomes of its publications: the monitor
+  # of a connection whose publications went already finds nothing to drop.
+  defp monitor_connection(state, pub) do
+    pid = SIP.Publication.connection(pub)
+
+    if is_nil(pid) or Map.has_key?(state.connections, pid),
+      do: state,
+      else: %{state | connections: Map.put(state.connections, pid, Process.monitor(pid))}
+  end
+
+  # The connection dropped: its publisher is gone, and no unPUBLISH will come.
+  # What it published goes, on every domain — a connection may carry the
+  # publications of several — and the watchers are told as for a removal.
+  defp connection_down(state, pid) do
+    state = %{state | connections: Map.delete(state.connections, pid)}
+
+    Enum.reduce(state.states, state, fn {_domain, tid}, st ->
+      Enum.reduce(:ets.tab2list(tid), st, fn {resource, pubs}, acc ->
+        case Enum.reject(pubs, &(SIP.Publication.connection(&1) == pid)) do
+          ^pubs ->
+            acc
+
+          kept ->
+            before = known_state(acc, resource)
+            store(tid, resource, kept)
+            fan_out(acc, resource, :disconnected, before)
+        end
+      end)
+    end)
+  end
+
+  # The device that sent an un-REGISTER over `flow` unpublishes too, on every
+  # package of the AOR.
+  defp unpublish_device(state, {user, rdomain, _event}, flow) do
+    case Map.get(state.states, rdomain) do
+      nil ->
+        state
+
+      tid ->
+        Enum.reduce(:ets.tab2list(tid), state, fn
+          {{^user, _d, _e} = resource, pubs}, acc ->
+            case Enum.reject(pubs, &SIP.Publication.published_over?(&1, flow)) do
+              ^pubs ->
+                acc
+
+              kept ->
+                before = known_state(acc, resource)
+                store(tid, resource, kept)
+                fan_out(acc, resource, :removed, before)
+            end
+
+          _other, acc ->
+            acc
+        end)
+    end
+  end
 
   # ── watch ───────────────────────────────────────────────────────────────────
 
@@ -977,45 +1214,89 @@ defmodule Kelix.Mod.Presence do
   # which sends the NOTIFY from its own state (plan decision 1): a NOTIFY sent
   # from here would be invisible to `kelictl monitor` and to the sequence diagram,
   # and a scenario parked in a state would no longer describe what the node does.
-  defp fan_out(state, {_user, rdomain, _event} = resource, event) do
+  #
+  # `before` is the state the watchers were last told, read before the change;
+  # they are pushed only when the state now differs (see *The composite state*).
+  # `:unknown` when it cannot be read back — the sweep finds the lapsed
+  # publications already out of the state — and the push is then made.
+  defp fan_out(state, {_user, rdomain, _event} = resource, event, before) do
+    state = settle_person(state, resource)
     watchers = watchers_of(state, resource)
 
     # Nothing to compute for nobody. When the last publication goes, the
     # presentity published, so it exists — the subscriber base is not asked.
-    if map_size(watchers) > 0, do: push(watchers, resource, known_state(state, resource))
+    if map_size(watchers) > 0 do
+      now = known_state(state, resource)
+      if before == :unknown or not same_state?(before, now), do: push(watchers, resource, now)
+    end
 
     broadcast_panel(state, resource)
     Kelix.Metrics.Emit.presence_event(rdomain, event)
     state
   end
 
+  # The person state goes with the resource's last publication.
+  defp settle_person(state, resource) do
+    if Map.has_key?(state.persons, resource) and current_doc(state, resource) == nil,
+      do: %{state | persons: Map.delete(state.persons, resource)},
+      else: state
+  end
+
+  defp same_state?(%SIP.Presence.Doc{} = a, %SIP.Presence.Doc{} = b),
+    do: SIP.Presence.Doc.same_state?(a, b)
+
+  defp same_state?(a, b), do: a == b
+
   defp push(watchers, resource, doc) do
     for {pid, _sub} <- watchers, do: send(pid, {:presence, :state, resource, doc})
     :ok
   end
 
-  # A registration moved. It is news only when the status actually changed — the
-  # registrar script reports every refreshing REGISTER — and only for a resource
-  # nobody publishes nor reports: both win over the registration.
-  defp set_registered(state, resource, open?) do
-    if MapSet.member?(state.registered, resource) == open? do
+  # A registration moved. It is news only when what a watcher is told changed —
+  # the registrar script reports every refreshing REGISTER, and a resource that
+  # publishes or is reported shows its devices only beside its publications.
+  defp set_registered(state, resource, devices) do
+    if Map.get(state.registered, resource, []) == devices do
       state
     else
+      before = known_state(state, resource)
+
       registered =
-        if open?,
-          do: MapSet.put(state.registered, resource),
-          else: MapSet.delete(state.registered, resource)
+        if devices == [],
+          do: Map.delete(state.registered, resource),
+          else: Map.put(state.registered, resource, devices)
 
       state = %{state | registered: registered}
       watchers = watchers_of(state, resource)
+      now = known_state(state, resource)
 
-      if map_size(watchers) > 0 and current_doc(state, resource) == nil and
-           reported_doc(state, resource) == nil,
-         do: push(watchers, resource, known_state(state, resource))
+      if map_size(watchers) > 0 and not same_state?(before, now),
+        do: push(watchers, resource, now)
 
       broadcast_panel(state, resource)
       state
     end
+  end
+
+  # One registered device, as the composite needs it: the contact its tuple
+  # offers, the flow that tells whether it publishes, and a stable key naming its
+  # tuple — `SIP.Msg.Ops.device_key/1`: the RFC 5626 instance when it sent one
+  # (it survives an address change), else the contact. Hashed: neither is an XML
+  # `NCName`.
+  defp device(%Kelix.Mod.Registrar.Contact{} = binding) do
+    {:ok, contact} = SIP.Uri.serialize_ruri(binding.contact)
+    seed = SIP.Msg.Ops.device_key(binding.contact)
+
+    %{
+      key:
+        "r" <> (:crypto.hash(:sha256, seed) |> Base.encode16(case: :lower) |> binary_part(0, 12)),
+      contact: contact,
+      flow: %{
+        received: binding.received,
+        tp_pid: binding.flow_pid,
+        tp_module: binding.flow_module
+      }
+    }
   end
 
   # ── reported states ─────────────────────────────────────────────────────────
@@ -1112,7 +1393,8 @@ defmodule Kelix.Mod.Presence do
   # presentity, closed on a domain with a registrar. On `dialog`: no call.
   defp resolved_state(state, resource, known?) do
     current_doc(state, resource) || reported_doc(state, resource) ||
-      status_doc(resource, implied_status(state, resource, known?))
+      registration_doc(state, resource) ||
+      status_doc(resource, implied_status(resource, known?))
   end
 
   # The state as the collection alone can tell it, for a resource known to exist
@@ -1124,7 +1406,7 @@ defmodule Kelix.Mod.Presence do
   # completes in the caller's process with `unpublished_state/1`.
   defp held_state(state, resource) do
     current_doc(state, resource) || reported_doc(state, resource) ||
-      if MapSet.member?(state.registered, resource), do: status_doc(resource, :open)
+      registration_doc(state, resource)
   end
 
   # The same, for a watcher that just subscribed: a presentity that neither
@@ -1133,28 +1415,26 @@ defmodule Kelix.Mod.Presence do
   # (the facades call this on a `nil` the collection answered) — never in the
   # collection's, where every other watcher and publisher would wait on it.
   defp unpublished_state(resource),
-    do: status_doc(resource, implied_status(nil, resource, false))
+    do: status_doc(resource, implied_status(resource, false))
 
-  # What the package says of a presentity nobody publishes nor reports. On
-  # `presence`: `:open` / `:closed`, or nil on a domain with no registrar (or not
+  # What the package says of a presentity nobody publishes, reports nor registers.
+  # On `presence`: `:closed`, or nil on a domain with no registrar (or not
   # served), or for a user the subscriber base does not know. On `dialog`: `:idle`
   # for a subscriber the base knows — the registration says nothing about a call
   # — else nil. Any other package: nil.
-  defp implied_status(state, {user, domain, "presence"} = resource, known?)
+  defp implied_status({user, domain, "presence"}, known?)
        when is_binary(user) and is_binary(domain) do
-    cond do
-      state != nil and MapSet.member?(state.registered, resource) -> :open
-      registrar_domain?(domain) and (known? or subscriber?(user, domain)) -> :closed
-      true -> nil
-    end
+    if registrar_domain?(domain) and (known? or subscriber?(user, domain)),
+      do: :closed,
+      else: nil
   end
 
-  defp implied_status(_state, {user, domain, "dialog"} = resource, known?)
+  defp implied_status({user, domain, "dialog"} = resource, known?)
        when is_binary(user) and is_binary(domain) do
     if known? or provisioned?(resource), do: :idle, else: nil
   end
 
-  defp implied_status(_state, _resource, _known?), do: nil
+  defp implied_status(_resource, _known?), do: nil
 
   defp status_doc(_resource, nil), do: nil
 
@@ -1189,8 +1469,10 @@ defmodule Kelix.Mod.Presence do
     end
   end
 
-  # The state of a resource: the most recent live publication's document (see the
-  # moduledoc — composition is its own phase), `nil` when nothing is published.
+  # The state of a resource, `nil` when nothing is published: on `presence`, the
+  # composite of its live publications under the person state held (see *The
+  # composite state*); on any other package, the document of the publication
+  # whose state changed last — the last of the list, see `place/3`.
   defp current_doc(state, {_user, rdomain, _event} = resource) do
     case Map.get(state.states, rdomain) do
       nil ->
@@ -1199,8 +1481,40 @@ defmodule Kelix.Mod.Presence do
       tid ->
         case live_publications(lookup_list(tid, resource)) do
           [] -> nil
-          pubs -> pubs |> Enum.max_by(& &1.received_time) |> Map.get(:doc)
+          pubs -> composite(state, resource, pubs)
         end
+    end
+  end
+
+  defp composite(state, {user, rdomain, _event} = resource, pubs) do
+    if Enum.all?(pubs, &match?(%SIP.Presence.Doc{}, &1.doc)) do
+      person =
+        Map.get(state.persons, resource, %SIP.Presence.Doc{entity: "sip:#{user}@#{rdomain}"})
+
+      published = for pub <- pubs, do: {pub.ruid, pub.doc}
+      SIP.Presence.Doc.compose(person, published ++ unpublished_devices(state, resource, pubs))
+    else
+      List.last(pubs).doc
+    end
+  end
+
+  # The registered devices no live publication speaks for, as the documents
+  # `compose/2` takes: one open tuple each, offering the binding's contact.
+  defp unpublished_devices(state, {user, rdomain, _event} = resource, pubs) do
+    for device <- Map.get(state.registered, resource, []),
+        not Enum.any?(pubs, &SIP.Publication.published_over?(&1, device.flow)) do
+      {device.key, SIP.Presence.Doc.new("sip:#{user}@#{rdomain}", :open, contact: device.contact)}
+    end
+  end
+
+  # A presentity nobody publishes nor reports, as its registrations tell it.
+  defp registration_doc(state, {user, rdomain, _event} = resource) do
+    case unpublished_devices(state, resource, []) do
+      [] ->
+        nil
+
+      devices ->
+        SIP.Presence.Doc.compose(%SIP.Presence.Doc{entity: "sip:#{user}@#{rdomain}"}, devices)
     end
   end
 
@@ -1219,8 +1533,9 @@ defmodule Kelix.Mod.Presence do
           resources ->
             state =
               Enum.reduce(resources, state, fn resource, st ->
+                before = known_state(st, resource)
                 :ets.delete(tid, resource)
-                fan_out(st, resource, :removed)
+                fan_out(st, resource, :removed, before)
               end)
 
             {:ok, state}
@@ -1241,7 +1556,7 @@ defmodule Kelix.Mod.Presence do
 
         live ->
           store(tid, resource, live)
-          fan_out(st, resource, :expired)
+          fan_out(st, resource, :expired, :unknown)
       end
     end)
   end
@@ -1295,7 +1610,7 @@ defmodule Kelix.Mod.Presence do
           {{user, _dom, _event}, _held} <- table_contents(tables, domain),
           do: user
 
-    registered = for {user, ^domain, _event} <- state.registered, do: user
+    registered = for {{user, ^domain, _event}, _devices} <- state.registered, do: user
     reported = for {{user, ^domain, _event}, _sources} <- state.reported, do: user
     users = Enum.uniq(held ++ registered ++ reported)
 
@@ -1378,6 +1693,7 @@ defmodule Kelix.Mod.Presence do
       source: "publish",
       status: doc_field(pub.doc, :status),
       activity: doc_field(pub.doc, :activity),
+      ruid: pub.ruid,
       etag: pub.etag,
       expires: SIP.Publication.remaining(pub),
       sender: pub.sender,
@@ -1385,22 +1701,25 @@ defmodule Kelix.Mod.Presence do
     }
   end
 
-  # A presentity the registrar script reported registered holds a state nobody
-  # published: open, which is what its watchers are told while nothing live is
-  # published. Listed beside the publications so `list` shows every state the
-  # collection holds, not only kamailio's `presentity` rows. `user` is `:_` for
-  # the whole domain.
+  # A registered device holds a state nobody published: open, one tuple in what
+  # its watchers are told (see *The composite state*). One row per device, its
+  # tuple's key as `ruid` and its contact as `sender`, beside the publications so
+  # `show` lists every state the collection holds, not only kamailio's
+  # `presentity` rows. `user` is `:_` for the whole domain.
   defp registration_rows(state, domain, user) do
-    for {u, ^domain, event} <- state.registered, user == :_ or u == user do
+    for {{u, ^domain, event}, devices} <- state.registered,
+        user == :_ or u == user,
+        device <- devices do
       %{
         presentity_uri: "sip:#{u}@#{domain}",
         event: event,
         source: "registrar",
         status: "open",
         activity: nil,
+        ruid: device.key,
         etag: nil,
         expires: nil,
-        sender: nil,
+        sender: device.contact,
         content_type: nil
       }
     end
@@ -1418,6 +1737,7 @@ defmodule Kelix.Mod.Presence do
         source: to_string(source),
         status: doc_field(entry.doc, :status),
         activity: doc_field(entry.doc, :activity),
+        ruid: nil,
         etag: nil,
         expires: nil,
         sender: nil,

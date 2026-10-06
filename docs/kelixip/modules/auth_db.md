@@ -193,12 +193,13 @@ challengeable?(req) :: boolean
 ```
 
 Should this request be authenticated at all? The rule is **an initial request,
-other than `ACK`, `CANCEL` and `OPTIONS`**:
+other than `ACK` and `CANCEL`**:
 
 - `ACK` has no response to carry a challenge (RFC 3261 §17.1.1.3);
 - `CANCEL` must be accepted for the transaction it cancels (§22.1);
-- `OPTIONS` is what liveness probing uses — challenging it makes this node look
-  down to its own infrastructure;
+- `OPTIONS` is challengeable. The liveness ping never reaches a script that
+  authenticates: the `keepalive` rule of `[[domain.options]]`, or the node itself,
+  answers it;
 - an **in-dialog** request (a To tag) was authenticated when the dialog was
   created; re-challenging mid-call breaks UAs and proves nothing new.
 

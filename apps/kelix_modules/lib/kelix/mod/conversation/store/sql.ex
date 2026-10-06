@@ -125,6 +125,15 @@ defmodule Kelix.Mod.Conversation.Store.SQL do
   end
 
   @impl true
+  def stats(h, now) do
+    sql = "SELECT COUNT(*), COUNT(DISTINCT domain) FROM conversation WHERE expires_at > ?"
+
+    with {:ok, %{rows: [[count, domains]]}} <- query(h, sql, [now]) do
+      {:ok, %{conversations: to_int(count), domains: to_int(domains)}}
+    end
+  end
+
+  @impl true
   def sweep(h, now) do
     with {:ok, %{num_rows: n}} <-
            query(h, "DELETE FROM conversation WHERE expires_at <= ?", [now]) do

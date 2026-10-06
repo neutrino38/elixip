@@ -49,6 +49,62 @@ defmodule Kelix.OptionsTest do
     end
   end
 
+  describe "routing" do
+    @toml """
+    [[domain]]
+    name = "opt.example"
+
+    [[domain.options]]
+    pattern = "XXXX"
+    script  = "options-probe-ua.exs"
+    """
+
+    setup do
+      dir = Path.join(System.tmp_dir!(), "options-test-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "domains.toml")
+      empty = Path.join(dir, "empty.toml")
+      File.write!(path, @toml)
+      File.write!(empty, "")
+      :ok = Kelix.Domains.reload(path)
+
+      on_exit(fn ->
+        Kelix.Domains.reload(empty)
+        File.rm_rf(dir)
+      end)
+
+      :ok
+    end
+
+    defp options_to(user, host),
+      do: %{method: :OPTIONS, ruri: %SIP.Uri{userpart: user, domain: host}}
+
+    test "a rule naming a script makes the framework open a dialog for it" do
+      assert :dispatch = Kelix.Options.on_options(options_to("1234", "opt.example"), self())
+    end
+
+    test "what no rule claims is answered by the core" do
+      assert {:reply, 200, "OK", _} =
+               Kelix.Options.on_options(options_to(nil, "opt.example"), self())
+
+      assert {:reply, 200, "OK", _} =
+               Kelix.Options.on_options(options_to("1234", "other"), self())
+    end
+
+    test "a user-part no rule matches is answered 404" do
+      assert {:reply, 404, _, []} =
+               Kelix.Options.on_options(options_to("alice", "opt.example"), self())
+    end
+
+    # Leaving the upstream rotation must never depend on a script loading.
+    test "the drain wins over every rule" do
+      :ok = Control.drain()
+
+      assert {:reply, 503, _, []} =
+               Kelix.Options.on_options(options_to("1234", "opt.example"), self())
+    end
+  end
+
   describe "registration" do
     test "Kelix.Router registers it, so the framework does not answer 500" do
       {:ok, _} = SIP.Session.ConfigRegistry.start()

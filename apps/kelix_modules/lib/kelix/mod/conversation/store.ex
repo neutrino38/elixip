@@ -38,6 +38,10 @@ defmodule Kelix.Mod.Conversation.Store do
   @doc "What is kept and not expired by `now`: the key's parts, the script, the state, the expiry — never the data."
   @callback list(handle, now :: integer) :: {:ok, [map]} | {:error, term}
 
+  @doc "What is kept and not expired by `now`: how many conversations, over how many domains."
+  @callback stats(handle, now :: integer) ::
+              {:ok, %{conversations: non_neg_integer, domains: non_neg_integer}} | {:error, term}
+
   @doc "Delete what expired by `now`. How many."
   @callback sweep(handle, now :: integer) :: {:ok, non_neg_integer} | {:error, term}
 end

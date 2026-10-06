@@ -1211,18 +1211,31 @@ defmodule Kelix.Control.CLI do
     Enum.map_join(Enum.sort(cfg), " ", fn {k, v} -> "#{k}=#{v}" end)
   end
 
-  # One line per event package, naming the script each method is routed to. Not
-  # numbered, unlike the dial-plan: the package is an exact key, so declaration
-  # order decides nothing.
+  # One line per SUBSCRIBE rule and one for PUBLISH, per event package. Within a
+  # package the SUBSCRIBE rules are first-match-wins, like the dial-plan, so they
+  # are listed in their order with the pattern each one matches.
   defp format_presence(blocks) do
-    pw = blocks |> Enum.map(&String.length(&1.event_package)) |> Enum.max(fn -> 0 end)
+    rows = Enum.flat_map(blocks, &presence_rows/1)
+    pw = rows |> Enum.map(&String.length(elem(&1, 0))) |> Enum.max(fn -> 0 end)
+    mw = rows |> Enum.map(&String.length(elem(&1, 1))) |> Enum.max(fn -> 0 end)
 
-    for b <- blocks,
-        {method, script} <- [{"SUBSCRIBE", b.subscribe}, {"PUBLISH", b.publish}],
+    for {package, method, script} <- rows,
         do:
-          "  #{String.pad_trailing(b.event_package, pw)} #{String.pad_trailing(method, 9)} -> " <>
+          "  #{String.pad_trailing(package, pw)} #{String.pad_trailing(method, mw)} -> " <>
             format_presence_script(script)
   end
+
+  defp presence_rows(b) do
+    subscribe =
+      for rule <- subscribe_rules(b.subscribe),
+          do: {b.event_package, "SUBSCRIBE #{rule.pattern || "(default)"}", rule}
+
+    subscribe ++ [{b.event_package, "PUBLISH", b.publish}]
+  end
+
+  # A node older than the SUBSCRIBE rules sends one script, not a list.
+  defp subscribe_rules(rules) when is_list(rules), do: rules
+  defp subscribe_rules(%{} = script), do: [Map.put(script, :pattern, nil)]
 
   # A package with no `publish` script: the method is not served on it, and the
   # router answers 405. Printed, because an operator wondering why their PUBLISH

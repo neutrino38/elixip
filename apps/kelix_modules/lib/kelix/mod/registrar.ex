@@ -148,6 +148,8 @@ defmodule Kelix.Mod.Registrar do
         unsubscribe_registrations: 2,
         registered?: 2,
         registered?: 3,
+        devices: 2,
+        devices: 3,
         remaining_ms: 1
       ]
     }
@@ -325,8 +327,7 @@ defmodule Kelix.Mod.Registrar do
   # It lives its own life, bounded by `expires_at` and reclaimed by the periodic
   # sweep — the usrloc semantics. Monitoring the dialog there made a registration
   # evaporate as soon as that one dialog ended, which is exactly what a real handset
-  # triggered on 2026-07-28.
-  @connected_transports [SIP.Transport.TCP, SIP.Transport.TLS, SIP.Transport.WSS]
+  # triggered on 2026-07-28. `SIP.Transport.connection_oriented?/1` is which is which.
 
   @doc """
   Does `aor` still hold a binding that reaches a device, **other than the ones
@@ -343,24 +344,34 @@ defmodule Kelix.Mod.Registrar do
   `false` too when the store cannot answer.
   """
   @spec registered?(String.t(), String.t(), pid | nil) :: boolean
-  def registered?(domain, aor, ending_dialog \\ nil) do
+  def registered?(domain, aor, ending_dialog \\ nil),
+    do: devices(domain, aor, ending_dialog) != []
+
+  @doc """
+  The bindings of `aor` that reach a device, other than the ones `ending_dialog`
+  owns — the bindings `registered?/3` counts, for a caller that needs to know
+  WHICH devices they are (the presence collection gives each one a tuple). `[]`
+  when the store cannot answer.
+  """
+  @spec devices(String.t(), String.t(), pid | nil) :: [Contact.t()]
+  def devices(domain, aor, ending_dialog \\ nil) do
     case Kelix.Module.safe_call(__MODULE__, {:bindings, domain, aor}) do
       contacts when is_list(contacts) ->
-        Enum.any?(contacts, &reaches_device?(&1, ending_dialog))
+        Enum.filter(contacts, &reaches_device?(&1, ending_dialog))
 
       _down ->
-        false
+        []
     end
   end
 
   defp reaches_device?(%Contact{dialog_pid: pid}, ending) when is_pid(ending) and pid == ending,
     do: false
 
-  defp reaches_device?(%Contact{dialog_pid: pid, flow_module: flow}, _ending)
-       when is_pid(pid) and flow in @connected_transports,
-       do: Process.alive?(pid)
-
-  defp reaches_device?(%Contact{}, _ending), do: true
+  defp reaches_device?(%Contact{dialog_pid: pid, flow_module: flow}, _ending) do
+    if is_pid(pid) and SIP.Transport.connection_oriented?(flow),
+      do: Process.alive?(pid),
+      else: true
+  end
 
   @doc """
   How long the registration held by this instance's dialog has left, in
@@ -793,15 +804,14 @@ defmodule Kelix.Mod.Registrar do
   defp store_or_delete(tid, aor, []), do: :ets.delete(tid, aor)
   defp store_or_delete(tid, aor, contacts), do: :ets.insert(tid, {aor, contacts})
 
-  # `@connected_transports` is defined, and explained, above `registered?/3`.
+  # Only over a connection-oriented transport: see above `registered?/3`.
+  defp ensure_monitor(state, domain, aor, pid, flow) do
+    if is_pid(pid) and SIP.Transport.connection_oriented?(flow),
+      do: monitor_dialog(state, domain, aor, pid),
+      else: state
+  end
 
-  defp ensure_monitor(state, _domain, _aor, pid, _flow) when not is_pid(pid), do: state
-
-  defp ensure_monitor(state, _domain, _aor, _pid, flow)
-       when flow not in @connected_transports,
-       do: state
-
-  defp ensure_monitor(state, domain, aor, pid, _flow) do
+  defp monitor_dialog(state, domain, aor, pid) do
     already? = Enum.any?(state.mons, fn {_ref, key} -> key == {domain, aor, pid} end)
 
     if already? do

@@ -170,7 +170,7 @@ defmodule SIP.Transac do
         Logger.error(
           module: __MODULE__,
           message:
-            "Failed to create transaction: #{err}. Cannot select transport for request URI #{sipmsg.ruri}."
+            "Failed to create transaction: #{err}. Cannot select transport for request URI #{SIP.Uri.ruri_string(sipmsg.ruri)}."
         )
 
         :no_transport_available

@@ -379,6 +379,14 @@ arriving. And the watcher is authenticated on the realm of its **own `From`**
 (`realm: :from_domain`) — challenging on the routed domain asks for credentials
 that exist nowhere.
 
+A client whose list URI is a setting can point it at its own domain instead
+(`sip:rls@example.com`). The domain's `[[domain.presence]]` block then routes it
+with a SUBSCRIBE rule — `pattern = "rls"`, the list script — ahead of the
+catch-all serving the domain's users. SUBSCRIBE rules are the dial-plan's reading
+on the R-URI user part, first match wins: a list is not one of the domain's users,
+and neither is a range of conference rooms, so each gets a rule of its own. Both
+forms serve the same script.
+
 **A resource belongs to the domain of its own URI.** The three entries of one
 buddy list routinely sit on three domains, none of which has to be the routed one.
 `Kelix.Mod.Presence` therefore keys every resource on the domain its URI names,
@@ -398,9 +406,10 @@ take those entries over by subscribing to their own servers.
 **A resource nobody publishes is answered by its registrations.** An unpublished
 state and an unknown resource used to be the same `nil`, so a subscriber of this
 very node who publishes nothing was reported `noresource`, as if it did not
-exist. The state of a resource is now, in order: the live publication; else
-**open** while a device of the presentity is registered; else, on a domain with a
-registrar and for a user `auth_db` knows, **closed**; else no state, `noresource`.
+exist. The state of a resource is now, in order: the live publications,
+composed (see [The composite state](#the-composite-state)); else **open**, one
+tuple per registered device; else, on a domain with a registrar and for a user
+`auth_db` knows, **closed**; else no state, `noresource`.
 The subscriber check runs in the watcher's process, never in the collection's: it
 is a query on the subscriber base.
 
@@ -413,13 +422,14 @@ registrar script it runs, and the report is a state of that script, visible to
 `kelictl monitor` like every other step of the flow.
 
 Neither report carries a status. The collection asks the registrar, inside its
-own process, whether any device of the AOR still holds a binding: two devices
+own process, which devices of the AOR still hold a binding: two devices
 reporting at once are then answered in turn, each against the store as the other
 left it, and one handset leaving never closes a subscriber another keeps
 registered. The ending dialog's own bindings are left out of that question — the
 store may not have dropped them yet — and so are those over a connected transport
-whose dialog is already dead. A change is pushed only when the status moves and
-nothing live is published; a refreshing REGISTER pushes nothing.
+whose dialog is already dead. A change is pushed only when what a watcher is
+told moves — a device joining or leaving the composite; a refreshing REGISTER
+pushes nothing.
 
 **A registration always has an instance to report its end.** The script's wait
 for a refresh ends when its dialog's bindings lapse in the registrar
@@ -477,16 +487,16 @@ generic entry, `report(domain, user, source, doc)`, rather than one hard-coded
 path per source.
 
 - A reported state is held per `{resource, source}`; `nil` withdraws it. Between
-  two sources, the most recent report wins, as the most recent publication does.
+  two sources, the most recent report wins.
 - The reporting process is monitored. When it dies, every state it reported is
   withdrawn, and a module that restarts reports again.
 - Watchers are pushed when the **resolved** state of the resource changes, and
   only then. A source repeating itself, or reporting under a live publication,
   costs nobody a NOTIFY.
 
-The state of a resource resolves, in order, to: its live publication; a reported
-state; open while registered; closed on a registrar domain for a subscriber
-`auth_db` knows; no state.
+The state of a resource resolves, in order, to: its live publications, composed
+with its registered devices; a reported state; open, one tuple per registered
+device; closed on a registrar domain for a subscriber `auth_db` knows; no state.
 
 **No state is `noresource`.** A watcher told "closed" about a resource that does
 not exist waits for something that will never come. The reference subscribe
@@ -510,6 +520,75 @@ while its media server is lost. Its plan is
 
 The registrar keeps its own path (`registration_changed/1`); moving it onto
 `report/4` is possible, and not done.
+
+### One publication per publisher
+
+PUBLISH names no device: no Contact, no `+sip.instance`, and a From every device
+of the user shares. The publisher is therefore the **flow** the PUBLISH arrives
+on — the connection over TCP, TLS or WSS, the source address and port over UDP
+(`SIP.Publication.same_publisher?/2`). Three rules follow:
+
+- **One publication per publisher and resource.** An initial PUBLISH from a
+  publisher that already holds one replaces it. A client that lost its
+  entity-tag across a reconnection starts over; it does not leave its old state
+  beside the new one, to resurface when the new one is removed.
+- **A publication does not outlive its connection.** Over a connection-oriented
+  transport the connection is monitored; when it drops, what was published over
+  it is removed and the watchers are told. A WebRTC client closed without an
+  unPUBLISH leaves nothing behind — the registrar applies the same rule to
+  bindings.
+- **An un-REGISTER is the device's unPUBLISH**, and so is the end of its
+  registration. `registration_changed/1` and `registration_ended/1` remove what
+  the device published, on every package of the AOR — the latter unless the
+  device still holds a binding over the same flow, through another dialog.
+
+Between publishers, what is notified is their composite.
+
+A proxy that relays several devices of one user over one connection makes them
+one publisher: the initial PUBLISH of each replaces the other's publication. It
+is a documented limitation. Telling them apart takes a reading of the PUBLISH that
+names the device beyond the flow — the bottom `Via` sent-by is the candidate, read
+in `SIP.Msg.Ops` — and is deferred.
+
+### The composite state
+
+What a watcher of the `presence` package is told is one document per presentity,
+composed from every device that states something about it
+(`SIP.Presence.Doc.compose/2`). PIDF and the RFC 4479 data model already separate
+the two levels it is made of:
+
+| Level | Holds | Composition |
+|---|---|---|
+| **Tuples** | reachability per device: `open`/`closed`, contact | the **union**: the tuples of every live publication, plus one `open` tuple, offering the binding's contact, per registered device no publication speaks for. The presentity is open when one device is |
+| **Person** | what the user is doing: `activity`, `note` | **one** state per presentity: the last one a publication carrying a document expressed |
+
+- **A document with no activity clears the person.** Linphone and Trix say
+  "available" by sending no `<dm:person>` at all, never an empty one; a
+  modification without an activity therefore clears it. A refresh carries no
+  document and leaves it.
+- **The person outlives the device that set it**, as long as one publication of
+  the presentity remains. Bob sets *away* on his phone and closes it: his desk
+  phone's publication, two hours old, does not make him available again.
+- **A registered device is told publishing by its flow**, as a publisher is
+  (`SIP.Publication.published_over?/2`). A device that registers and publishes
+  is its publication; one that only registers adds its tuple.
+- **Tuple ids are the collection's**: `t-<key>-<n>`, the key stable for the
+  device — the publication's `ruid`, minted on its initial PUBLISH and kept by
+  its refreshes and modifications, or the hashed `SIP.Msg.Ops.device_key/1` of a
+  binding. Linphone mints a new tuple id on every PUBLISH; a watcher must not
+  redraw a device that did not move.
+- **Watchers are pushed when the composite changes**
+  (`SIP.Presence.Doc.same_state?/2`, which ignores tuple timestamps). A device
+  republishing what the composite already says — a device subscribed to its own
+  presentity, echoing what it was told — costs nobody a NOTIFY.
+
+Only the `presence` package is composed; any other package notifies the document
+of the publication whose state changed last.
+
+Out of the composite, each its own work: call occupancy overriding the published
+activity (`on-the-phone` from `dialog_state`, a reported state ranked below a
+publication), location, devices registered for push, partial state (RFC 5262).
+The order it was built in is [presence-composite-plan.md](presence-composite-plan.md).
 
 ### Call occupancy
 

@@ -53,10 +53,18 @@ defmodule SIP.Presence.Doc do
   activity nobody has heard of is carried through as it arrived, and an unbounded
   atom table is not created from unauthenticated traffic.
 
+  `marks` are the elements of a namespace **other than RPID's** that a client puts
+  in `<rpid:activities>` beside its activity, as `{namespace, local_name}` pairs:
+  Trix says "do not disturb" as `<rpid:busy/><trix:dnd/>`, and "set by a rule, not
+  chosen" as `<trix:auto/>`. A watcher that does not know them reads the activity
+  and ignores them, as PIDF asks of any extension; one that does needs them to arrive. They are
+  carried as empty elements — a mark is a flag, and what a vendor writes inside
+  one is not this server's to keep.
+
   ## Building one
 
       iex> SIP.Presence.Doc.new("sip:bob@ives.fr", :open, contact: "sip:bob@10.0.0.4")
-      %SIP.Presence.Doc{entity: "sip:bob@ives.fr", activity: nil, note: nil,
+      %SIP.Presence.Doc{entity: "sip:bob@ives.fr", activity: nil, marks: [], note: nil,
         tuples: [%SIP.Presence.Tuple{id: "t1", status: :open,
                                      contact: "sip:bob@10.0.0.4"}]}
 
@@ -68,22 +76,27 @@ defmodule SIP.Presence.Doc do
 
   @type activity :: atom() | binary() | nil
 
+  @typedoc "An extension element of `<rpid:activities>`: `{namespace, local_name}`."
+  @type mark :: {binary(), binary()}
+
   @type t :: %__MODULE__{
           entity: binary() | nil,
           tuples: [Tuple.t()],
           activity: activity(),
+          marks: [mark()],
           note: binary() | nil
         }
 
   defstruct entity: nil,
             tuples: [],
             activity: nil,
+            marks: [],
             note: nil
 
   @doc """
   A document stating one reachability for `entity`.
 
-  Options: `:contact`, `:note`, `:activity`, `:priority`, `:timestamp`, and `:id`
+  Options: `:contact`, `:note`, `:activity`, `:marks`, `:priority`, `:timestamp`, and `:id`
   for the tuple's identifier — which defaults to `"t1"`, since a document with a
   single tuple has no use for a name of its own but PIDF makes it mandatory.
 
@@ -96,6 +109,7 @@ defmodule SIP.Presence.Doc do
     %__MODULE__{
       entity: entity,
       activity: Keyword.get(opts, :activity),
+      marks: Keyword.get(opts, :marks, []),
       note: Keyword.get(opts, :note),
       tuples: [
         %Tuple{
@@ -109,6 +123,67 @@ defmodule SIP.Presence.Doc do
       ]
     }
   end
+
+  @doc """
+  The composite document of a presentity: the tuples of **every** live
+  publication, under **one** person state.
+
+  `person` is the person state the collection holds for the presentity — a
+  document whose `entity`, `activity` and `note` are used and whose tuples are
+  not. `publications` are the documents of the live publications, each with a
+  stable key of its own, in the order their state changed.
+
+      iex> person = %SIP.Presence.Doc{entity: "sip:bob@ives.fr", activity: :away}
+      iex> desk = SIP.Presence.Doc.new("sip:bob@ives.fr", :closed)
+      iex> mobile = SIP.Presence.Doc.new("sip:bob@ives.fr", :open, activity: :busy)
+      iex> doc = SIP.Presence.Doc.compose(person, [{"desk", desk}, {"mobile", mobile}])
+      iex> {SIP.Presence.Doc.status(doc), doc.activity, Enum.map(doc.tuples, & &1.id)}
+      {:open, :away, ["t-desk-1", "t-mobile-1"]}
+
+  The two levels compose differently (RFC 4479): reachability is per device, so
+  the tuples are the union and `status/1` folds them; what the user is doing is
+  one state — activity, marks and note — so the person facet each publication
+  carries is ignored here — which publication sets the held state, and which
+  clears it, is the collection's rule.
+
+  A tuple's id is rebuilt from the publication's key and the tuple's position in
+  it, `t-<key>-<n>`. The publisher's own ids cannot be kept: two devices both
+  writing `t1` would collide in one document, and Linphone mints a new id on
+  every PUBLISH, so a watcher would redraw a device that did not change. The `t-`
+  prefix keeps the id an XML `NCName` whatever the key starts with.
+  """
+  @spec compose(t(), [{binary(), t()}]) :: t()
+  def compose(%__MODULE__{} = person, publications) when is_list(publications) do
+    tuples =
+      for {key, %__MODULE__{tuples: tuples}} <- publications,
+          {tuple, n} <- Enum.with_index(tuples, 1),
+          do: %Tuple{tuple | id: "t-#{key}-#{n}"}
+
+    %__MODULE__{
+      entity: person.entity,
+      activity: person.activity,
+      marks: person.marks,
+      note: person.note,
+      tuples: tuples
+    }
+  end
+
+  @doc """
+  Whether two documents state the same thing — what decides that a watcher has
+  news.
+
+  The tuples' `timestamp` is left out: it says when a device last spoke, not what
+  it said, and a client stamps every PUBLISH anew. Everything else counts.
+
+      iex> a = SIP.Presence.Doc.new("sip:bob@ives.fr", :open, timestamp: ~U[2026-10-01 19:18:51Z])
+      iex> b = SIP.Presence.Doc.new("sip:bob@ives.fr", :open, timestamp: ~U[2026-10-01 19:20:00Z])
+      iex> {SIP.Presence.Doc.same_state?(a, b), SIP.Presence.Doc.same_state?(a, %{b | activity: :away})}
+      {true, false}
+  """
+  @spec same_state?(t(), t()) :: boolean()
+  def same_state?(%__MODULE__{} = a, %__MODULE__{} = b), do: untimed(a) == untimed(b)
+
+  defp untimed(doc), do: %{doc | tuples: Enum.map(doc.tuples, &%Tuple{&1 | timestamp: nil})}
 
   @doc """
   The composite reachability: `:open` as soon as **one** tuple is open.

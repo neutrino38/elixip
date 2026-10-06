@@ -165,7 +165,7 @@ defmodule SIP.Session do
   # the wire, so it is free to say more than the §21.5.4 text; `lasterr` keeps
   # the same cause as an atom, for a scenario deciding on it.
   defp unsent_request(sip_ctx = %SIP.Context{}, req, reason) do
-    cause = "#{inspect(reason)} sending #{req.method} to #{req.ruri}"
+    cause = "#{inspect(reason)} sending #{req.method} to #{SIP.Uri.ruri_string(req.ruri)}"
 
     Logger.error(
       module: __MODULE__,
@@ -236,7 +236,13 @@ defmodule SIP.Session do
 
       * `{:reply, code, reason, fields}` — `fields` is a list of `{header, value}`
         pairs, e.g. `[{"Allow", "OPTIONS, REGISTER"}]`;
-      * `:default` — answer 200 with no capability header.
+      * `:default` — answer 200 with no capability header;
+      * `:dispatch` — the application serves it itself: the dialog layer opens a
+        short OPTIONS dialog (`SIP.DialogImpl`, 32 s, rearmed by every OPTIONS on
+        it) and hands it to `on_new_options/3`, the way an INVITE reaches
+        `on_new_call/3`. The digest challenge of the sender and a relay to another
+        UA both need that dialog: the re-submission after a 407 carries the same
+        Call-ID and From-tag, and finds the instance that challenged it.
 
     There is deliberately no framework-wide default answer: what a node supports
     depends on the application running on it, so an application that wants to be
@@ -245,7 +251,14 @@ defmodule SIP.Session do
     is created for it either way.
     """
     @callback on_options(req :: map(), transaction_id :: pid()) ::
-                {:reply, 100..699, binary(), list()} | :default
+                {:reply, 100..699, binary(), list()} | :default | :dispatch
+
+    @callback on_new_options(dialog_id :: pid(), req :: map(), transaction_id :: pid()) ::
+                {:accept, pid()}
+                | {:reject, 300..699, binary()}
+                | {:reject, 100..699, binary(), list()}
+
+    @optional_callbacks on_new_options: 3
   end
 
   defmodule ConfigRegistry do
@@ -444,6 +457,17 @@ defmodule SIP.Session do
       )
     end
 
+    # Reached only for an OPTIONS the options module answered `:dispatch` to: any
+    # other out-of-dialog OPTIONS is answered before a dialog exists.
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :OPTIONS do
+      internal_dispatch(
+        :options,
+        :on_new_options,
+        [dialog_id, req, transaction_id],
+        "No OPTIONS handler defined"
+      )
+    end
+
     def dispatch(:on_call_end, dialog_id, app_id) when is_pid(app_id) do
       internal_dispatch(
         :callprocessing,
@@ -495,7 +519,7 @@ defmodule SIP.Session do
     dialog-forming (RFC 3261 §12.1), and creating one per liveness ping left a
     60-second process behind for every ping a monitoring proxy sent.
     """
-    @spec dispatch_options(map(), pid()) :: {:reply, 100..699, binary(), list()}
+    @spec dispatch_options(map(), pid()) :: {:reply, 100..699, binary(), list()} | :dispatch
     def dispatch_options(req, transaction_id) when is_map(req) do
       case internal_dispatch(
              :options,
@@ -505,6 +529,9 @@ defmodule SIP.Session do
            ) do
         {:reply, code, reason, fields} when is_integer(code) and is_list(fields) ->
           {:reply, code, reason, fields}
+
+        :dispatch ->
+          :dispatch
 
         :default ->
           {:reply, 200, "OK", []}

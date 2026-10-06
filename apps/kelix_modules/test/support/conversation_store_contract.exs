@@ -79,6 +79,17 @@ defmodule Kelix.Test.ConversationStoreContract do
         assert expires == @now + 600
         refute Map.has_key?(row, :data)
       end
+
+      test "stats count the live conversations and their domains", %{store: store, handle: h} do
+        assert {:ok, %{conversations: 0, domains: 0}} = store.stats(h, @now)
+
+        :ok = store.put(h, @key, entry())
+        :ok = store.put(h, put_elem(@key, 2, "carol@d.test"), entry())
+        :ok = store.put(h, put_elem(@key, 0, "e.test"), entry())
+        :ok = store.put(h, put_elem(@key, 2, "dave@d.test"), entry(%{expires_at: @now}))
+
+        assert {:ok, %{conversations: 3, domains: 2}} = store.stats(h, @now)
+      end
     end
   end
 end

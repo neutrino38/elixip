@@ -264,6 +264,68 @@ defmodule Kelix.ConfigTest do
     end
   end
 
+  describe "parse/1 — [session_timer]" do
+    # On by default on a server, unlike the framework: a node relaying calls is
+    # where a dead peer would otherwise hold a call open.
+    test "absent → on, 1800 s, Min-SE 90, this node refreshing" do
+      {:ok, cfg} = Config.parse("")
+
+      assert cfg.session_timer == %{
+               enabled: true,
+               expires: 1800,
+               min_se: 90,
+               refresher: :local
+             }
+    end
+
+    test "every key honoured when given" do
+      toml = """
+      [session_timer]
+      enabled   = false
+      expires   = 600
+      min_se    = 120
+      refresher = "remote"
+      """
+
+      {:ok, cfg} = Config.parse(toml)
+      assert cfg.session_timer == %{enabled: false, expires: 600, min_se: 120, refresher: :remote}
+    end
+
+    test "the RFC 4028 bounds are checked at boot" do
+      assert {:error, msg} = Config.parse("[session_timer]\nmin_se = 30")
+      assert msg =~ "`min_se` must be at least 90"
+
+      assert {:error, msg} = Config.parse("[session_timer]\nexpires = 100\nmin_se = 120")
+      assert msg =~ "`expires` must not be below `min_se`"
+    end
+
+    test "a wrong value or an unknown key is named" do
+      assert {:error, msg} = Config.parse(~s([session_timer]\nrefresher = "peer"))
+      assert msg =~ "[session_timer]: `refresher` must be one of local|remote"
+
+      assert {:error, msg} = Config.parse("[session_timer]\ninterval = 600")
+      assert msg =~ "[session_timer]: unknown key(s): interval"
+    end
+
+    test "apply_app_env/1 hands it to the dialogs" do
+      previous = Application.fetch_env(:elixip2, :session_timer)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :session_timer, v)
+          :error -> Application.delete_env(:elixip2, :session_timer)
+        end
+      end)
+
+      {:ok, cfg} = Config.parse("[session_timer]\nexpires = 600")
+      :ok = Config.apply_app_env(cfg)
+
+      assert SIP.DialogImpl.SessionTimer.enabled?()
+      assert SIP.DialogImpl.SessionTimer.config()[:expires] == 600
+      assert SIP.DialogImpl.SessionTimer.config()[:refresher] == :local
+    end
+  end
+
   describe "parse/1 — [mediaserver] transport_cc" do
     # Transport-wide congestion control is what feeds the media server's sender-side
     # bandwidth estimator (docs/design/kelixip-transport-wide-cc.md). It is off until
@@ -430,7 +492,7 @@ defmodule Kelix.ConfigTest do
   test "defaults when sections are absent" do
     assert {:ok, cfg} = Config.parse("")
     assert cfg.node_name == "kelixip@127.0.0.1"
-    assert cfg.user_agent == "Kelixip/1.6.2"
+    assert cfg.user_agent == "Kelixip/1.6.3"
     assert cfg.log.target == "stdout"
     assert cfg.listen == []
   end

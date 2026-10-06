@@ -15,6 +15,11 @@
 # AOR's devices included, so one handset leaving does not close a subscriber
 # another handset keeps registered.
 #
+# An un-REGISTER is also the device's unPUBLISH, and so is the end of its
+# registration: the reports withdraw what the device published, and nothing
+# another device published. Over TCP/TLS/WSS the presence collection also watches
+# the connection a device published over, and drops its publications with it.
+#
 # Two things differ from registrar.exs beyond the reports, both so that a
 # registration always has an instance alive to report its end:
 #   * a refused REGISTER (403, 423, 400, 503) leaves the bindings it

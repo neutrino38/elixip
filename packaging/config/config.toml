@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.6.2"
+# user_agent = "Kelixip/1.6.3"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 # max_message_size = 64000   # biggest inbound SIP message, in bytes; 513 beyond it
 
@@ -77,6 +77,19 @@ port  = 5060
 verify = false
 #verify = true
 #ca = "/etc/kelixip/tls/interco-ca.pem"
+
+# RFC 4028 session timers, ON by default: every call leg negotiates one with its
+# own peer and is hung up when that peer stops refreshing it — a browser tab gone,
+# a phone off the network — instead of staying open until somebody notices. The
+# two legs of a relayed call are timed independently; nothing crosses.
+# `refresher = "local"` makes this node refresh each leg itself whenever the peer
+# leaves it the choice (an UPDATE every expires/2), so a call does not depend on a
+# browser's timers. Uncomment only to change a default.
+#[session_timer]
+#enabled   = true
+#expires   = 1800     # seconds: the interval asked for, and the largest accepted
+#min_se    = 90       # the smallest accepted (422 below it); RFC 4028 floor: 90
+#refresher = "local"  # local | remote
 
 # Prometheus /metrics + /health. No auth — keep it on loopback and let a local
 # Prometheus scrape it. Remove the block to disable it entirely.

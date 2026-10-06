@@ -111,6 +111,25 @@ defmodule SIP.Test.Pidf do
       assert [%Tuple{contact: "sip:h@10.0.0.1", priority: nil, timestamp: nil}] = doc.tuples
     end
 
+    test "reads an element of another namespace in the activities as a mark, at most eight" do
+      marks = Enum.map_join(1..12, &"<acme:m#{&1}/>")
+
+      body = """
+      <presence xmlns="urn:ietf:params:xml:ns:pidf"
+                xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model"
+                xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"
+                xmlns:acme="urn:example:acme" entity="sip:i@ives.fr">
+        <tuple id="t1"><status><basic>open</basic></status></tuple>
+        <dm:person id="p1"><rpid:activities>#{marks}<rpid:away/></rpid:activities></dm:person>
+      </presence>
+      """
+
+      assert {:ok, doc} = Pidf.parse(body)
+      # first in the document, yet not the activity: it is not RPID's
+      assert doc.activity == :away
+      assert doc.marks == Enum.map(1..8, &{"urn:example:acme", "m#{&1}"})
+    end
+
     test "carries an activity nobody has heard of through as a string" do
       body = """
       <presence xmlns="urn:ietf:params:xml:ns:pidf"
@@ -129,6 +148,43 @@ defmodule SIP.Test.Pidf do
   end
 
   # ── The refusals ────────────────────────────────────────────────────────────
+
+  # Captured from Linphone-Desktop 6.2.3 and Trix (JsSIP 3.13.8) on 2026-10-01
+  # (presence-composite-plan.md, PC0). Both say "available" by sending NO
+  # `<dm:person>` at all, never an empty one: a document with no activity is how
+  # a client clears the person state, and it must read as exactly that.
+  describe "parse/1 on field captures" do
+    test "available is no person at all, and reads as no activity and no note" do
+      for name <- ~w(linphone623-open trix-open) do
+        assert {:ok, doc} = Pidf.parse(sample(name))
+        assert [%Tuple{status: :open}] = doc.tuples
+        assert {doc.activity, doc.note} == {nil, nil}, name
+      end
+    end
+
+    test "busy is an RPID activity on the person, with or without text in it" do
+      for name <- ~w(linphone623-busy trix-busy) do
+        assert {:ok, doc} = Pidf.parse(sample(name))
+        assert doc.activity == :busy, name
+        assert Doc.open?(doc)
+      end
+    end
+
+    # Captured from Trix on 2026-10-03: "do not disturb" is RPID's busy, which is
+    # what a watcher that is not Trix should show, plus a mark of Trix's own.
+    test "Trix's do not disturb is busy, with its mark beside it" do
+      assert {:ok, doc} = Pidf.parse(sample("trix-dnd"))
+      assert doc.activity == :busy
+      assert doc.marks == [{"urn:trix:params:xml:ns:pidf", "dnd"}]
+    end
+
+    test "Trix carries no contact; Linphone carries the AOR" do
+      assert {:ok, %Doc{tuples: [%Tuple{contact: nil}]}} = Pidf.parse(sample("trix-open"))
+
+      assert {:ok, %Doc{tuples: [%Tuple{contact: "sip:bob@weshwesh.eu"}]}} =
+               Pidf.parse(sample("linphone623-open"))
+    end
+  end
 
   describe "parse/1 refuses" do
     test "a body over the size bound, without looking at it" do
@@ -181,7 +237,9 @@ defmodule SIP.Test.Pidf do
 
   describe "serialize/1" do
     test "writes a document a watcher can read back unchanged" do
-      for name <- ~w(linphone-open linphone-away linphone-closed two-tuples) do
+      for name <-
+            ~w(linphone-open linphone-away linphone-closed two-tuples) ++
+              ~w(linphone623-open linphone623-busy trix-open trix-busy trix-dnd) do
         assert {:ok, doc} = Pidf.parse(sample(name))
         assert {:ok, body} = Pidf.serialize(doc)
 
@@ -200,6 +258,33 @@ defmodule SIP.Test.Pidf do
       assert rich =~ ~s(xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid")
       # RFC 4480's own spelling of the activity, not the atom's.
       assert rich =~ "<rpid:on-the-phone/>"
+    end
+
+    test "writes the marks in their own namespace, after the activity" do
+      doc =
+        Doc.new("sip:m@ives.fr", :open,
+          activity: :away,
+          marks: [{"urn:trix:params:xml:ns:pidf", "auto"}]
+        )
+
+      assert {:ok, body} = Pidf.serialize(doc)
+      assert body =~ ~s(xmlns:m1="urn:trix:params:xml:ns:pidf")
+      assert body =~ "<rpid:activities><rpid:away/><m1:auto/></rpid:activities>"
+      assert {:ok, ^doc} = Pidf.parse(body)
+    end
+
+    test "a mark alone is still a person, and not an activity" do
+      doc = Doc.new("sip:m@ives.fr", :open, marks: [{"urn:example:acme", "flag"}])
+
+      assert {:ok, body} = Pidf.serialize(doc)
+      assert {:ok, %Doc{activity: nil, marks: [{"urn:example:acme", "flag"}]}} = Pidf.parse(body)
+    end
+
+    test "leaves out a mark whose name is not one an element may have" do
+      doc = Doc.new("sip:m@ives.fr", :open, activity: :busy, marks: [{"urn:example:acme", "a b"}])
+
+      assert {:ok, body} = Pidf.serialize(doc)
+      assert body =~ "<rpid:activities><rpid:busy/></rpid:activities>"
     end
 
     test "escapes what would otherwise close an element" do

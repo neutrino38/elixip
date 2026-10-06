@@ -124,6 +124,21 @@ defmodule Kelix.Test.SiloMemoryStore do
   end
 
   @impl true
+  def stats(pid, now) do
+    guarded(pid, fn s ->
+      live = s.messages |> Map.values() |> Enum.filter(&(&1.expires_at > now))
+
+      {:ok,
+       %{
+         messages: length(live),
+         aors: live |> Enum.map(&{&1.domain, &1.aor}) |> Enum.uniq() |> length(),
+         bytes: live |> Enum.map(& &1.size) |> Enum.sum(),
+         claimed: Enum.count(live, &(&1.claimed_until != nil and &1.claimed_until > now))
+       }}
+    end)
+  end
+
+  @impl true
   def purge(pid, domain, aor) do
     guarded_update(pid, fn s ->
       ids = for {id, m} <- s.messages, m.domain == domain and m.aor == aor, do: id

@@ -872,6 +872,19 @@ defmodule SIP.Transport do
 
   defp loggable_request(request), do: request
 
+  @doc """
+  Is `tmod` a connection-oriented transport — one whose instance IS a connection
+  to one peer, and dies with it?
+
+  What makes a state learnt from a peer bound to the connection it came in on:
+  over TCP, TLS or WSS the peer is reachable over that connection and nothing
+  else, and its end is the peer going away. Over UDP one instance serves every
+  peer, and outlives all of them.
+  """
+  @spec connection_oriented?(module() | nil) :: boolean()
+  def connection_oriented?(tmod),
+    do: tmod in [SIP.Transport.TCP, SIP.Transport.TLS, SIP.Transport.WSS]
+
   @spec send_msg(pid(), binary(), binary() | tuple(), integer()) :: any()
   @doc "Send a SIP message through a transport instance designated by its process ID"
   def send_msg(tid, msg, destip, destport) when is_bitstring(msg) and is_integer(destport) do
