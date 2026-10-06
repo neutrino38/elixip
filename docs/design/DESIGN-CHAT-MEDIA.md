@@ -660,10 +660,16 @@ When the TLS client certificate option is used, the service trusts
 
 ### 8.1 The relay and the Silo: nothing new
 
-`SIP.MsgTemplate.page_request/2` keeps the `Content-Type` and the body, a
-multipart whole with its boundary (`SIPMsgTemplate.ex:97-102`), and the
-Silo stores the body verbatim. `Content-Encoding` is undone at parsing and
-the body leaves in clear with an unchanged `Content-Type`. `Priority` and
+`SIP.MsgTemplate.page_request/2` keeps the `Content-Type` and the body; a
+multipart is carried as its parsed parts and re-serialized, its
+Content-Type and boundary recomputed (`SIPMsgTemplate.ex:97-102`) —
+equivalent, not byte-identical. A single-part body, `message/cpim`
+included, is stored by the Silo verbatim; a **bare multipart was not**:
+the Silo stored the first part alone under the multipart type, which
+chat-media-plan S1 fixes. `Content-Encoding` is undone at parsing; the body
+leaves in clear with an unchanged `Content-Type`, except a page that would
+pass 1300 octets on UDP, which leaves with `Content-Encoding: deflate`
+(chat-media-plan S1). `Priority` and
 `Expires: 0` of IMDN and `isComposing` are outside `@page_headers`;
 `Priority` is harmless, `Expires: 0` is already read as zero retention and
 `:is_composing` is never stored. An IMDN for an absent recipient **is**
@@ -771,7 +777,9 @@ to the store.
   error, those whose id is unknown (a Linphone without D7 sends the Call-ID
   of its own leg).
 - When emitting CPIM, put the SIP `From` URI in the CPIM `From` and request
-  `positive-delivery, negative-delivery, display`.
+  the receipts the client acts on: `positive-delivery, display` (Trix, ADR
+  0010, which reads negative receipts as nothing); `negative-delivery` is
+  worth asking only by a client that shows a failure.
 - isComposing: §2.6; `active` every 60 s while typing, `idle` with no
   `contenttype` nor `refresh` after 15 s of silence; consider the peer idle
   after its announced `refresh`, 120 s by default. kelixip answers 480 to an

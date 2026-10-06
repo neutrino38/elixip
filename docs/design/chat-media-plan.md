@@ -17,9 +17,10 @@ The contract between the parts is **§5 and §9 of the design**, plus the
 captures Part S produces in S0. Part T needs nothing else from Part S until
 its end-to-end check.
 
-**Status (2026-10-02): planned, nothing started.** Trix's code was not read
-for this plan; what it says of Trix comes from chat-basic-plan §6, checked
-on 2026-09-29. The first task of Part T is to re-check it.
+**Status (2026-10-06): planned, nothing started.** What this plan says of
+Trix was read in its code at `ff2d8c5` (0.10.8) on 2026-10-06, and its
+ADRs 0008 to 0010: CPIM, IMDN and the SHA-256 digest already exist there,
+which shrinks Part T to what is specific to files.
 
 ## 1. Scope
 
@@ -27,13 +28,14 @@ on 2026-09-29. The first task of Part T is to re-check it.
 |---|---|
 | the reference PHP server on `web1`, run for real: digest with the SIP credentials, retention, static downloads behind Apache | the store Linphone already speaks to; nothing to write to get a first exchange |
 | provisioning of Linphone accounts: the store URL and CPIM | the two keys without which, respectively, nothing is sent and no receipt is ever matched (design D7) |
-| proof that the relay and the Silo carry the bodies verbatim | read in the code, never captured (design §12) |
-| Trix: receive and show a photo, play a voice message, send both, IMDN | the second client, and the one that shows the Linphone-side loss of a caption |
+| the relay and the Silo carrying the bodies verbatim — **a fix** for a bare multipart, a test for the rest | the Silo keeps only the first part of a multipart (§2); the rest was read in the code, never captured (design §12) |
+| `deflate` on a MESSAGE that would pass 1300 octets on UDP | XML, CPIM and a caption reach that size, and a UDP-registered Linphone cannot be reached over TCP |
+| Trix: receive and show a photo, play a voice message, send both, a caption; isComposing, which it lacks | the second client, and the one that shows the Linphone-side loss of a caption; its CPIM and IMDN already exist and carry files unchanged |
 | the Elixir store, as the last part | what replaces the PHP server when quotas, control, metrics or the logging rule are needed |
 
 | Out | Where it re-enters |
 |---|---|
-| the Bearer token minted by kelixip for web clients | design §8.3 — Trix does the digest until then; a one-route addition to the control API, planned when Trix's digest is measured too costly |
+| the Bearer token minted by kelixip for web clients | design §8.3 — Trix already computes both digests from its stored HA1s (§2), so the token is not needed for the cost of the digest; it re-enters with Part E, if ever |
 | thumbnails (`file-info type="thumbnail"`) | Linphone ignores them on receive and never sends them |
 | object storage, a redundant store | design D6 — the schema is small enough to move when a second host exists |
 | a content scanner | design §11 — a hook at the rename step of the Elixir store |
@@ -45,11 +47,17 @@ on 2026-09-29. The first task of Part T is to re-check it.
 |---|---|
 | the reference PHP server | public on GitHub, not installed anywhere here; its purge mechanism and its logging were not seen (design §12) |
 | `web1` | Apache running, certificate in place; nothing under `/files/` |
-| kelixip relay (`SBB.Page`) and Silo | carry `Content-Type` and body verbatim, multipart with its boundary (`SIPMsgTemplate.ex:97-102`); never exercised on an `rcs-ft-http` or `message/cpim` body |
+| kelixip relay (`SBB.Page`) | carries `Content-Type` and body; a multipart is carried as its parsed parts and **re-serialized**, Content-Type and boundary recomputed (`SIPMsgTemplate.ex:97-102`): equivalent, not byte-identical; never exercised on an `rcs-ft-http` or `message/cpim` body |
+| Silo | stores `SIP.Msg.Ops.body_string(req)` (`silo.ex:400`), which for a parsed multipart is **the first part's data alone**, under the original `multipart/…;boundary=` type: a bare multipart comes out of a flush truncated and unreadable. A single-part body, `message/cpim` included, is stored whole |
+| `Content-Encoding` | decoded at parsing (`deflate`, `gzip`, `SIP.Msg.BodyCoding`); encoded only as `deflate`, only on a NOTIFY whose watcher asked for it (`SIPDialogImpl.ex:832-850`); a MESSAGE always leaves in clear, whatever its size, and nothing in the transport checks 1300 octets |
 | `SIP.Msg.Ops.message_kind/1` | files `application/vnd.gsma.rcs-ft-http+xml` under `:im`, so it is stored and relayed like text |
 | `apps/elixip2` | has `Req` as a dependency: an elixipp scenario can upload |
 | Linphone desktop on a kelixip domain | basic chat room, no store URL, no CPIM: sends nothing, matches no receipt |
-| Trix (as of 2026-09-29) | `text/plain` only, 415 with `Accept: text/plain` to anything else, 1000-byte cap, no IMDN, JsSIP with one MESSAGE per Call-ID |
+| Trix, receiving (`src/sip/message.ts`) | opens `message/cpim` (`sip/cpim.ts`), then accepts only `text/plain` in UTF-8 or US-ASCII: an `rcs-ft-http` part, in CPIM or bare, gets **415** (ADR 0009 says so); a bare `message/imdn+xml` — what a Linphone without CPIM sends — gets 415 too, since receipts are read only inside CPIM; `Accept` of the 415 is JsSIP's plus `text/plain, message/cpim` |
+| Trix, sending | CPIM first with `imdn.Message-ID` = the entry's id and `Disposition-Notification: positive-delivery, display`; on a 415, the same text again in bare `text/plain`, and bare text to that correspondent for the life of the link (ADR 0009 D3); text capped at 1000 octets (D2); JsSIP, one MESSAGE per Call-ID |
+| Trix, receipts (ADR 0010) | `delivered` and `displayed` read and written, in CPIM only; read receipts to contacts only (D2); none to a correspondent who refused CPIM; negative receipts read as nothing |
+| Trix, credentials (`storage/store.ts`, `storage/ha1.ts`) | no password stored: `ha1` (MD5) and `ha1Sha256`, computed with **realm = SIP domain**; `ha1Sha256` empty for accounts older than its introduction; MD5 and SHA-256 in `storage/md5.ts`, `storage/sha256.ts`; JsSIP's digest grafted for SHA-256 (`sip/digest.ts`) |
+| Trix, isComposing | none: no `application/im-iscomposing+xml` sent or read |
 | the Elixir store | does not exist; name proposed `kelifile`, repository of its own (design §6.1) |
 
 ## 3. Part S — the server side, now
@@ -58,13 +66,31 @@ on 2026-09-29. The first task of Part T is to re-check it.
 
 **Delivers** the store, installed rather than written: the reference
 `flexisip-http-file-transfer-server` under `/files/` on `web1`'s Apache,
-configured for production use, not as a demo:
+configured for production use, not as a demo.
+
+It starts with a **local checkout at a pinned commit**, read before anything
+is configured: design §2.8 was written from an automatic summary of the
+repository, so the constant names, the nonce format, the purge and the
+logging are confirmed in `hft.php` and its includes first, and the design
+corrected where they differ. The commit goes in the Apache config's
+comments.
 
 - `DIGEST_AUTH = true`, `AUTH_NONCE_KEY` random, `AUTH_REALM` **undefined** so
   the realm is the SIP domain of the HTTP `From` (a fixed realm breaks the
   day a second domain exists), `AUTH_QUERY` pointed at the subscriber base
-  under a **read-only** account, returning the HA1 and its algorithm as the
-  base holds them;
+  under a **read-only** account;
+- the algorithm: `auth_db` holds **one** HA1 column hashed by one
+  `password_hash` for the whole base, with no per-row algorithm column, so
+  `AUTH_QUERY` returns that column as `password` and the algorithm as a
+  **constant** (`'MD5'` or `'SHA-256'`, whichever `password_hash` says).
+  The PHP challenges with both; which one Linphone answers is captured. If
+  it answers the one the base cannot verify, the other challenge is removed
+  from the PHP's 401 — a one-line local patch, kept with the config;
+- the URL layout: the PHP builds the file URL as `<directory of
+  hft.php>/tmp/<name>`, and `fhft_tmp_path` lies outside the document root
+  by default. Apache maps `/files/hft` to `hft.php` (rewrite) and
+  `/files/tmp/` to `fhft_tmp_path` (`Alias`), so the URLs clients see are
+  the ones Part E keeps (decision 2);
 - `fhft_tmp_path` on a volume sized for `fhft_maximum_file_size_in_MB` times
   the expected traffic over `fhft_validity_period`; the period **at least the
   Silo's `max_retention`** (design D8);
@@ -101,14 +127,40 @@ are committed.
 
 ### S1 — kelixip: the relay, the Silo, elixipp
 
-**Delivers** what this repository owes the design, with no change to SIP
-behaviour:
+**Delivers** what this repository owes the design: two fixes in the
+message layer and the tests that pin them.
 
-- a test in `apps/kelix_modules` paging an `rcs-ft-http` body and a
-  `message/cpim` body through `SBB.Page` to a Mockup device, and through
-  `Kelix.Mod.Silo.store/2` then a flush, asserting the relayed body is
-  **byte-identical** and the `Content-Type` unchanged, boundary included for
-  a `multipart/mixed` of XML and text;
+- **the Silo stores the body as it was on the wire.** `body_string/1` is the
+  body *to read* and answers the first part of a multipart; the Silo needs
+  the body *to carry*. A second reading in `SIP.Msg.Ops` — the octets of the
+  whole body, a multipart serialized with its parts — is what the Silo
+  stores and sizes, and what its delivery sends back under the stored
+  `Content-Type`. Whether the delivery re-parses it into parts or carries
+  it as a string under its type is decided in the code, as long as the
+  boundary in the type and the one in the body agree;
+- **`deflate` past 1300 octets on UDP.** A page-mode MESSAGE — relayed by
+  `SBB.Page` or delivered from the Silo — whose serialized form would pass
+  1300 octets on a UDP transport leaves with its body compressed and
+  `Content-Encoding: deflate` (RFC 3261 §20.12); the threshold is
+  §18.1.1's, applied where TCP is not an option, a UDP-registered contact.
+  Below the threshold, or on TCP, TLS or WSS, the body leaves in clear, as
+  today. `deflate`, not `gzip`: Linphone decodes it, and
+  `SIP.Msg.BodyCoding.encode/2` already writes it (zlib format) for the
+  presence NOTIFYs, so no encoder is added — the same function, called
+  from a second place. The decision lives in one place, where the outgoing
+  transport of the page is known, and covers both senders. A **415**
+  carrying an `Accept-Encoding` without `deflate` sends the page once more
+  in clear, and that is the only retry. Still over 1300 compressed: sent
+  anyway, and a warning says so;
+- a test in `apps/kelix_modules` paging an `rcs-ft-http` body, a
+  `message/cpim` body and a bare `multipart/mixed` of XML and text through
+  `SBB.Page` to a Mockup device, and through `Kelix.Mod.Silo.store/2` then
+  a flush. Asserted: the single-part bodies **byte-identical**, the
+  `Content-Type` unchanged; the multipart **equivalent** — same parts, same
+  part headers, same order, a boundary that matches its type — since the
+  relay re-serializes it; and the Silo test fails before the first fix;
+- the same paths to a UDP device with a body that crosses 1300 octets:
+  compressed, decodable to the original, and in clear after a 415;
 - an elixipp scenario pair, tagged `:live`: a UAC that uploads through `Req`
   (empty POST, digest, `File` part), builds the XML and pages it; a UAS that
   parses the XML, downloads and checks the size — the node's own way to
@@ -116,65 +168,96 @@ behaviour:
   the Elixir store later;
 - the provisioning page of S0 in its final form.
 
-**Files** `apps/kelix_modules/test/chat_media_relay_test.exs`,
+**Files** `apps/elixip2/lib/framework/SIPMsgOps.ex`,
+the page sending path (`dsl/sbb/page.ex` or below
+it), `apps/kelix_modules/lib/kelix/mod/silo.ex` and `silo/delivery.ex`;
+`apps/kelix_modules/test/chat_media_relay_test.exs`,
 `apps/elixip2/scenarios/uac_file_message.exs`, `uas_file_message.exs`,
-`docs/kelixip/administration.md`.
+`docs/kelixip/administration.md`; design §8.1 corrected.
 
-**Done when** both tests are green against the PHP server, and a Linphone
-desktop, offline during the upload and the MESSAGE, gets the photo at its
-next REGISTER from the Silo, with the file still downloadable.
+**Done when** the tests are green, the scenario pair against the PHP
+server; a Linphone desktop, offline during the upload and the MESSAGE, gets
+the photo at its next REGISTER from the Silo, with the file still
+downloadable; and a UDP-registered Linphone desktop shows a captioned
+photo from a client sending the bare multipart, which crosses 1300 octets
+— the capture shows `Content-Encoding: deflate` and a 200.
 
-### S2 — the token mint (conditional)
+### S2 — the token mint (conditional, not expected)
 
-**Delivers**, only if Part T measures the digest in the browser as not
-acceptable (T3): the one-route token mint of design §8.3 in
-`Kelix.ControlAPI`, for an authenticated subscriber. The PHP server does not
+**Delivers**, only if T3 finds a case the digest cannot answer: the
+one-route token mint of design §8.3 in `Kelix.ControlAPI`, for an
+authenticated subscriber. The cost of the digest is no longer the trigger:
+Trix ships MD5 and SHA-256 and keeps both HA1s (§2), so the digest costs it
+nothing new. What remains possible is an account whose `ha1Sha256` is empty
+facing a store that challenges with SHA-256 only. The PHP server does not
 verify a Bearer token, so this phase also moves the trigger of Part E
 forward: a web client that needs the token needs the Elixir store.
 
 ## 4. Part T — the client side (Trix)
 
 Each phase lands in `trix-web-client` with its ADR when a trade-off is
-taken, in the numbering Trix already uses. The decisions D1 to D13 quoted
-below are Trix's, as recorded in chat-basic-plan §6. Every phase is tested
-against the PHP server of S0 and a Linphone desktop.
+taken, numbered after ADR 0011. The decisions quoted below are Trix's: D1
+to D13 of ADR 0008 (as in chat-basic-plan §6), and those of ADRs 0009
+(CPIM) and 0010 (IMDN). Every phase is tested against the PHP server of S0
+and a Linphone desktop.
 
-### T0 — re-read Trix, and decide the store's address
+What Trix already has, and this part builds on rather than redoes: the
+CPIM envelope both ways, with `imdn.Message-ID` and the 415 fallback to
+bare text (ADR 0009); `delivered` and `displayed` receipts both ways, in
+CPIM (ADR 0010); both HA1s and both hash functions (§2). A file message
+goes through the same send path as a text: in CPIM, with the entry's id as
+`imdn.Message-ID`, and receipts follow without new code on the receipt
+side.
 
-**Delivers** the facts this plan assumes, re-checked in `src/sip/message.ts`
-and `src/sip/port.ts`: `text/plain` only (D1), the 1000-byte cap (D2), no
-IMDN, the 415 answer. And one decision: **where the store URL lives in
-Trix**. Recommended: in `AccountConfig`, so a share link carries it to a
-second device — it is not a secret, the credentials are — mirroring
-Linphone's provisioning, with a default of empty meaning "attachments off".
+### T0 — the store's address, and the message model
 
-**Done when** the ADR is written and the facts above are either confirmed or
-this plan is corrected.
+**Delivers** two decisions, in one ADR:
+
+- **where the store URL lives**: in `AccountConfig`, beside `proxy` and
+  `ice` — an operator setting, carried by a share link to a second device
+  (it is not a secret; the HA1s are), mirroring Linphone's provisioning;
+  empty means "attachments off", and is the value of every account saved
+  before it, as `ice` and the RTT transport already do;
+- **what an entry is** once a message may be a file: the messaging
+  machine's entry gains a kind (text, file) and, for a file, the fields of
+  the XML (URL, name, type, size, `until`, duration); a file entry has an
+  id like a text entry, so dedup (ADR 0009) and receipts (ADR 0010) apply
+  to it unchanged.
+
+**Done when** the ADR is written and the facts of §2 still hold at the
+commit Part T starts from.
 
 ### T1 — receive an attachment, show it as a card
 
-**Delivers** reception of design §9.3 steps 1-3 and 5:
+**Delivers** reception of design §9.3 steps 1-3 and 5, in
+`sip/message.ts` after the CPIM is opened:
 
-- accepted on a MESSAGE: `application/vnd.gsma.rcs-ft-http+xml`,
-  `multipart/mixed`, `message/cpim`, `message/external-body`, besides
-  `text/plain`; the `Accept` of the 415 extended accordingly (D1 revised);
-- unwrap CPIM, then multipart, then each part; the CPIM `From` is **not**
-  trusted for the sender — the SIP `From` is, as D4 already says;
+- accepted, inside CPIM or bare: `application/vnd.gsma.rcs-ft-http+xml`,
+  `multipart/mixed` of XML and text, `message/external-body`, besides
+  `text/plain`; `ACCEPTED_BODY_TYPES_WITH_TEXT` extended accordingly, and
+  ADR 0009's "a file gets 415" revised;
+- a bare `message/imdn+xml` answered **200** and read like one inside CPIM:
+  it is what a Linphone without CPIM sends, its id is the Call-ID of the
+  relayed leg, so it matches nothing and is dropped — but it no longer
+  draws a 415;
 - the `fthttp` XML read with only `file-info[@type="file"]`; `file-name`
   percent-decoded; a voice message recognised by the strict
   `audio/wav;voice-recording=yes`; `playing-length` read as **milliseconds**;
-  `until` compared to now, a past one shown as "expired";
+  `until` compared to now, a past one shown as "expired"; the XML through
+  the injected `XmlParser`, as PIDF and IMDN are;
+- the CPIM `From` still not trusted for the sender — the SIP `From` is
+  (ADR 0009);
 - a card in the conversation: name, size, type icon, duration for a voice
-  message, "download" and "expired" states; the 1000-byte cap (D2) applies
-  to text parts only.
+  message, "download" and "expired" states; the 1000-octet cap (D2) applies
+  to text only.
 
 **Tests** the XML of design §2.2 with and without `until`, with
 `am:playing-length`, with `file-key` (ignored), the `external-body` form,
-and a multipart of XML and text.
+a multipart of XML and text, each bare and in CPIM; a bare IMDN.
 
 **Done when** a Linphone desktop's photo and voice message, received live,
-show as cards with the right name, size and duration, and a text still shows
-as text.
+show as cards with the right name, size and duration, a text still shows
+as text, and a Linphone without CPIM gets 200 to its receipts.
 
 ### T2 — download and play
 
@@ -196,58 +279,70 @@ Trix supports, and a photo over 10 MB downloads without blocking the UI.
 
 - the three-request upload with `FormData` and the `File` field, `From` set
   to the account's URI, `mode: 'cors'`, `credentials: 'omit'`;
-- the digest in the browser: SHA-256 through WebCrypto, MD5 through a small
-  library, chosen by the challenges received; the `nc` incremented on the
-  second POST. **Measured**: the cost in bytes shipped and milliseconds; if
-  judged too high, S2 is requested and T6 follows;
+- the HTTP digest from the **stored HA1s**, no password: the store's realm
+  is the SIP domain (S0), which is the realm Trix's HA1s were computed
+  with (`storage/ha1.ts`); MD5 or SHA-256 chosen among the challenges by
+  which HA1 the account holds, SHA-256 first; `nc` incremented on the
+  second POST; the response computed with `storage/md5.ts` and
+  `storage/sha256.ts`. An account without `ha1Sha256` facing a SHA-256-only
+  challenge says so, as `sip/digest.ts` already does for SIP; that case,
+  if met on the real store, is what S2 is for;
 - the XML built as §2.2, CRLF, percent-escaped name, local type;
-- the MESSAGE sent as Trix sends text today (out of dialog, new Call-ID),
-  with `Content-Type: application/vnd.gsma.rcs-ft-http+xml`; 200 or 202 is
-  acceptance, 400 from the store is "too large", 401 is "check your
-  password";
+- the MESSAGE through the existing send path, generalized from text to a
+  part type: in CPIM with the entry's id, receipts requested; on a 415, the
+  bare XML, as for text; 200 or 202 is acceptance; from the store, 400 is
+  "too large", 401 is "check your password";
 - the picker, a size limit equal to the server's, a progress indicator, and
   **one file per message** — several files are several messages, which is
   also what Linphone can show.
 
 **Done when** a photo sent from Trix shows on a Linphone desktop and on a
-second Trix.
+second Trix, and comes back "delivered" from both.
 
-### T4 — send a voice message
+### T4 — send a voice message, and isComposing
 
 **Delivers** design §9.2: `MediaRecorder` as `audio/webm; codecs=opus`,
 named `vocal_<timestamp>.mka`, duration measured in milliseconds, uploaded
 with the type `audio/wav;voice-recording=yes` on the part, the XML with
-`am:playing-length`; the `isComposing` with the voice `contenttype` while
-recording. **Measured on a Linphone desktop**: if its player refuses the
-browser's WebM, the fallback is a WAV PCM 16 kHz mono encoder in the client,
-and the ADR records which container goes out.
+`am:playing-length`. **Measured on a Linphone desktop**: if its player
+refuses the browser's WebM, the fallback is a WAV PCM 16 kHz mono encoder in
+the client, and the ADR records which container goes out.
+
+Trix has no isComposing at all, so the "recording" indicator is new work,
+done here whole rather than for voice alone: `application/im-iscomposing+xml`
+sent and read as design §2.6 and §9.4 say — `active` every 60 s while typing
+or recording, the voice `contenttype` while recording, `idle` after 15 s,
+the peer idle after its `refresh`; a 480 from kelixip for an absent
+recipient is not an error. Never in CPIM, never stored, never a receipt.
 
 **Done when** a voice message recorded in Trix plays on a Linphone desktop
 with the right duration, and the "recording a voice message" indicator shows
-there while Trix records.
+there while Trix records; the typing indicator works both ways.
 
-### T5 — text with a photo, and IMDN
+### T5 — text with a photo
 
-**Delivers** the two things Linphone does on receive but not on send:
+**Delivers** the caption, which Linphone shows on receive but never sends:
+one `multipart/mixed`, XML part first then `text/plain; charset=UTF-8`,
+**inside the CPIM envelope** like any other content — the SIP body stays a
+single `message/cpim` part, which the Silo stores whole even before S1. The
+bare multipart goes out only after a 415, and relies on S1's fix to survive
+the Silo. The UI says, once, that a Linphone sender's caption does not
+arrive (design §2.4) — a fact to display, not to work around. The text part
+keeps the 1000-octet cap.
 
-- a caption with a photo as one `multipart/mixed`, XML part first then
-  `text/plain; charset=UTF-8`; the UI says, once, that a Linphone sender's
-  caption does not arrive (design §2.4) — a fact to display, not to
-  work around;
-- IMDN of design §9.4: `delivered` on receipt, `displayed` when the
-  conversation is open; `message-id` from the CPIM `imdn.Message-ID` when
-  present, else the Call-ID of the received MESSAGE; incoming IMDNs matched
-  the same way and silently ignored when unknown; sent with
-  `Priority: non-urgent`. Trix's "no de-duplication" (D3) is unchanged: an
-  IMDN is not a message.
+The receipts need nothing new: the entry has an id (T0), the receipt path
+of ADR 0010 is unchanged. Its disposition request stays `positive-delivery,
+display` — no `negative-delivery`, since ADR 0010 reads negative receipts as
+nothing; design §9.4 is aligned on that.
 
-**Done when** a Linphone desktop provisioned with CPIM shows "delivered"
-then "read" for a message Trix received and opened, and a Trix message to
-Linphone shows the same states in Trix.
+**Done when** a captioned photo from Trix shows both on a second Trix and,
+caption included, on a Linphone desktop; a Linphone desktop provisioned
+with CPIM shows "delivered" then "read" for it, and Trix shows the same for
+a photo from Linphone.
 
-### T6 — the Bearer path (conditional)
+### T6 — the Bearer path (conditional, not expected)
 
-**Delivers**, only if T3 asked for it and Part E has reached E4: the token
+**Delivers**, only if S2 was built and Part E has reached E4: the token
 obtained from kelixip after registration, sent as `Authorization: Bearer` on
 the first POST, refreshed before its expiry; the digest kept as the fallback
 when the store answers 401 anyway.
@@ -370,40 +465,67 @@ removed when its `tmp/` is empty.
 4. **Trix sends one file per message.** Linphone cannot do otherwise on
    send and shows one per message on receive.
 5. **Measure before building the fallbacks.** The `.mka` playback in
-   browsers (T2), the WebM acceptance by Linphone's player (T4) and the cost
-   of the digest in the browser (T3) are each a measurement with a named
-   fallback, built only on a failed measurement.
-6. **The relay and the Silo gain no code.** S1 adds tests; a failing one is
-   a bug fix in the message layer, not a chat-media feature.
+   browsers (T2), the WebM acceptance by Linphone's player (T4) and the
+   digest algorithm the real store challenges with (T3) are each a
+   measurement with a named fallback, built only on a failed measurement.
+6. **The relay and the Silo gain no chat-media feature, but two fixes.**
+   The Silo's truncation of a bare multipart and the absence of any size
+   rule on UDP are bugs of the message layer that attachments expose; they
+   are fixed there, once, for every page (S1), not worked around in a
+   client.
+7. **Size on UDP is solved by `deflate`, not by a cap.** A UDP-registered
+   contact cannot be reached over TCP, and a caption or a CPIM envelope is
+   not a reason to refuse a message. Compression is applied only past the
+   1300 octets of RFC 3261 §18.1.1 and only on UDP, so every message that
+   works today leaves exactly as today.
+8. **Trix wraps every content in CPIM, the caption included.** The CPIM
+   envelope already carries Trix's text and receipts; a file is one more
+   content type inside it, and keeping the SIP body single-part keeps it
+   out of the multipart paths of the relay and the Silo.
 
 ## 7. Order, and what runs in parallel
 
-S0 first, and alone: everything else is tested against it. S1 follows and
-is the only phase touching this repository; its relay test needs no store
-and can be written any time. S2 waits for T3's measurement.
+S0 first, and alone: everything else is tested against it. S1 is the only
+phase touching this repository; its two fixes and their tests need no store
+and **can start now**, in parallel with S0 — only its scenario pair and its
+Linphone checks wait for S0. S2 waits for T3.
 
 Part T: T0 → T1 → T2 is reception and starts the day S0's captures exist.
-T3 → T4 → T5 is emission, against the PHP server. T6 waits for S2 and E4.
+T3 → T4 → T5 is emission, against the PHP server; T5's fallback to a bare
+multipart needs S1 deployed. T6 waits for S2 and E4.
 
 Part E starts on its trigger (§5), in order E1 → E2 → E3 → E4 → E6, with E5
 after E3 whenever a client is provisioned with the proxy. Its two release
 points, `kelifile` 0.1.0 (E1 to E4, E6) and 0.2.0 (E5), are not on any
 other part's path.
 
-kelixip ships S1's tests and scenarios and the provisioning page in its next
-minor; no SIP behaviour changes, so no kelixip release is gated on this plan.
+kelixip ships S1 in its next minor: the Silo fix and `deflate` on UDP **are**
+SIP behaviour changes, and the release note says so — a MESSAGE over 1300
+octets to a UDP contact now leaves compressed. Nothing else in this plan
+gates a kelixip release.
 
 ## 8. Risks
 
+- **Linphone receiving CPIM when not provisioned for it.** Trix sends CPIM
+  first to everyone and falls back on a 415 (ADR 0009); ADR 0009's real
+  validation is still pending. T3 sees it on the first file sent to an
+  unprovisioned desktop.
 - **The PHP server's purge and logging were not seen.** S0 adds the cron
   and checks the log; if the PHP writes file names at the level needed for
   debugging, the logging rule is not met until Part E, and S0 says so in the
   config's comments.
 - **The HTTP `From` header shape.** A GRUU whose `;gr=` the PHP server
   mishandles shows up in S0 before anything copies the behaviour.
-- **The subscriber base's algorithm column.** If the base holds only
-  `CLRTXT` or only `SHA-256`, `AUTH_QUERY` must return what the PHP can
-  verify; S0 checks it with a real REGISTER-capable account.
+- **One algorithm per base, two challenges per 401.** `auth_db` holds a
+  single HA1 per subscriber, hashed one way for the whole base; the PHP
+  challenges MD5 and SHA-256. A client answering the other one fails with a
+  correct password. S0 measures which challenge Linphone answers and, if
+  needed, patches the PHP's 401 down to one challenge.
+- **Realm = SIP domain, on both sides.** Trix's HA1s and the base's HA1s
+  were computed with the SIP domain as realm, and the store challenges with
+  the domain of the HTTP `From`. A deployment whose SIP realm differs from
+  its domain breaks the HTTP digest for both clients; it is not one of
+  ours, and the provisioning page says the two must be equal.
 - **The browser's audio container.** T2's matrix may force a WASM demuxer,
   a week of work not in this plan's spine. The fallback is named; its cost
   is not.
