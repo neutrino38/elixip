@@ -75,10 +75,13 @@ defmodule SIP.Test.Peers.Manual do
   relay nothing, since each leg has a timer of its own. Only a request off the wire
   can show that, because what must NOT happen is a request appearing on the OTHER
   leg.
+
+  `headers` are merged into the UPDATE — the `Session-Expires` / `Supported` a
+  real refresh carries, when a test is about the timer itself.
   """
-  @spec refresh_session(pid()) :: :ok
-  def refresh_session(t_pid) do
-    Mockup.tell_peer(t_pid, :refresh_session)
+  @spec refresh_session(pid(), map()) :: :ok
+  def refresh_session(t_pid, headers \\ %{}) do
+    Mockup.tell_peer(t_pid, {:refresh_session, headers})
   end
 
   # ── Peer callbacks ──────────────────────────────────────────────────────────
@@ -168,8 +171,15 @@ defmodule SIP.Test.Peers.Manual do
 
   def on_command(:hangup, state), do: send_in_dialog(state, :BYE, "hang up")
 
-  def on_command(:refresh_session, state),
-    do: send_in_dialog(state, :UPDATE, "refresh the session")
+  def on_command({:refresh_session, headers}, state) do
+    case send_in_dialog(state, :UPDATE, "refresh the session") do
+      {[{:inject, req, after_ms}], state} ->
+        {[{:inject, Map.merge(req, headers), after_ms}], state}
+
+      other ->
+        other
+    end
+  end
 
   # ── Internals ───────────────────────────────────────────────────────────────
 
