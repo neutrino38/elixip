@@ -367,6 +367,48 @@ defmodule SIP.Test.B2bua.Scenario do
     refute "timer" in SIP.Msg.Ops.required_extensions(req)
   end
 
+  # The callee's leg ends on its session timer (RFC 4028): the callee said it
+  # refreshes and never did, so its dialog hung it up. The scenario reads that as
+  # the end of the call, and the teardown hangs up the caller.
+  @tag timeout: 60_000
+  test "a callee whose session timer expires ends the call at the caller", %{
+    scenario: module,
+    stub: stub
+  } do
+    previous = Application.fetch_env(:elixip2, :session_timer)
+    Application.put_env(:elixip2, :session_timer, enabled: true, expires: 3, min_se: 1)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:elixip2, :session_timer, v)
+        :error -> Application.delete_env(:elixip2, :session_timer)
+      end
+    end)
+
+    invite = inbound_invite()
+    peer = peer_uri("b2bua_session_expiry")
+    tp_pid = transport_pid(peer)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
+
+    {instance, _ref} = start_instance(module, stub, invite, peer)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100, %{"Session-Expires" => "3;refresher=uas"})
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
+
+    # 3 s interval: the callee's leg BYEs 1 s before the end…
+    assert_receive {:sip_mockup, {:request_sent, :BYE, bye}}, 4_000
+    assert Map.get(bye, "Reason") =~ "Session Timer Expired"
+
+    # …and the caller is hung up by the teardown once the scenario has ended.
+    assert_receive {:instance_done, :ok}, 5_000
+    assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
+  end
+
   # The one in-dialog request that does NOT cross, on a B2BUA with no media at all:
   # an offerless UPDATE, i.e. an RFC 4028 session-timer refresh. A session timer runs
   # between us and ONE peer — we are its UA on that leg — so the far end has nothing
