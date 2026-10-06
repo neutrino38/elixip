@@ -1,3 +1,18 @@
+kelixip (1.6.3-2) stable; urgency=low
+
+  * RFC 4028 session timers, one per call leg. A long call relayed between two
+    browsers was cut after 90 s: the caller's Session-Expires was relayed to
+    the callee, who then waited for kelixip to refresh its leg.
+    Session-Expires, Min-SE and the `timer` option tag no longer cross a B2BUA.
+  * Every call leg negotiates its own timer with its own peer, refreshes it
+    (UPDATE, or re-INVITE for a peer without UPDATE) when it is the refresher,
+    and hangs up a peer that stops refreshing (Reason: 408 Session Timer
+    Expired). Scripts using bridge() receive {:bridge, :session_expired, ...}.
+  * New [session_timer] section in config.toml: enabled (default true),
+    expires (1800), min_se (90), refresher (local | remote, default local).
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Tue, 06 Oct 2026 18:00:00 +0200
+
 kelixip (1.6.3-1) stable; urgency=low
 
   * Presence: the composite person keeps the extension elements a client puts

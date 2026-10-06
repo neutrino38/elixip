@@ -336,6 +336,7 @@ gone and `notify_transport_down/2` broadcasts it to the dialogs once, from
 | `:tls_certfile` / `:tls_keyfile` | see `TLS_WSS.md` | listener certificate, overridable per listener |
 | `:sip_timer_T1` | 500 ms | base of timers B, F, H |
 | `:optionkeepaliveperiod` | 15 s | OPTIONS keep-alive interval (§5.6) |
+| `:session_timer` | `enabled: false, expires: 1800, min_se: 90, refresher: :local` | RFC 4028 session timers (§5.8) |
 | `:unittest_transport` | — | mockup module, set by `test_helper.exs` only |
 
 ---
@@ -487,6 +488,37 @@ contradiction: the dialog stays for an answer that is still coming and ends as
 soon as there is nothing left to wait for. Without it, a dialog whose scenario
 had died collected in-dialog transactions until the fourth and answered 503 to
 every one after that, the caller's own BYE included (dev71, 2026-09-21).
+
+### 5.8 Session timers (RFC 4028)
+
+A session timer belongs to ONE dialog: two UAs agree on an interval and on which
+of them refreshes it. `SIP.DialogImpl.SessionTimer` is composed into
+`SIP.DialogImpl` like the keep-alive — pure functions over the dialog state, the
+timers in the dialog GenServer (`:session_expired`, `:session_refresh`). A B2BUA
+is a UA on each of its legs, so each leg negotiates its own timer with its own
+peer, and `SIP.Msg.Ops.strip_session_timer/1` keeps one leg's headers off the
+other (`prepare_forwarded_request/2`). Relayed as is, a caller's
+`refresher=uac` named the B2BUA as the callee's refresher, and the callee hung up
+a live call at the end of the interval (traffic of 2026-10-06).
+
+| Moment | What the dialog does |
+|---|---|
+| a request asks for less than `min_se` | `422` with our `Min-SE`, before the application (§8.1) |
+| any 2xx it sends to an INVITE or an UPDATE | states the negotiated `Session-Expires` (+ `Require: timer`) and re-arms (§9) |
+| any INVITE or UPDATE it sends | `Supported: timer`, `Session-Expires`, `Min-SE` — the timer in force, else our `expires` (§7.1, §7.4) |
+| the 2xx to it | the timer it states is in force; none turns it off (§7.2) |
+| a `422` to it | sent again once with the far end's `Min-SE`, under the old transaction's pid (`trans_alias`) |
+| we refresh, at interval/2 | an UPDATE without a body, or a re-INVITE re-offering `local_sdp` unchanged; dialog-internal |
+| the peer refreshes and does not | BYE with `Reason: SIP ;cause=408 ;text="Session Timer Expired"` at min(32 s, interval/3) before the end (§10) |
+| our refresh gets `408` / nothing / `481` | BYE / BYE / no BYE |
+
+Whichever way it ends, the application receives
+`{:dialog_terminated, pid, :session_expired}` (§5.5). The negotiation reads the
+headers only through `SIP.Msg.Ops` (`session_expires/1`, `min_se/1`,
+`allowed_methods/1`). Configuration: `config :elixip2, :session_timer` —
+`enabled` (false in the framework, true on a kelixip node through `config.toml`
+`[session_timer]`), `expires`, `min_se`, `refresher` (`:local` | `:remote`, who
+refreshes when the peer leaves the choice).
 
 ---
 

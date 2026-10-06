@@ -415,6 +415,10 @@ Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
 - `:useragent` — the User-Agent header value (`"Elixipp-1.6.3"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
+- `:session_timer` — RFC 4028 session timers, per dialog
+  (`SIP.DialogImpl.SessionTimer`, design in
+  `docs/design/DESIGN-SIPSTACK.md#58-session-timers-rfc-4028`). Off in the
+  framework; a kelixip node turns it on through `config.toml [session_timer]`
 
 ### Media server selection
 
