@@ -30,10 +30,12 @@ needed for that.
 
 **3 — A Service Building Block for presence-based Automatic Call Distribution.**
 
-The idea is asterisk's `app_queue` with a purely SIP interface. Queues are
+The idea is asterisk's `app_queue`. Queues are
 persistent objects, like the MCU module's conferences: they are created, edited
 and destroyed through `kelictl` commands, the REST API and a dedicated kelescope
 view.
+
+
 
 Subscribing to a queue would be done like this:
 
@@ -64,17 +66,19 @@ STATE queue_call do
 
     on_events do
         { :queued, queue_entry } -> goto session_progress
-        { :unknown_queue, queue_entry } -> ...
-        { :empty_queue, queue_entry } -> ...
+        { :queue_unknown } -> ...
+        { :queue_empty, queue_proc } -> ...
     end
 end
 
 STATE session_progress do
     reply_invite_with_sdp(183, [media: :tc, webrtc: :if_offered])
     on_events do
-        {:ACK, _req, _trans, _dlg} -> goto play_background
-        {:CANCEL, _req, _trans, _dlg} ->
-            ACD.cancel_queue_call("myqueue")
+        {:ACK, _req, _trans, dlg} -> goto play_background
+        {:CANCEL, req, _trans, dlg} ->
+            ACD.cancel_queue_call(sip_ctx.queue_proc)
+            Dialog.reply(dlg, req, 200)
+            goto cancelled
     end
 end
 
@@ -82,8 +86,49 @@ STATE session_progress do
 
     media_play("background.mp4")
     on_events do
-        {:ms_event, _res, :player_ended} -> stay()
+        { :ms_event, _res, :player_ended} -> loop()
+        { :queue_empty, queue_proc } -> ...
+
+        { :CANCEL, _req, _trans, _dlg } ->
+            ACD.cancel_queue_call(sip_ctx.queue_proc)
+            Dialog.reply(dlg, req, 200)
+            goto cancelled
+
+        { :queue_connected, queue_proc, agent_uri } ->
+            # When connected, we established a transcoding bridge to the agent 
+            goto stop_queue_prompt
+
+        # If the queue object was removed during the call
+        { :queue_removed } -> ....
+    end
+end
+
+STATE stop_queue_prompt do
+  media_stop()
+
+  on_events do
+    { :ms_event, _res, :player_ended} -> goto bridge
+  end
+end
+
+
+STATE bridge
+  Call.SBB.bridge()
+
+  on_events do
+    {:bridge, :caller_hung_up, _} ->
+      scenario_success("User hung up")
+
+    {:bridge, :callee_hung_up, _} ->
+      scenario_success("Agent hung up")
+    ...
+  end
+end
+
 ```
+
+
+
 
 The SBB places the call in the queue (held by a process of its own?). The next
 available agent — one who subscribed to the queue, is not handling a call, is
