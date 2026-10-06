@@ -80,6 +80,14 @@ defmodule SIP.Transac do
         # Add the topmost via header
         sipmsg = SIP.Msg.Ops.add_via(sipmsg, {local_ip_str, local_port, transport_str}, branch_id)
 
+        # The one place a request meets its transport: past the datagram bound,
+        # a MESSAGE on a connectionless one leaves deflated. After the Via,
+        # which counts.
+        sipmsg =
+          if apply(tp_module, :is_reliable, []),
+            do: sipmsg,
+            else: SIP.Msg.BodyCoding.fit_datagram(sipmsg)
+
         # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
         # The process created IS the transaction
         name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast}}

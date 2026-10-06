@@ -93,6 +93,19 @@ defmodule Kelix.Mod.SiloTest do
     )
   end
 
+  # A MESSAGE as the parser hands it over: a multipart body is a list of parts.
+  defp multipart_message(body, type) do
+    wire =
+      "MESSAGE sip:bob@unit.test SIP/2.0\r\n" <>
+        "Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bKsilo\r\n" <>
+        "From: \"Alice\" <sip:alice@unit.test>;tag=a1\r\nTo: <sip:bob@unit.test>\r\n" <>
+        "Call-ID: silo-multipart\r\nCSeq: 1 MESSAGE\r\nContent-Type: #{type}\r\n" <>
+        "Content-Length: #{byte_size(body)}\r\n\r\n" <> body
+
+    {:ok, req} = SIPMsg.parse(wire, fn _, _, _, _ -> :ok end)
+    req
+  end
+
   # A device of Bob's: its Mockup instance, its peer, and the Contact it
   # registers with. `from` changes the address, as a re-registration from a
   # new network does, keeping the instance ID.
@@ -252,6 +265,31 @@ defmodule Kelix.Mod.SiloTest do
 
       {:ok, date} = Map.fetch(req, "Date")
       assert date =~ ~r/^\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/
+    end
+
+    # chat-media-plan S1: a photo with its caption, sent as a bare multipart. The
+    # Silo used to keep the first part alone under the multipart type.
+    test "a multipart is stored whole and delivered whole, boundary and type kept", %{
+      store: store
+    } do
+      body =
+        "--b1\r\nContent-Type: application/vnd.gsma.rcs-ft-http+xml\r\n\r\n<file/>\r\n" <>
+          "--b1\r\nContent-Type: text/plain;charset=UTF-8\r\n\r\nla terrasse\r\n--b1--\r\n"
+
+      req = multipart_message(body, "multipart/mixed;boundary=b1")
+      assert SIP.Msg.Ops.body_string(req) == "<file/>"
+      assert {:stored, _} = Silo.store(ctx(), req)
+
+      {:ok, [m], 0} = Memory.claim(store, "unit.test", "bob", "t", now(), now() + 10)
+      assert m.body == body
+      assert m.content_type == "multipart/mixed;boundary=b1"
+      Memory.release(store, [m.id], "t")
+
+      assert Silo.flush(ctx(), register(device(:phone))) == :ok
+      [got] = received(:phone, 1)
+      assert got.contenttype == "multipart/mixed;boundary=b1"
+      assert SIPMsg.body_octets(got.body) == body
+      assert Enum.map(got.body, & &1.data) == ["<file/>", "la terrasse"]
     end
 
     test "served once per device: not again from a new address, but to a new device" do

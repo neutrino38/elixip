@@ -1,10 +1,12 @@
-# What `Content-Encoding` (RFC 3261 §20.12) does to a body, undone.
+# What `Content-Encoding` (RFC 3261 §20.12) does to a body: undone, and applied.
 # Read from the parser (SIPMsg.add_body/2); the header itself is read in exactly
 # one place, SIP.Msg.Ops.body_encoding/1.
 
 defmodule SIP.Msg.BodyCoding do
   @moduledoc """
-  Decode the `Content-Encoding` a peer applied to a message body.
+  Decode the `Content-Encoding` a peer applied to a message body, and apply
+  `deflate` where a body would not fit otherwise: a list NOTIFY (`encode/2`, on
+  the watcher's word) and a MESSAGE on a datagram transport (`fit_datagram/1`).
 
   ## Why a SIP body is compressed at all
 
@@ -47,6 +49,8 @@ defmodule SIP.Msg.BodyCoding do
   # clear in a 1806-octet datagram, which the path fragmented and the watcher's
   # side dropped. 800 octets are kept for the headers.
   @compress_above 500
+
+  require Logger
 
   # zlib window bits: the wrapper is chosen by the sign and the offset.
   @zlib 15
@@ -96,6 +100,95 @@ defmodule SIP.Msg.BodyCoding do
       coding != "deflate" -> :as_is
       byte_size(body) <= @compress_above -> :as_is
       true -> {:ok, :zlib.compress(body)}
+    end
+  end
+
+  # RFC 3261 §18.1.1: past this, a request does not belong on a datagram.
+  @datagram_bound 1300
+
+  # The mark of `send_in_clear/1`; skipped by the serializer.
+  @clear :send_in_clear
+
+  @doc """
+  A request about to leave on a datagram transport, its body deflated when the
+  request would not fit in one: `Content-Encoding: deflate` (RFC 3261 §20.12).
+
+  Only a MESSAGE. §18.1.1 answers an oversized request by moving it to TCP,
+  which a UDP-registered contact does not allow — it listens on the address it
+  registered, and nowhere else — and a MESSAGE grows past 1300 octets in
+  ordinary use: a file-transfer XML in a CPIM envelope with a caption beside it
+  (docs/design/chat-media-plan.md, S1). `deflate` because Linphone reads it and
+  this node already writes it for the presence NOTIFYs. An INVITE's SDP or a
+  NOTIFY is not touched here: the NOTIFY is compressed by the dialog, on the
+  watcher's word.
+
+  Left as it is: a request that fits, one whose body already carries a coding,
+  one marked `send_in_clear/1`, and one whose body deflates to no less. A
+  request still past the bound once compressed leaves anyway — the path may
+  fragment it, which is what happened to all of them before — and says so.
+  """
+  @spec fit_datagram(map()) :: map()
+  def fit_datagram(%{method: :MESSAGE} = req) do
+    cond do
+      Map.get(req, @clear) -> req
+      SIP.Msg.Ops.body_encoding(req) != nil -> req
+      byte_size(SIPMsg.serialize(req)) <= @datagram_bound -> req
+      true -> deflate_body(req)
+    end
+  end
+
+  def fit_datagram(msg), do: msg
+
+  @doc """
+  Mark `req` to leave with its body in clear, whatever its size: the request
+  sent again after a **415** whose `Accept-Encoding` does not list `deflate`
+  (RFC 3261 §21.4.13). A mark on the map, never a header on the wire.
+  """
+  @spec send_in_clear(map()) :: map()
+  def send_in_clear(req) when is_map(req), do: Map.put(req, @clear, true)
+
+  @doc """
+  Is `rsp` a refusal of the body's coding — a 415 naming the codings it reads,
+  `deflate` not among them? What a page compressed by `fit_datagram/1` is sent
+  again in clear on. A 415 without `Accept-Encoding` refuses the media type,
+  which no coding changes.
+  """
+  @spec coding_refused?(map()) :: boolean()
+  def coding_refused?(%{response: 415} = rsp) do
+    case SIP.Msg.Ops.accepted_encodings(rsp) do
+      [] -> false
+      codings -> "deflate" not in codings
+    end
+  end
+
+  def coding_refused?(_rsp), do: false
+
+  # The whole body — a multipart with its delimiters — is compressed as one: the
+  # Content-Type still names the subtype and the boundary. Stamped after the
+  # body, since `update_sip_msg/2` names a bare binary `application/sdp`.
+  defp deflate_body(req) do
+    clear = SIPMsg.body_octets(Map.get(req, :body))
+    compressed = :zlib.compress(clear)
+
+    if byte_size(compressed) < byte_size(clear) do
+      req =
+        req
+        |> SIP.Msg.Ops.update_sip_msg({:body, compressed})
+        |> Map.put(:contenttype, Map.get(req, :contenttype))
+        |> Map.put("Content-Encoding", "deflate")
+
+      size = byte_size(SIPMsg.serialize(req))
+
+      if size > @datagram_bound do
+        Logger.warning(
+          module: __MODULE__,
+          message: "MESSAGE of #{size} octets once deflated: sent past the datagram bound"
+        )
+      end
+
+      req
+    else
+      req
     end
   end
 

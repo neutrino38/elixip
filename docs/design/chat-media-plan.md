@@ -17,7 +17,9 @@ The contract between the parts is **§5 and §9 of the design**, plus the
 captures Part S produces in S0. Part T needs nothing else from Part S until
 its end-to-end check.
 
-**Status (2026-10-06): planned, nothing started.** What this plan says of
+**Status (2026-10-06): S1's code done** — the Silo fix, `deflate` on UDP,
+the relay keeping a multipart's Content-Type, and their tests; S1's scenario
+pair and provisioning page wait for S0. Nothing else started. What this plan says of
 Trix was read in its code at `ff2d8c5` (0.10.8) on 2026-10-06, and its
 ADRs 0008 to 0010: CPIM, IMDN and the SHA-256 digest already exist there,
 which shrinks Part T to what is specific to files.
@@ -168,12 +170,36 @@ message layer and the tests that pin them.
   the Elixir store later;
 - the provisioning page of S0 in its final form.
 
-**Files** `apps/elixip2/lib/framework/SIPMsgOps.ex`,
-the page sending path (`dsl/sbb/page.ex` or below
-it), `apps/kelix_modules/lib/kelix/mod/silo.ex` and `silo/delivery.ex`;
-`apps/kelix_modules/test/chat_media_relay_test.exs`,
+**Done on 2026-10-06**, as built:
+
+- `SIPMsg.body_octets/1`, public — the private helper the serializer and the
+  redaction already used, a multipart of one fixed — is what the Silo stores
+  and sizes; delivery needed no change, the stored type and octets go out
+  as a string;
+- `SIP.Msg.BodyCoding.fit_datagram/1`, called by `SIP.Transac` right after
+  the Via is added, for a connectionless transport only; `send_in_clear/1`
+  marks the map (the serializer skips the key) and `coding_refused?/1` reads
+  the 415; `SIP.Session.Page.Relay` sends again once, on a dialog of its own,
+  listening only to the current one;
+- found on the way: the relay re-spelled a multipart's Content-Type as
+  `multipart/mixed; boundary=…` — a `related` renamed `mixed` — because
+  `page_request/2` dropped the sender's type for a list body. It now keeps
+  it, and a bare multipart is relayed **byte for byte**;
+- **not fixed, noted**: the parser trims a part's data, so a part ending in
+  whitespace (a caption ending in a space, an XML ending in CRLF) loses it
+  through any relay. RFC 2046 gives the CRLF before a delimiter to the
+  delimiter, not more; a fix of the parser, outside this plan;
+- tests in `apps/elixip2/test/body_coding_datagram_test.exs`,
+  `sbb_page_test.exs` (relay byte for byte, compression on the wire, the
+  415 retry) and `apps/kelix_modules/test/silo_test.exs` (the multipart
+  through store and flush, failing before the fix).
+
+**Files** `apps/elixip2/lib/framework/SIPMsg.ex`, `SIPMsgBodyCoding.ex`,
+`SIPMsgTemplate.ex`, `SIPTransaction.ex`, `SIPSessionPage.ex`,
+`SIPDialogImpl.ex`; `apps/kelix_modules/lib/kelix/mod/silo.ex`; the tests
+above; still to come with S0:
 `apps/elixip2/scenarios/uac_file_message.exs`, `uas_file_message.exs`,
-`docs/kelixip/administration.md`; design §8.1 corrected.
+`docs/kelixip/administration.md`.
 
 **Done when** the tests are green, the scenario pair against the PHP
 server; a Linphone desktop, offline during the upload and the MESSAGE, gets

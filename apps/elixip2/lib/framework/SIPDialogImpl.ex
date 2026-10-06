@@ -837,7 +837,7 @@ defmodule SIP.DialogImpl do
   defp put_notify_body(req, sub, body, content_type) do
     req = Map.put(req, :contenttype, content_type)
 
-    case SIP.Msg.BodyCoding.encode(body_octets(body), encoding_of(sub)) do
+    case SIP.Msg.BodyCoding.encode(SIPMsg.body_octets(body), encoding_of(sub)) do
       {:ok, compressed} ->
         req
         |> SIP.Msg.Ops.update_sip_msg({:body, compressed})
@@ -853,9 +853,6 @@ defmodule SIP.DialogImpl do
         |> Map.put(:contenttype, content_type)
     end
   end
-
-  defp body_octets(parts) when is_list(parts), do: SIPMsg.multipart_body(parts)
-  defp body_octets(body) when is_binary(body), do: body
 
   defp encoding_of(%SIP.Subscription{body_encoding: coding}), do: coding
   defp encoding_of(_no_subscription), do: nil

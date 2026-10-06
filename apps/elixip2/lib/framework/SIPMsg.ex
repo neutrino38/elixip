@@ -1143,7 +1143,9 @@ defmodule SIPMsg do
       :reason,
       :ruri,
       :response_code,
-      :decoded_from
+      :decoded_from,
+      # SIP.Msg.BodyCoding.send_in_clear/1: a mark for the sender, not a header
+      :send_in_clear
     ]
 
     remaining_headers =
@@ -1162,34 +1164,31 @@ defmodule SIPMsg do
       serialize_headers(sipmsg, header_order2, false)
   end
 
-  defp serialize_body([]) do
-    "\r\n"
-  end
+  defp serialize_body(body), do: "\r\n" <> body_octets(body)
 
-  defp serialize_body(body) when is_binary(body) do
-    "\r\n" <> body
-  end
+  @doc """
+  The body of a message as it goes on the wire: everything `Content-Length`
+  counts, before any `Content-Encoding` is applied.
 
-  # A single part that carries a boundary is a MULTIPART of one, not a bare body:
-  # its Content-Type announces the boundary, and Content-Length was computed over
-  # the delimiters (SIP.Msg.Ops.update_sip_msg/2). Writing the payload alone here
-  # announced a length nobody could match and a boundary that was nowhere in the
-  # message. A list NOTIFY naming one buddy with no published state is exactly
-  # that message.
-  defp serialize_body([%{boundary: _} = body]) do
-    "\r\n" <> multipart_body([body])
-  end
+  `SIP.Msg.Ops.body_string/1` is the body *to read*, and of a multipart it
+  answers the first part; this is the body *to carry*. Whoever keeps a message
+  to send it again later — the Silo — keeps these octets, under the message's
+  own Content-Type, and the boundary that type names is the one they use.
 
-  defp serialize_body([body]) do
-    "\r\n" <> body.data
-  end
-
-  # Serialize a list of two or more sub bodies as a multipart/mixed body. The
-  # leading CRLF is the blank line separating the SIP headers from the body;
-  # multipart_body/1 returns the octets counted by Content-Length.
-  defp serialize_body(bodies) when is_list(bodies) do
-    "\r\n" <> multipart_body(bodies)
-  end
+  A single part that carries a boundary is a **multipart of one**, not a bare
+  body: its Content-Type announces the boundary, and Content-Length was
+  computed over the delimiters (`SIP.Msg.Ops.update_sip_msg/2`). Writing the
+  payload alone announced a length nobody could match and a boundary that was
+  nowhere in the message — a list NOTIFY naming one buddy with no published
+  state is exactly that message. No body at all is `""`.
+  """
+  @spec body_octets(binary() | [map()] | nil) :: binary()
+  def body_octets(body) when is_binary(body), do: body
+  def body_octets([]), do: ""
+  def body_octets([%{boundary: _} = part]), do: multipart_body([part])
+  def body_octets([%{data: data}]) when is_binary(data), do: data
+  def body_octets(parts) when is_list(parts), do: multipart_body(parts)
+  def body_octets(_none), do: ""
 
   @doc false
   # Build the octets of a multipart/mixed body (RFC 2046) from a list of sub-body
@@ -1371,11 +1370,6 @@ defmodule SIPMsg do
 
   defp placeholder(type, octets),
     do: "<content not recorded: #{type || "no type"}, #{octets} octets>"
-
-  defp body_octets(body) when is_binary(body), do: body
-  defp body_octets([%{data: data}]) when is_binary(data), do: data
-  defp body_octets(parts) when is_list(parts), do: multipart_body(parts)
-  defp body_octets(_none), do: ""
 
   defp safe_serialize(msg) do
     serialize(msg)

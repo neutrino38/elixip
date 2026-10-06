@@ -661,15 +661,14 @@ When the TLS client certificate option is used, the service trusts
 ### 8.1 The relay and the Silo: nothing new
 
 `SIP.MsgTemplate.page_request/2` keeps the `Content-Type` and the body; a
-multipart is carried as its parsed parts and re-serialized, its
-Content-Type and boundary recomputed (`SIPMsgTemplate.ex:97-102`) —
-equivalent, not byte-identical. A single-part body, `message/cpim`
-included, is stored by the Silo verbatim; a **bare multipart was not**:
-the Silo stored the first part alone under the multipart type, which
-chat-media-plan S1 fixes. `Content-Encoding` is undone at parsing; the body
+multipart is carried as its parsed parts under the sender's Content-Type and
+boundary, byte for byte — except that the parser trims trailing whitespace
+from each part's data. The Silo stores the body as it was on the wire
+(`SIPMsg.body_octets/1`), a multipart whole; it kept only the first part
+before chat-media-plan S1. `Content-Encoding` is undone at parsing; the body
 leaves in clear with an unchanged `Content-Type`, except a page that would
-pass 1300 octets on UDP, which leaves with `Content-Encoding: deflate`
-(chat-media-plan S1). `Priority` and
+pass 1300 octets on UDP, which leaves with `Content-Encoding: deflate`, and
+in clear once more after a 415 refusing it (chat-media-plan S1). `Priority` and
 `Expires: 0` of IMDN and `isComposing` are outside `@page_headers`;
 `Priority` is harmless, `Expires: 0` is already read as zero retention and
 `:is_composing` is never stored. An IMDN for an absent recipient **is**
