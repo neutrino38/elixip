@@ -8,6 +8,7 @@ defmodule SIP.DialogImpl do
   require SIP.Uri
   import SIP.Msg.Ops
   alias SIP.DialogImpl.KeepAlive
+  alias SIP.DialogImpl.SessionTimer
 
   # The lifetime a SUBSCRIBE dialog is bounded by when the event package that
   # would answer the question is not one this node knows. It is a bound on a
@@ -86,6 +87,19 @@ defmodule SIP.DialogImpl do
     # application's mailbox (see SIP.Session.RegisterUAC.process_register_reply/3).
     keepalive_owner: :dialog,
     missedkeepalive: 0,
+    # The RFC 4028 session timer in force on this call, `%SIP.DialogImpl.SessionTimer{}`
+    # once a 2xx to an INVITE or an UPDATE negotiated one, nil otherwise.
+    session_timer: nil,
+    # The last session description we sent on this call — what a re-INVITE
+    # refresh re-offers, unchanged, to a far end that takes no UPDATE.
+    local_sdp: nil,
+    # Client transactions started IN PLACE of another — the request sent again
+    # after a 422 (RFC 4028 §7.3) — mapped to the transaction the application
+    # knows: `new_pid => pid_the_app_holds`. The application correlates on
+    # transaction pids (a B2BUA files every relayed request under one), so the
+    # retry answers under the old name and an ACK or a CANCEL of the old name
+    # reaches the new transaction.
+    trans_alias: %{},
     # The subscription this dialog carries (RFC 6665), once one has been
     # negotiated — `SIP.Dialog.set_subscription/2`. Everything below it is what
     # the dialog owes that subscription and nothing else can: its deadline, its
@@ -311,7 +325,9 @@ defmodule SIP.DialogImpl do
   def send_in_dialog_request(state = %SIP.DialogImpl{}, req) do
     if req.method in state.allows do
       if map_size(state.transactions) < 4 do
+        req = SessionTimer.decorate_request(state, req)
         {state, req} = fix_outbound_request(state, req)
+        state = SessionTimer.note_local_sdp(state, offer_sdp(req))
 
         # Copy transport parameters from the request that opened the dialog into the RURI to reuse them
         o_ruri = state.msg.ruri
@@ -1226,55 +1242,20 @@ defmodule SIP.DialogImpl do
     # every other one, with the request it carries.
     state = add_transaction(state, pid, req, uas_module(req)) |> SIP.Dialog.Events.dispatch()
 
-    # Dispatch the initial request to the upper layer. `pid` is the server
-    # transaction that created this dialog; it is forwarded so the processing
-    # module (e.g. a registrar) knows which transaction to reply on.
-    case SIP.Session.ConfigRegistry.dispatch(self(), req, pid) do
-      {:accept, app_id} ->
-        Logger.debug(
-          dialogpid: "#{inspect(self())}",
-          module: __MODULE__,
-          message: "Bound dialog to app process #{inspect(app_id)}"
+    # A session interval below our floor is refused before any application is
+    # bound (RFC 4028 §8.1): the caller retries at once with our Min-SE, and an
+    # application dispatched first would have a call to set up for nothing.
+    case SessionTimer.too_small(req) do
+      nil ->
+        dispatch_inbound(state, req, pid)
+
+      min_se ->
+        reject_dialog(
+          state,
+          422,
+          "Session Interval Too Small",
+          SessionTimer.too_small_fields(min_se)
         )
-
-        # Send the message to the newly created app layer
-        send(app_id, wrap_tag(state.tag, {req.method, req, pid, self()}))
-
-        # Arm the dialog's lifetime from the request that CREATED it, exactly as
-        # `handle_cast({:sipmsg, …})` does for every later one. Only that in-dialog
-        # path used to arm it, so a REGISTER accepted on the FIRST request — the
-        # normal case for a client that pre-authenticates with a cached nonce, hence
-        # answered 200 with no 401 in between — produced a dialog with no expiration
-        # timer at all: nothing would ever expire it. Over a connected transport it
-        # lived until the connection dropped, over UDP forever, and the registrar
-        # session riding it stayed in `kelictl monitor` beside the live one.
-        #
-        # Observed on 2026-08-11 with a Linphone re-enabling its account: it
-        # re-registers its previous Call-ID (pre-authenticated → 200 at once, no
-        # timer) *and* opens a new one (401 → in-dialog 200 → timer armed), leaving
-        # two registrar sessions for one binding, the first of them immortal.
-        #
-        # `arm_expiration_timer/2` is a no-op for anything but a REGISTER, so an
-        # inbound INVITE dialog is unaffected.
-        {:ok, arm_expiration_timer(state, req) |> bind_app(app_id)}
-
-      # Session has not been created. Abort dialog and propagate the requested
-      # SIP status. The stop reason is the 5-tuple
-      # {:reject, code, reason, fields, totag} — a VALID GenServer.init/1 stop
-      # return — which SIP.Dialog.start_dialog and process_incoming_request map
-      # back to a SIP response on the server transaction (registrar quota 503,
-      # UAS domain control 604, …). The totag (generated above) is embedded
-      # because a reply with code > 100 needs one.
-      {:reject, code, reason} ->
-        reject_dialog(state, code, reason, [])
-
-      # A refusal that has to carry a header to be actionable — the `Allow-Events`
-      # of a 489 (RFC 6665 §4.4.7), as mandatory to a watcher as `Min-Expires` is
-      # on a 423: without it the peer is told "not that package" and never which
-      # ones it could ask for. The fields travel with the code rather than being
-      # composed here, because what a domain serves is the application's to know.
-      {:reject, code, reason, fields} when is_list(fields) ->
-        reject_dialog(state, code, reason, fields)
     end
   end
 
@@ -1306,7 +1287,9 @@ defmodule SIP.DialogImpl do
 
     state = bind_app(state, pid) |> SIP.Dialog.Events.dispatch()
 
+    req = SessionTimer.decorate_request(state, req)
     {state, req} = fix_outbound_request(state, req, true)
+    state = SessionTimer.note_local_sdp(state, offer_sdp(req))
 
     try do
       # In case of an outbound dialog, start a, UAC transaction
@@ -1360,6 +1343,59 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  defp dispatch_inbound(state, req, pid) do
+    # Dispatch the initial request to the upper layer. `pid` is the server
+    # transaction that created this dialog; it is forwarded so the processing
+    # module (e.g. a registrar) knows which transaction to reply on.
+    case SIP.Session.ConfigRegistry.dispatch(self(), req, pid) do
+      {:accept, app_id} ->
+        Logger.debug(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message: "Bound dialog to app process #{inspect(app_id)}"
+        )
+
+        # Send the message to the newly created app layer
+        send(app_id, wrap_tag(state.tag, {req.method, req, pid, self()}))
+
+        # Arm the dialog's lifetime from the request that CREATED it, exactly as
+        # `handle_cast({:sipmsg, …})` does for every later one. Only that in-dialog
+        # path used to arm it, so a REGISTER accepted on the FIRST request — the
+        # normal case for a client that pre-authenticates with a cached nonce, hence
+        # answered 200 with no 401 in between — produced a dialog with no expiration
+        # timer at all: nothing would ever expire it. Over a connected transport it
+        # lived until the connection dropped, over UDP forever, and the registrar
+        # session riding it stayed in `kelictl monitor` beside the live one.
+        #
+        # Observed on 2026-08-11 with a Linphone re-enabling its account: it
+        # re-registers its previous Call-ID (pre-authenticated → 200 at once, no
+        # timer) *and* opens a new one (401 → in-dialog 200 → timer armed), leaving
+        # two registrar sessions for one binding, the first of them immortal.
+        #
+        # `arm_expiration_timer/2` is a no-op for anything but a REGISTER, so an
+        # inbound INVITE dialog is unaffected.
+        {:ok, arm_expiration_timer(state, req) |> bind_app(app_id)}
+
+      # Session has not been created. Abort dialog and propagate the requested
+      # SIP status. The stop reason is the 5-tuple
+      # {:reject, code, reason, fields, totag} — a VALID GenServer.init/1 stop
+      # return — which SIP.Dialog.start_dialog and process_incoming_request map
+      # back to a SIP response on the server transaction (registrar quota 503,
+      # UAS domain control 604, …). The totag (generated above) is embedded
+      # because a reply with code > 100 needs one.
+      {:reject, code, reason} ->
+        reject_dialog(state, code, reason, [])
+
+      # A refusal that has to carry a header to be actionable — the `Allow-Events`
+      # of a 489 (RFC 6665 §4.4.7), as mandatory to a watcher as `Min-Expires` is
+      # on a 423: without it the peer is told "not that package" and never which
+      # ones it could ask for. The fields travel with the code rather than being
+      # composed here, because what a domain serves is the application's to know.
+      {:reject, code, reason, fields} when is_list(fields) ->
+        reject_dialog(state, code, reason, fields)
+    end
+  end
+
   defp reject_dialog(state, code, reason, fields) do
     Logger.info(
       dialogpid: "#{inspect(self())}",
@@ -1386,6 +1422,11 @@ defmodule SIP.DialogImpl do
         {:shutdown, r} -> r
         r -> r
       end
+
+    # A call ended by its session timer stops like any other, on the answer to
+    # the BYE that ended it; what the application is told is why.
+    reason =
+      if reason == :normal and SessionTimer.expired?(state), do: :session_expired, else: reason
 
     stop_client_transactions(state)
 
@@ -1452,6 +1493,7 @@ defmodule SIP.DialogImpl do
     %SIP.DialogImpl{
       state
       | transactions: Map.delete(state.transactions, uas_t),
+        trans_alias: Map.delete(state.trans_alias, uas_t),
         ist_awaiting_ack: ist
     }
   end
@@ -1618,6 +1660,10 @@ defmodule SIP.DialogImpl do
   end
 
   def handle_call({:replyreq, req, resp_code, reason, upd_field}, _from, state) do
+    # Whoever composed this 2xx — a scenario, a B2BUA relaying the far end's — the
+    # session timer of THIS leg is the dialog's to state (RFC 4028 §9).
+    {upd_field, negotiated} = SessionTimer.decorate_reply(state, req, resp_code, upd_field)
+
     {ret, uas_t} =
       SIP.Transac.reply_req(
         req,
@@ -1627,6 +1673,11 @@ defmodule SIP.DialogImpl do
         state.totag,
         Map.keys(state.transactions)
       )
+
+    state =
+      if ret == :ok,
+        do: state |> SessionTimer.arm(negotiated) |> SessionTimer.note_reply_sdp(upd_field),
+        else: state
 
     state =
       case resp_code do
@@ -1756,6 +1807,8 @@ defmodule SIP.DialogImpl do
   end
 
   def handle_call({:cancel, transact_pid}, _from, state) do
+    transact_pid = real_tid(state, transact_pid)
+
     if Map.has_key?(state.transactions, transact_pid) do
       reply = SIP.Transac.cancel_uac_transaction(transact_pid)
       {:reply, reply, state}
@@ -1783,6 +1836,8 @@ defmodule SIP.DialogImpl do
   # transaction. It must simply not read as a failure (SIP.Session.B2bua
   # `ack_lasterr/1`).
   def handle_call({:ack, transact_pid}, _from, state) do
+    transact_pid = real_tid(state, transact_pid)
+
     if Map.has_key?(state.transactions, transact_pid) do
       reply = SIP.Transac.ack_uac_transaction(transact_pid)
       {:reply, reply, close_transaction(state, transact_pid)}
@@ -1947,6 +2002,16 @@ defmodule SIP.DialogImpl do
   # with a 500 Out of order. Every notifier in the field numbers its first NOTIFY
   # CSeq 1, so that was the whole subscription, answered 500 before the scenario
   # ever saw it.
+  # A refresh asking for less than our floor is refused like the INVITE that
+  # created the call would have been (RFC 4028 §8.1); the session goes on under
+  # the interval already in force.
+  defp check_session_interval(state, msg) do
+    case SessionTimer.too_small(msg) do
+      nil -> {:ok, state}
+      min_se -> {{:interval_too_small, min_se}, state}
+    end
+  end
+
   defp check_seqno(state = %SIP.DialogImpl{cseqin: nil}, msg) do
     [seqno, _cmethod] = msg.cseq
     {:ok, %SIP.DialogImpl{state | cseqin: seqno}}
@@ -2166,6 +2231,7 @@ defmodule SIP.DialogImpl do
     with {:ok, state} <- on_new_transaction(state, msg, transact_pid),
          {:ok, state} <- check_allows(state, msg),
          {:ok, state} <- check_seqno(state, msg),
+         {:ok, state} <- check_session_interval(state, msg),
          {:ok, state} <- send_req_to_app(state, msg, transact_pid),
          {:ok, state} <- check_closing_transaction(state, msg, transact_pid) do
       {:noreply, arm_expiration_timer(state, msg) |> follow_flow(msg)}
@@ -2176,6 +2242,17 @@ defmodule SIP.DialogImpl do
 
       {:out_of_order, state} ->
         SIP.Transac.reply(transact_pid, 500, "Out of order", [], state.totag)
+        {:noreply, state}
+
+      {{:interval_too_small, min_se}, state} ->
+        SIP.Transac.reply(
+          transact_pid,
+          422,
+          "Session Interval Too Small",
+          SessionTimer.too_small_fields(min_se),
+          state.totag
+        )
+
         {:noreply, state}
 
       {:toomanytransactions, state} ->
@@ -2242,7 +2319,7 @@ defmodule SIP.DialogImpl do
           # is alive, so reset the missed-keepalive counter and say nothing.
           %SIP.DialogImpl{state | missedkeepalive: 0}
         else
-          send_to_app(state, {out.response, out, tid, self()})
+          send_to_app(state, {out.response, out, app_tid(state, tid), self()})
           state
         end
     end
@@ -2702,6 +2779,7 @@ defmodule SIP.DialogImpl do
     # request that would have created it.
     if client_transaction?(module) do
       handle_UAS_response(state, timeout_response(req), transact_pid)
+      |> SessionTimer.on_refresh_outcome(timeout_response(req), transact_pid)
       |> end_on_unregister(req)
     else
       end_on_unanswered_initial(state, req)
@@ -2788,6 +2866,22 @@ defmodule SIP.DialogImpl do
   # Handle option keepalive timers: send an OPTIONS message or tear the dialog
   # down when the peer stopped answering (see SIP.DialogImpl.KeepAlive).
   @impl true
+  def handle_info({:timeout, tref, :session_expired}, state) do
+    SessionTimer.on_expired(state, tref)
+  end
+
+  def handle_info({:timeout, tref, :session_refresh}, state) do
+    SessionTimer.on_refresh_due(state, tref)
+  end
+
+  def handle_info({:session_refresh, :now}, state) do
+    SessionTimer.on_refresh_due(state, :now)
+  end
+
+  def handle_info(:session_refresh_failed, state) do
+    SessionTimer.on_refresh_failed(state)
+  end
+
   def handle_info({:timeout, _tref, :optionskeepalive}, state) do
     KeepAlive.on_timeout(state)
   end
@@ -2801,83 +2895,9 @@ defmodule SIP.DialogImpl do
 
   # Invoked when a dialog receives a SIP response from an UAC transaction
   def handle_info({:response, rsp, transact_pid}, state) when is_resp(rsp) do
-    state =
-      if Map.has_key?(state.transactions, transact_pid) do
-        {_rc, totag} = SIP.Uri.get_uri_param(rsp.to, "tag")
-
-        # What the application is owed, decided in one place (`deliver_response/3`):
-        # a keepalive answer is dialog-internal, and so is everything a fork
-        # withholds or absorbs. The transaction is still cleaned up below either
-        # way.
-        state = deliver_response(state, rsp, transact_pid)
-
-        # Only dialog-establishing responses set the dialog's remote tag:
-        # provisional (1xx with a to-tag) for early dialogs and 2xx for confirmed
-        # ones. Non-2xx final responses — notably 401/407 auth challenges — do not
-        # create a dialog (RFC 3261 §12.1), so their To-tag must be ignored.
-        # Otherwise the re-sent authenticated request would carry a bogus to-tag
-        # and be rejected by the proxy as an orphan in-dialog request.
-        # Which response is allowed to give the dialog its remote tag.
-        #
-        # Unforked: provisional (a 1xx with a tag — an early dialog) or 2xx, as
-        # before. A non-2xx final creates no dialog (RFC 3261 §12.1), so its tag
-        # must be ignored — otherwise a re-sent authenticated request carries a
-        # bogus to-tag and the proxy rejects it as an orphan.
-        #
-        # Forked: only a 2xx. Every branch answers with a to-tag of its own, and
-        # the single slot latches the FIRST one it is offered — so a 180 from a
-        # branch that goes on to fail would take the tag the winning 2xx needs,
-        # and every later in-dialog request would name a callee that never
-        # answered.
-        state =
-          if adopts_totag?(state, rsp) do
-            add_totag(state, totag)
-          else
-            state
-          end
-
-        if rsp.response >= 200 do
-          new_state = handle_UAS_response(state, rsp, transact_pid)
-
-          # Keep an INVITE client transaction alive after a 2xx so the application
-          # can still ACK it (RFC 3261 §13.2.2.4); it is removed once the ACK is
-          # sent. Every other final response terminates the transaction now.
-          if rsp.response < 300 and match?([_, :INVITE], rsp.cseq) do
-            answer_nobody_awaits(new_state, transact_pid)
-          else
-            close_transaction(new_state, transact_pid)
-          end
-        else
-          # Provisional responses. RFC 4235 §3.7.1: a 1xx with a remote tag is an
-          # early dialog, one without is merely proceeding; a 100 says nothing.
-          cond do
-            rsp.response == 100 -> state
-            state.totag != nil -> SIP.Dialog.Events.transition(state, :early)
-            true -> SIP.Dialog.Events.transition(state, :proceeding)
-          end
-        end
-      else
-        Logger.warning(
-          dialogpid: "#{inspect(self())}",
-          module: __MODULE__,
-          message:
-            "SIP response #{rsp.response} from a transaction #{inspect(transact_pid)} " <>
-              "that is not attached to the dialog."
-        )
-
-        state
-      end
-
-    if state.state in @live_states do
-      {:noreply, state}
-    else
-      Logger.info(
-        dialogpid: "#{inspect(self())}",
-        module: __MODULE__,
-        message: "Terminating Dialog. Final state: #{state.state}"
-      )
-
-      {:stop, :normal, state}
+    case retry_interval_too_small(state, rsp, transact_pid) do
+      {:retried, state} -> {:noreply, state}
+      :none -> handle_response(state, rsp, transact_pid)
     end
   end
 
@@ -3167,6 +3187,199 @@ defmodule SIP.DialogImpl do
     )
 
     {:noreply, state}
+  end
+
+  # ── 422 Session Interval Too Small, on a request we sent (RFC 4028 §7.3) ─────
+  #
+  # The far end wants a longer interval than we asked for: the request goes again,
+  # asking for its Min-SE, and the 422 is nobody else's business. Handled here and
+  # not by the application because the timer is the dialog's — a B2BUA relaying
+  # this 422 would hand the CALLER a floor that belongs to the callee's leg.
+  #
+  # The retry is a new transaction, so it is filed under the old one's pid
+  # (`trans_alias`): branches, the closing BYE and internal requests follow it.
+  defp retry_interval_too_small(state, %{response: 422} = rsp, tid) do
+    with %{req: sent} <- Map.get(state.transactions, tid),
+         {:ok, req} <- SessionTimer.retry_request(sent, rsp) do
+      # The Via of the refused attempt goes with it; the new transaction stamps
+      # its own. The CSeq moves on: same request, asked differently, is a new one
+      # (RFC 3261 §8.1.3.5 does the same after a 401).
+      req =
+        req
+        |> Map.delete(:via)
+        |> Map.put(:cseq, [state.cseq, req.method])
+
+      initial? = state.state in [:initial, :uac_challenged] and req.method == :INVITE
+
+      state = %SIP.DialogImpl{
+        state
+        | cseq: state.cseq + 1,
+          msg: if(initial?, do: req, else: state.msg)
+      }
+
+      case SIP.Transac.start_uac_transaction(req, state.dialogtimeout) do
+        {:ok, new_tid, modmsg} ->
+          Logger.info(
+            dialogpid: "#{inspect(self())}",
+            module: __MODULE__,
+            message:
+              "#{req.method} refused 422 (Min-SE #{SIP.Msg.Ops.min_se(rsp)}): sent again " <>
+                "with the interval the far end asks for"
+          )
+
+          state =
+            state
+            |> add_transaction(new_tid, modmsg, uac_module(modmsg))
+            |> replace_transaction(tid, new_tid)
+            |> close_transaction(tid)
+
+          {:retried, %SIP.DialogImpl{state | msg: if(initial?, do: modmsg, else: state.msg)}}
+
+        other ->
+          Logger.warning(
+            dialogpid: "#{inspect(self())}",
+            module: __MODULE__,
+            message: "Could not send the #{req.method} again after a 422: #{inspect(other)}"
+          )
+
+          :none
+      end
+    else
+      _ -> :none
+    end
+  end
+
+  defp retry_interval_too_small(_state, _rsp, _tid), do: :none
+
+  # Everything the dialog knows a transaction by, moved to the one replacing it.
+  # The alias is set before close_transaction/2 clears the old pid's own entry.
+  defp replace_transaction(state, old, new) do
+    move = fn
+      map, key when is_map_key(map, key) -> map |> Map.put(new, map[key]) |> Map.delete(key)
+      map, _key -> map
+    end
+
+    %SIP.DialogImpl{
+      state
+      | trans_alias: Map.put(state.trans_alias, new, app_tid(state, old)),
+        branches: move.(state.branches, old),
+        internal_trans:
+          if(MapSet.member?(state.internal_trans, old),
+            do: state.internal_trans |> MapSet.delete(old) |> MapSet.put(new),
+            else: state.internal_trans
+          ),
+        closing_transaction:
+          if(state.closing_transaction == old, do: new, else: state.closing_transaction)
+    }
+    |> SessionTimer.move_refresh(old, new)
+  end
+
+  # The description an INVITE or an UPDATE offers — a MESSAGE body is not one.
+  defp offer_sdp(%{method: method} = req) when method in [:INVITE, :UPDATE],
+    do: SIP.Msg.Ops.sdp_body(req)
+
+  defp offer_sdp(_req), do: nil
+
+  # The pid the application knows a transaction by, and back.
+  defp app_tid(state, tid), do: Map.get(state.trans_alias, tid, tid)
+
+  defp real_tid(state, tid) do
+    Enum.find_value(state.trans_alias, tid, fn {real, known} -> if known == tid, do: real end)
+  end
+
+  defp handle_response(state, rsp, transact_pid) do
+    state =
+      if Map.has_key?(state.transactions, transact_pid) do
+        {_rc, totag} = SIP.Uri.get_uri_param(rsp.to, "tag")
+
+        # What the application is owed, decided in one place (`deliver_response/3`):
+        # a keepalive answer is dialog-internal, and so is everything a fork
+        # withholds or absorbs. The transaction is still cleaned up below either
+        # way.
+        state = deliver_response(state, rsp, transact_pid)
+
+        # Only dialog-establishing responses set the dialog's remote tag:
+        # provisional (1xx with a to-tag) for early dialogs and 2xx for confirmed
+        # ones. Non-2xx final responses — notably 401/407 auth challenges — do not
+        # create a dialog (RFC 3261 §12.1), so their To-tag must be ignored.
+        # Otherwise the re-sent authenticated request would carry a bogus to-tag
+        # and be rejected by the proxy as an orphan in-dialog request.
+        # Which response is allowed to give the dialog its remote tag.
+        #
+        # Unforked: provisional (a 1xx with a tag — an early dialog) or 2xx, as
+        # before. A non-2xx final creates no dialog (RFC 3261 §12.1), so its tag
+        # must be ignored — otherwise a re-sent authenticated request carries a
+        # bogus to-tag and the proxy rejects it as an orphan.
+        #
+        # Forked: only a 2xx. Every branch answers with a to-tag of its own, and
+        # the single slot latches the FIRST one it is offered — so a 180 from a
+        # branch that goes on to fail would take the tag the winning 2xx needs,
+        # and every later in-dialog request would name a callee that never
+        # answered.
+        state =
+          if adopts_totag?(state, rsp) do
+            add_totag(state, totag)
+          else
+            state
+          end
+
+        if rsp.response >= 200 do
+          # The refresh outcome is read BEFORE the timer the 2xx states: arming
+          # that one starts a fresh timer, with no refresh in flight.
+          new_state =
+            handle_UAS_response(state, rsp, transact_pid)
+            |> SessionTimer.on_refresh_outcome(rsp, transact_pid)
+            |> SessionTimer.on_uac_response(rsp)
+
+          # Keep an INVITE client transaction alive after a 2xx so the application
+          # can still ACK it (RFC 3261 §13.2.2.4); it is removed once the ACK is
+          # sent. Every other final response terminates the transaction now.
+          cond do
+            # A re-INVITE we sent ourselves — a session refresh — is acknowledged
+            # here: no application is waiting to ACK what it never sent.
+            rsp.response < 300 and match?([_, :INVITE], rsp.cseq) and
+                MapSet.member?(new_state.internal_trans, transact_pid) ->
+              SIP.Transac.ack_uac_transaction(transact_pid)
+              close_transaction(new_state, transact_pid)
+
+            rsp.response < 300 and match?([_, :INVITE], rsp.cseq) ->
+              answer_nobody_awaits(new_state, transact_pid)
+
+            true ->
+              close_transaction(new_state, transact_pid)
+          end
+        else
+          # Provisional responses. RFC 4235 §3.7.1: a 1xx with a remote tag is an
+          # early dialog, one without is merely proceeding; a 100 says nothing.
+          cond do
+            rsp.response == 100 -> state
+            state.totag != nil -> SIP.Dialog.Events.transition(state, :early)
+            true -> SIP.Dialog.Events.transition(state, :proceeding)
+          end
+        end
+      else
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message:
+            "SIP response #{rsp.response} from a transaction #{inspect(transact_pid)} " <>
+              "that is not attached to the dialog."
+        )
+
+        state
+      end
+
+    if state.state in @live_states do
+      {:noreply, state}
+    else
+      Logger.info(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message: "Terminating Dialog. Final state: #{state.state}"
+      )
+
+      {:stop, :normal, state}
+    end
   end
 
   # Only a notifier has a final NOTIFY to send (`send_final_notify/2` is guarded

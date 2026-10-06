@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.6.2
-Release:        1%{?dist}
+Version:        1.6.3
+Release:        2%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,17 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Tue Oct 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-2
+- Released together with kelixip 1.6.3-2.
+- RFC 4028 session timers in the dialog layer, off by default
+  (config :elixip2, :session_timer): scenarios send and answer what they did
+  before unless they enable them.
+
+* Sat Oct 03 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-1
+- Released together with kelixip 1.6.3-1.
+- PIDF: extension elements of <rpid:activities> are read and written as marks.
+- User-Agent is now Elixipp-1.6.3.
+
 * Wed Sep 30 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.2-1
 - Released together with kelixip 1.6.2-1.
 - UAC.Page and UAS.Page: built-in page-mode MESSAGE scenarios, driven by

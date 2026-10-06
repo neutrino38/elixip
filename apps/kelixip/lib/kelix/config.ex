@@ -56,6 +56,12 @@ defmodule Kelix.Config do
           mediaserver_video_bitrate: pos_integer,
           mediaserver_bitrate_feedback: [:remb | :tmmbr],
           mediaserver_transport_cc: boolean,
+          session_timer: %{
+            enabled: boolean,
+            expires: pos_integer,
+            min_se: pos_integer,
+            refresher: :local | :remote
+          },
           modules: map,
           control_api: map,
           metrics: map,
@@ -68,6 +74,16 @@ defmodule Kelix.Config do
         }
 
   @default_max_message_size 64_000
+  # RFC 4028: the interval asked for or accepted (its §4 recommendation), and the
+  # floor below which no interval may go (§5) — what Min-SE defaults to.
+  @default_session_expires 1800
+  @rfc4028_min_se 90
+  @default_session_timer %{
+    enabled: true,
+    expires: @default_session_expires,
+    min_se: @rfc4028_min_se,
+    refresher: :local
+  }
   @default_video_bitrate_kbps 1500
   # The bitrate-feedback dialects the answer may confirm, as `[mediaserver]
   # bitrate_feedback` names them: "none", "tmmbr", "goog-remb" or both, in any
@@ -78,7 +94,7 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.6.2",
+            user_agent: "Kelixip/1.6.3",
             max_calls: nil,
             # The largest inbound SIP message this node accepts, in bytes. Past it a
             # request is answered 513 instead of being parsed. Read by the framework
@@ -116,6 +132,14 @@ defmodule Kelix.Config do
             # negotiates the extension gets nothing back for its own outgoing stream
             # and falls back on RR losses plus the REMB/TMMBR we keep sending.
             mediaserver_transport_cc: false,
+            # `[session_timer]`: RFC 4028 session timers, negotiated by every call
+            # leg with its own peer (SIP.DialogImpl.SessionTimer). ON on a server,
+            # unlike the framework's default: a node relaying calls is the one
+            # place a dead peer would otherwise hold a call — and its media — open
+            # until somebody notices. `refresher: :local` is this node refreshing
+            # each leg itself whenever the peer leaves it the choice, rather than
+            # depending on a browser's timers.
+            session_timer: @default_session_timer,
             modules: %{},
             control_api: %{},
             metrics: %{},
@@ -231,6 +255,10 @@ defmodule Kelix.Config do
     # `[server] max_message_size` reaches the parser here: SIPMsg.max_message_size/0
     # reads it, and the transports refuse anything past it with a 513.
     Application.put_env(:elixip2, :max_message_size, cfg.max_message_size)
+
+    # `[session_timer]` reaches every call dialog here: SIP.DialogImpl.SessionTimer
+    # reads it each time a timer is negotiated.
+    Application.put_env(:elixip2, :session_timer, Map.to_list(cfg.session_timer))
     # How the framework asks for a media server carrying a call's addressing
     # profiles. It cannot reach Kelix.MediaPool — a kelixip surface — so the
     # selection is declared here and called back into.
@@ -361,7 +389,7 @@ defmodule Kelix.Config do
          :ok <-
            reject_keys(
              map,
-             ~w(server log listen mediaserver module control_api metrics tls debug database),
+             ~w(server log listen mediaserver module control_api metrics tls debug database session_timer),
              "config"
            ),
          {:ok, server} <- parse_server(Map.get(map, "server", %{})),
@@ -372,6 +400,7 @@ defmodule Kelix.Config do
          {:ok, tls} <- parse_tls(Map.get(map, "tls")),
          {:ok, debug} <- parse_debug(Map.get(map, "debug", %{})),
          {:ok, database} <- parse_database(Map.get(map, "database", %{})),
+         {:ok, session_timer} <- parse_session_timer(Map.get(map, "session_timer")),
          {:ok, mediaserver} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
@@ -387,6 +416,7 @@ defmodule Kelix.Config do
          mediaserver_video_bitrate: mediaserver.video_bitrate,
          mediaserver_bitrate_feedback: mediaserver.bitrate_feedback,
          mediaserver_transport_cc: mediaserver.transport_cc,
+         session_timer: session_timer,
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
          metrics: metrics,
@@ -803,6 +833,46 @@ defmodule Kelix.Config do
       _ -> {:error, "[[listen]]: `cert`/`key` only apply to tls/wss listeners"}
     end
   end
+
+  # ── [session_timer] (RFC 4028) ───────────────────────────────────────────────
+
+  # Every key optional. The two bounds RFC 4028 sets are checked here, at boot,
+  # rather than discovered on the first call: a Min-SE below 90 is one no peer has
+  # to accept (§5), and an interval below our own floor is one we would refuse
+  # ourselves with a 422.
+  defp parse_session_timer(nil), do: {:ok, @default_session_timer}
+
+  defp parse_session_timer(%{} = t) do
+    d = @default_session_timer
+
+    with :ok <- reject_keys(t, ~w(enabled expires min_se refresher), "[session_timer]"),
+         {:ok, enabled} <- opt_bool(t, "enabled", d.enabled, "[session_timer]"),
+         {:ok, expires} <- opt_pos_integer(t, "expires", "[session_timer]"),
+         {:ok, min_se} <- opt_pos_integer(t, "min_se", "[session_timer]"),
+         {:ok, refresher} <-
+           opt_enum(t, "refresher", ~w(local remote), "local", "[session_timer]"),
+         expires = expires || d.expires,
+         min_se = min_se || d.min_se,
+         :ok <- check_session_bounds(expires, min_se) do
+      {:ok,
+       %{
+         enabled: enabled,
+         expires: expires,
+         min_se: min_se,
+         refresher: String.to_existing_atom(refresher)
+       }}
+    end
+  end
+
+  defp parse_session_timer(_), do: {:error, "[session_timer] must be a table"}
+
+  defp check_session_bounds(_expires, min_se) when min_se < @rfc4028_min_se,
+    do: {:error, "[session_timer]: `min_se` must be at least #{@rfc4028_min_se} (RFC 4028 §5)"}
+
+  defp check_session_bounds(expires, min_se) when expires < min_se,
+    do: {:error, "[session_timer]: `expires` must not be below `min_se`"}
+
+  defp check_session_bounds(_expires, _min_se), do: :ok
 
   # ── [mediaserver] + [mediaserver.pool.*] (§9) ────────────────────────────────
 

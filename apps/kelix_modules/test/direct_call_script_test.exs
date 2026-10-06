@@ -250,6 +250,39 @@ defmodule Kelix.DirectCallScriptTest do
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
 
+  # The callee's leg ends on its session timer (RFC 4028): the bridge names it,
+  # and the script ends the call on it like on a hangup.
+  test "a callee whose session timer expires ends the call", %{scenario: module} do
+    previous = Application.fetch_env(:elixip2, :session_timer)
+    Application.put_env(:elixip2, :session_timer, enabled: true, expires: 3, min_se: 1)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:elixip2, :session_timer, v)
+        :error -> Application.delete_env(:elixip2, :session_timer)
+      end
+    end)
+
+    :ok = register_callee("dc-se")
+    tp = mockup_pid("dc-se")
+    {:ok, dialog} = MockDialog.start_link(self())
+
+    req = invite("call-se-1")
+    {instance, ref} = start_instance(module, dialog, req)
+    send(instance, {:INVITE, req, self(), dialog})
+
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp, 200, 50, %{"Session-Expires" => "3;refresher=uas"})
+    assert_receive {:replied, 200, _reason, _f, _r}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, req), self(), dialog})
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
+
+    assert_receive {:sip_mockup, {:request_sent, :BYE, bye}}, 4_000
+    assert Map.get(bye, "Reason") =~ "Session Timer Expired"
+    assert_receive {:instance_done, :ok}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
   # A callee that refuses ends the call, and the refusal reaches the caller.
   test "a final ≥ 300 is relayed and ends the call", %{scenario: module} do
     :ok = register_callee("dc-busy")

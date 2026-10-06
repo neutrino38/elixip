@@ -171,6 +171,15 @@ defmodule B2BUA.Basic do
         goto(wait_far_bye_ok, "callee hung up")
 
       # One side gave up on its own: tell the other and stop.
+      # A session timer ended one leg (RFC 4028): its peer stopped refreshing,
+      # or stopped answering our refreshes — gone, not hung up. The dialog has
+      # already sent that leg its BYE; the teardown hangs up the other.
+      {:dialog_terminated, _dlg, :session_expired} ->
+        scenario_success("session timer expired on the inbound leg")
+
+      {:outbound, {:dialog_terminated, _dlg, :session_expired}} ->
+        scenario_success("session timer expired on the outbound leg")
+
       {:dialog_terminated, _dlg, reason} ->
         scenario_success("inbound leg ended: #{inspect(reason)}")
 

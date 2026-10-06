@@ -32,10 +32,15 @@ defmodule SIP.Test.Peers.Manual do
   answer on an INVITE, `200` an SDP answer on an INVITE and a Contact echo on a
   REGISTER; every other code in 400..699 is a plain rejection — a fork test needs
   a 6xx (RFC 3261 §16.7 stops a hunt on a global refusal) as much as a 486.
+
+  `headers` are merged into the response: the `Session-Expires` of a 2xx, the
+  `Min-SE` of a 422, when a test is about the session timer.
+
+  The request answered is the last INVITE, REGISTER or UPDATE the stack sent.
   """
-  @spec simulate(pid(), integer(), non_neg_integer()) :: :ok
-  def simulate(t_pid, code, after_ms \\ 100) do
-    Mockup.tell_peer(t_pid, {:simulate, code, after_ms})
+  @spec simulate(pid(), integer(), non_neg_integer(), map()) :: :ok
+  def simulate(t_pid, code, after_ms \\ 100, headers \\ %{}) do
+    Mockup.tell_peer(t_pid, {:simulate, code, after_ms, headers})
   end
 
   @doc """
@@ -75,10 +80,13 @@ defmodule SIP.Test.Peers.Manual do
   relay nothing, since each leg has a timer of its own. Only a request off the wire
   can show that, because what must NOT happen is a request appearing on the OTHER
   leg.
+
+  `headers` are merged into the UPDATE — the `Session-Expires` / `Supported` a
+  real refresh carries, when a test is about the timer itself.
   """
-  @spec refresh_session(pid()) :: :ok
-  def refresh_session(t_pid) do
-    Mockup.tell_peer(t_pid, :refresh_session)
+  @spec refresh_session(pid(), map()) :: :ok
+  def refresh_session(t_pid, headers \\ %{}) do
+    Mockup.tell_peer(t_pid, {:refresh_session, headers})
   end
 
   # ── Peer callbacks ──────────────────────────────────────────────────────────
@@ -97,7 +105,7 @@ defmodule SIP.Test.Peers.Manual do
   end
 
   @impl true
-  def on_request(%{method: method} = req, state) when method in [:INVITE, :REGISTER] do
+  def on_request(%{method: method} = req, state) when method in [:INVITE, :REGISTER, :UPDATE] do
     {[], %{state | req: req}}
   end
 
@@ -138,7 +146,7 @@ defmodule SIP.Test.Peers.Manual do
   def on_request(req, state), do: default_request(req, state)
 
   @impl true
-  def on_command({:simulate, code, _after_ms}, %{req: nil} = state) do
+  def on_command({:simulate, code, _after_ms, _headers}, %{req: nil} = state) do
     # Answering before there is anything to answer. Say so and carry on: the test
     # will fail on its own assertion, which is the failure that names the problem.
     Logger.warning(
@@ -149,8 +157,9 @@ defmodule SIP.Test.Peers.Manual do
     {[], state}
   end
 
-  def on_command({:simulate, code, after_ms}, state) do
-    {[answer(state.req, code, state.totag, after_ms)], state}
+  def on_command({:simulate, code, after_ms, headers}, state) do
+    {:inject, resp, after_ms} = answer(state.req, code, state.totag, after_ms)
+    {[{:inject, Map.merge(resp, headers), after_ms}], state}
   end
 
   def on_command(:retransmit_2xx, %{acked_req: nil} = state) do
@@ -168,8 +177,15 @@ defmodule SIP.Test.Peers.Manual do
 
   def on_command(:hangup, state), do: send_in_dialog(state, :BYE, "hang up")
 
-  def on_command(:refresh_session, state),
-    do: send_in_dialog(state, :UPDATE, "refresh the session")
+  def on_command({:refresh_session, headers}, state) do
+    case send_in_dialog(state, :UPDATE, "refresh the session") do
+      {[{:inject, req, after_ms}], state} ->
+        {[{:inject, Map.merge(req, headers), after_ms}], state}
+
+      other ->
+        other
+    end
+  end
 
   # ── Internals ───────────────────────────────────────────────────────────────
 
