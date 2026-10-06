@@ -90,6 +90,9 @@ defmodule SIP.DialogImpl do
     # The RFC 4028 session timer in force on this call, `%SIP.DialogImpl.SessionTimer{}`
     # once a 2xx to an INVITE or an UPDATE negotiated one, nil otherwise.
     session_timer: nil,
+    # The last session description we sent on this call — what a re-INVITE
+    # refresh re-offers, unchanged, to a far end that takes no UPDATE.
+    local_sdp: nil,
     # Client transactions started IN PLACE of another — the request sent again
     # after a 422 (RFC 4028 §7.3) — mapped to the transaction the application
     # knows: `new_pid => pid_the_app_holds`. The application correlates on
@@ -324,6 +327,7 @@ defmodule SIP.DialogImpl do
       if map_size(state.transactions) < 4 do
         req = SessionTimer.decorate_request(state, req)
         {state, req} = fix_outbound_request(state, req)
+        state = SessionTimer.note_local_sdp(state, offer_sdp(req))
 
         # Copy transport parameters from the request that opened the dialog into the RURI to reuse them
         o_ruri = state.msg.ruri
@@ -1285,6 +1289,7 @@ defmodule SIP.DialogImpl do
 
     req = SessionTimer.decorate_request(state, req)
     {state, req} = fix_outbound_request(state, req, true)
+    state = SessionTimer.note_local_sdp(state, offer_sdp(req))
 
     try do
       # In case of an outbound dialog, start a, UAC transaction
@@ -1669,7 +1674,10 @@ defmodule SIP.DialogImpl do
         Map.keys(state.transactions)
       )
 
-    state = if ret == :ok, do: SessionTimer.arm(state, negotiated), else: state
+    state =
+      if ret == :ok,
+        do: state |> SessionTimer.arm(negotiated) |> SessionTimer.note_reply_sdp(upd_field),
+        else: state
 
     state =
       case resp_code do
@@ -2771,6 +2779,7 @@ defmodule SIP.DialogImpl do
     # request that would have created it.
     if client_transaction?(module) do
       handle_UAS_response(state, timeout_response(req), transact_pid)
+      |> SessionTimer.on_refresh_outcome(timeout_response(req), transact_pid)
       |> end_on_unregister(req)
     else
       end_on_unanswered_initial(state, req)
@@ -2859,6 +2868,18 @@ defmodule SIP.DialogImpl do
   @impl true
   def handle_info({:timeout, tref, :session_expired}, state) do
     SessionTimer.on_expired(state, tref)
+  end
+
+  def handle_info({:timeout, tref, :session_refresh}, state) do
+    SessionTimer.on_refresh_due(state, tref)
+  end
+
+  def handle_info({:session_refresh, :now}, state) do
+    SessionTimer.on_refresh_due(state, :now)
+  end
+
+  def handle_info(:session_refresh_failed, state) do
+    SessionTimer.on_refresh_failed(state)
   end
 
   def handle_info({:timeout, _tref, :optionskeepalive}, state) do
@@ -3250,7 +3271,14 @@ defmodule SIP.DialogImpl do
         closing_transaction:
           if(state.closing_transaction == old, do: new, else: state.closing_transaction)
     }
+    |> SessionTimer.move_refresh(old, new)
   end
+
+  # The description an INVITE or an UPDATE offers — a MESSAGE body is not one.
+  defp offer_sdp(%{method: method} = req) when method in [:INVITE, :UPDATE],
+    do: SIP.Msg.Ops.sdp_body(req)
+
+  defp offer_sdp(_req), do: nil
 
   # The pid the application knows a transaction by, and back.
   defp app_tid(state, tid), do: Map.get(state.trans_alias, tid, tid)
@@ -3296,17 +3324,29 @@ defmodule SIP.DialogImpl do
           end
 
         if rsp.response >= 200 do
+          # The refresh outcome is read BEFORE the timer the 2xx states: arming
+          # that one starts a fresh timer, with no refresh in flight.
           new_state =
             handle_UAS_response(state, rsp, transact_pid)
+            |> SessionTimer.on_refresh_outcome(rsp, transact_pid)
             |> SessionTimer.on_uac_response(rsp)
 
           # Keep an INVITE client transaction alive after a 2xx so the application
           # can still ACK it (RFC 3261 §13.2.2.4); it is removed once the ACK is
           # sent. Every other final response terminates the transaction now.
-          if rsp.response < 300 and match?([_, :INVITE], rsp.cseq) do
-            answer_nobody_awaits(new_state, transact_pid)
-          else
-            close_transaction(new_state, transact_pid)
+          cond do
+            # A re-INVITE we sent ourselves — a session refresh — is acknowledged
+            # here: no application is waiting to ACK what it never sent.
+            rsp.response < 300 and match?([_, :INVITE], rsp.cseq) and
+                MapSet.member?(new_state.internal_trans, transact_pid) ->
+              SIP.Transac.ack_uac_transaction(transact_pid)
+              close_transaction(new_state, transact_pid)
+
+            rsp.response < 300 and match?([_, :INVITE], rsp.cseq) ->
+              answer_nobody_awaits(new_state, transact_pid)
+
+            true ->
+              close_transaction(new_state, transact_pid)
           end
         else
           # Provisional responses. RFC 4235 §3.7.1: a 1xx with a remote tag is an

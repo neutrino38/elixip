@@ -339,6 +339,34 @@ defmodule SIP.Msg.Ops do
   @spec supported_extensions(map()) :: [binary()]
   def supported_extensions(msg) when is_map(msg), do: option_tags(msg, :supported, "supported")
 
+  @doc """
+  The methods a message says its sender accepts (RFC 3261 §20.5), upper-cased,
+  or `nil` when it carries no `Allow` at all.
+
+  `nil` and `[]` are different answers: an absent header says nothing (§20.5 —
+  "the absence of an Allow header field MUST NOT be interpreted to mean that the
+  UA sending the message supports no methods"), an empty one says "none".
+
+      iex> SIP.Msg.Ops.allowed_methods(%{"Allow" => "INVITE, ACK, update"})
+      ["INVITE", "ACK", "UPDATE"]
+      iex> SIP.Msg.Ops.allowed_methods(%{})
+      nil
+  """
+  @spec allowed_methods(map()) :: [binary()] | nil
+  def allowed_methods(msg) when is_map(msg) do
+    case header_values(msg, "allow") do
+      [] ->
+        nil
+
+      values ->
+        values
+        |> Enum.flat_map(&String.split(to_string(&1), ","))
+        |> Enum.map(&(&1 |> String.trim() |> String.upcase()))
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
+    end
+  end
+
   # ── Session timers (RFC 4028) ───────────────────────────────────────────────
   #
   # THE one reading of `Session-Expires` and `Min-SE`. A session timer is

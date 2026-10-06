@@ -46,10 +46,18 @@ defmodule SIP.Test.SessionTimerDialog do
       cfg -> Application.put_env(:elixip2, :session_timer, cfg)
     end
 
+    previous_t1 = Application.fetch_env(:elixip2, :sip_timer_T1)
+    if t1 = context[:t1], do: Application.put_env(:elixip2, :sip_timer_T1, t1)
+
     on_exit(fn ->
       case previous do
         {:ok, v} -> Application.put_env(:elixip2, :session_timer, v)
         :error -> Application.delete_env(:elixip2, :session_timer)
+      end
+
+      case previous_t1 do
+        {:ok, v} -> Application.put_env(:elixip2, :sip_timer_T1, v)
+        :error -> Application.delete_env(:elixip2, :sip_timer_T1)
       end
     end)
 
@@ -57,6 +65,9 @@ defmodule SIP.Test.SessionTimerDialog do
   end
 
   @enabled [enabled: true, expires: 1800, min_se: 90]
+
+  @offer "v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n" <>
+           "m=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
 
   # ── Negotiation on the 2xx ──────────────────────────────────────────────────
 
@@ -325,6 +336,141 @@ defmodule SIP.Test.SessionTimerDialog do
     assert_receive {:outbound, {200, _resp, ^update_tid, ^dlg}}, 2_000
   end
 
+  # ── Our refreshes (RFC 4028 §7.4, §10) ──────────────────────────────────────
+
+  # A refresh is due at half the 3 s interval.
+  @refresh_due 1_500
+
+  @tag session_timer: @short
+  test "we refresh at half the interval, with an UPDATE the application never hears of" do
+    {tp, dlg, _resp} =
+      established_call("st_ref_update", %{"Session-Expires" => "3;refresher=uac"})
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, update}}, @refresh_due + 500
+    assert Ops.session_expires(update) == {3, :uac}
+    assert Ops.sdp_body(update) == nil
+
+    Manual.simulate(tp, 200, 0, %{"Session-Expires" => "3;refresher=uac"})
+    refute_receive {:outbound, {200, _resp, _tid, ^dlg}}, 300
+
+    # …and again, the 2xx having started a new interval.
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, @refresh_due + 500
+    SIP.Dialog.terminate(dlg, :normal)
+  end
+
+  @tag session_timer: @short
+  test "a far end refusing UPDATE is refreshed with a re-INVITE of our unchanged offer" do
+    {tp, dlg, _resp} =
+      established_call("st_ref_reinvite", %{"Session-Expires" => "3;refresher=uac"}, sdp: true)
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, @refresh_due + 500
+    Manual.simulate(tp, 405, 0)
+
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, reinvite}}, 1_000
+    assert Ops.sdp_body(reinvite) == @offer
+    assert Ops.session_expires(reinvite) == {3, :uac}
+
+    # Its 2xx is acknowledged by the dialog: nobody else sent it.
+    Manual.simulate(tp, 200, 0, %{"Session-Expires" => "3;refresher=uac"})
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 1_000
+    refute_received {:outbound, {200, _resp, _tid, ^dlg}}
+
+    # The next refresh is a re-INVITE straight away.
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _}}, @refresh_due + 500
+    SIP.Dialog.terminate(dlg, :normal)
+  end
+
+  @tag session_timer: @short
+  test "a far end refusing UPDATE, with nothing of ours to re-offer, is not refreshed" do
+    {tp, dlg, _resp} =
+      established_call("st_ref_nosdp", %{"Session-Expires" => "3;refresher=uac"})
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, @refresh_due + 500
+    Manual.simulate(tp, 501, 0)
+
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 1_000
+    assert Process.alive?(dlg)
+    SIP.Dialog.terminate(dlg, :normal)
+  end
+
+  @tag session_timer: @short
+  test "a refresh answered 481 ends the call, with no BYE to a dialog the far end lost" do
+    {tp, dlg, _resp} = established_call("st_ref_481", %{"Session-Expires" => "3;refresher=uac"})
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, @refresh_due + 500
+    Manual.simulate(tp, 481, 0)
+
+    assert_receive {:outbound, {:dialog_terminated, ^dlg, :session_expired}}, 2_000
+    refute_received {:sip_mockup, {:request_sent, :BYE, _}}
+  end
+
+  @tag session_timer: @short
+  test "a refresh answered 408 hangs the call up" do
+    {tp, dlg, _resp} = established_call("st_ref_408", %{"Session-Expires" => "3;refresher=uac"})
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, @refresh_due + 500
+    Manual.simulate(tp, 408, 0)
+
+    assert_receive {:sip_mockup, {:request_sent, :BYE, bye}}, 1_000
+    assert Map.get(bye, "Reason") =~ "Session Timer Expired"
+    assert_receive {:outbound, {:dialog_terminated, ^dlg, :session_expired}}, 2_000
+  end
+
+  @tag session_timer: @short, t1: 10
+  test "a refresh nobody answers hangs the call up" do
+    {_tp, dlg, _resp} =
+      established_call("st_ref_timeout", %{"Session-Expires" => "3;refresher=uac"})
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, @refresh_due + 500
+
+    # Timer F at 64*T1 = 640 ms; the far end answers nothing at all.
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 2_000
+    assert_receive {:outbound, {:dialog_terminated, ^dlg, :session_expired}}, 3_000
+  end
+
+  @tag session_timer: @short
+  test "a refresh crossing the far end's offer (491) goes again after a while" do
+    {tp, dlg, _resp} = established_call("st_ref_491", %{"Session-Expires" => "3;refresher=uac"})
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, @refresh_due + 500
+    Manual.simulate(tp, 491, 0)
+
+    # RFC 3261 §14.1: 2.1 to 4 s for the owner of the Call-ID.
+    refute_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, 2_500
+    SIP.Dialog.terminate(dlg, :normal)
+  end
+
+  @tag session_timer: @short
+  test "a refresh refused for another reason is tried once more, ahead of the deadline" do
+    {tp, dlg, _resp} = established_call("st_ref_500", %{"Session-Expires" => "3;refresher=uac"})
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, @refresh_due + 500
+    Manual.simulate(tp, 500, 0)
+
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, _}}, 1_000
+    assert Process.alive?(dlg)
+    SIP.Dialog.terminate(dlg, :normal)
+  end
+
+  @tag session_timer: @short
+  test "inbound, a peer that leaves the refresh to us is refreshed by us" do
+    {tp, dlg, _resp} = established_call("st_ref_uas")
+
+    resp =
+      refresh_and_answer(tp, dlg, %{
+        "Session-Expires" => "3;refresher=uas",
+        :supported => ["timer"]
+      })
+
+    assert Ops.session_expires(resp) == {3, :uas}
+
+    # Our side of the next transaction is the UAC's.
+    assert_receive {:sip_mockup, {:request_sent, :UPDATE, update}}, @refresh_due + 500
+    assert Ops.session_expires(update) == {3, :uac}
+    SIP.Dialog.terminate(dlg, :normal)
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
   defp target(name) do
@@ -353,19 +499,27 @@ defmodule SIP.Test.SessionTimerDialog do
 
   # A call up and acknowledged, on a leg tagged like a B2BUA's outbound one.
   # `headers` go on the callee's 200.
-  defp established_call(name, headers \\ %{}) do
-    {tp, dlg, tid, _invite} = start_call(name)
+  defp established_call(name, headers \\ %{}, opts \\ []) do
+    {tp, dlg, tid, _invite} = start_call(name, opts)
     resp = answer_call(tp, dlg, tid, headers)
     {tp, dlg, resp}
   end
 
-  defp start_call(name) do
+  defp start_call(name, opts \\ []) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
     :ok = Mockup.set_peer(tp, Manual)
     :ok = Mockup.attach_probe(tp)
 
-    {:ok, dlg, _id} =
-      SIP.Dialog.start_dialog(invite_to(name), 60, :outbound, false, tag: :outbound)
+    invite =
+      if opts[:sdp],
+        do:
+          Ops.update_sip_msg(
+            invite_to(name),
+            {:body, [%{contenttype: "application/sdp", data: @offer}]}
+          ),
+        else: invite_to(name)
+
+    {:ok, dlg, _id} = SIP.Dialog.start_dialog(invite, 60, :outbound, false, tag: :outbound)
 
     assert_receive {:outbound, {:onnewdialog, :ok, tid}}, 2_000
     assert_receive {:sip_mockup, {:request_sent, :INVITE, invite}}, 2_000

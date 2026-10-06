@@ -43,6 +43,22 @@ defmodule SIP.DialogImpl.SessionTimer do
     * a 422 sends the request again asking for the far end's `Min-SE`, once,
       without the application seeing it (§7.3, `retry_request/2`).
 
+  ## Refreshing (RFC 4028 §10)
+
+  When the refresher is us, the dialog refreshes at half the interval, on its own:
+  the request is the dialog's, and neither it nor its answer reaches the
+  application.
+
+    * an UPDATE without a body, unless the far end said it takes none; then a
+      re-INVITE re-offering our last description unchanged (`local_sdp`). A 405
+      or 501 to the UPDATE switches to the re-INVITE for the rest of the call;
+    * deferred while an offer exchange is under way on the dialog — it refreshes
+      the session too, and crossing it would earn a 491;
+    * a 491 retries after the RFC 3261 §14.1 delay, any other refusal well before
+      the far end's deadline;
+    * a 408 or no answer at all ends the session with a BYE, a 481 ends it
+      without one: either way the application is told `:session_expired`.
+
   ## Configuration
 
       config :elixip2, :session_timer,
@@ -63,7 +79,18 @@ defmodule SIP.DialogImpl.SessionTimer do
   # one third of the interval.
   @max_margin_ms 32_000
 
-  defstruct interval: nil, refresher: nil, tref: nil, expired: false
+  # When the far end is busy with an offer of its own, how long before we look
+  # again. A refresh that would cross it is answered 491 anyway.
+  @busy_retry_ms 2_000
+
+  # `method` is the request we refresh with: :UPDATE, or :INVITE for a far end
+  # that does not take one. `refresh_tid` is the refresh in flight, ours alone.
+  defstruct interval: nil,
+            refresher: nil,
+            method: :UPDATE,
+            tref: nil,
+            refresh_tid: nil,
+            expired: false
 
   @doc "The session timer configuration, defaults filled in."
   @spec config() :: keyword()
@@ -109,7 +136,7 @@ defmodule SIP.DialogImpl.SessionTimer do
   def decorate_reply(state, req, resp_code, fields)
       when resp_code in 200..299 and (is_list(fields) or is_nil(fields)) do
     if enabled?() and call_dialog?(state) and Map.get(req, :method) in [:INVITE, :UPDATE] do
-      negotiated = negotiate_as_uas(req)
+      negotiated = %{negotiate_as_uas(req) | method: refresh_method(state.session_timer, req)}
       {(fields || []) ++ uas_fields(req, negotiated), negotiated}
     else
       {fields, nil}
@@ -214,14 +241,15 @@ defmodule SIP.DialogImpl.SessionTimer do
         nil ->
           %{cancel(state) | session_timer: nil}
 
-        {interval, :uas} ->
-          arm(state, %__MODULE__{interval: interval, refresher: :remote})
-
-        # `uac` — or nothing, which §9 does not allow a UAS to send. Refreshing a
-        # session nobody said who refreshes costs one UPDATE; assuming the far end
-        # does costs the call.
-        {interval, _uac} ->
-          arm(state, %__MODULE__{interval: interval, refresher: :local})
+        {interval, refresher} ->
+          # `uac` — or nothing, which §9 does not allow a UAS to send. Refreshing a
+          # session nobody said who refreshes costs one UPDATE; assuming the far end
+          # does costs the call.
+          arm(state, %__MODULE__{
+            interval: interval,
+            refresher: if(refresher == :uas, do: :remote, else: :local),
+            method: refresh_method(state.session_timer, rsp)
+          })
       end
     else
       state
@@ -301,12 +329,25 @@ defmodule SIP.DialogImpl.SessionTimer do
     end
   end
 
+  # Which request refreshes: an UPDATE — RFC 4028 §9 RECOMMENDS it: no offer, no
+  # ACK, nothing for the media to do — unless the far end says it takes none. It
+  # sticks: a message without an Allow says nothing new, and a 405 to our UPDATE
+  # (`on_refresh_outcome/3`) is a stronger statement than any Allow.
+  defp refresh_method(%__MODULE__{method: :INVITE}, _msg), do: :INVITE
+
+  defp refresh_method(prev, msg) do
+    case Ops.allowed_methods(msg) do
+      nil -> (prev && prev.method) || :UPDATE
+      methods -> if "UPDATE" in methods, do: :UPDATE, else: :INVITE
+    end
+  end
+
   @doc """
   Put a negotiated session timer in force, replacing the previous one: every 2xx
   to an INVITE or an UPDATE starts a new interval (RFC 4028 §10).
 
-  When the peer refreshes, the dialog waits for that refresh until the margin of
-  §10 before the interval ends.
+  When we refresh, the refresh is due at half the interval (§10). When the peer
+  does, the dialog waits for it until the margin of §10 before the interval ends.
   """
   @spec arm(struct(), %__MODULE__{} | nil) :: struct()
   def arm(state, nil), do: state
@@ -327,7 +368,7 @@ defmodule SIP.DialogImpl.SessionTimer do
           :erlang.start_timer(expiry_ms(negotiated.interval), self(), :session_expired)
 
         :local ->
-          nil
+          :erlang.start_timer(div(negotiated.interval * 1000, 2), self(), :session_refresh)
       end
 
     %{state | session_timer: %__MODULE__{negotiated | tref: tref}}
@@ -349,32 +390,41 @@ defmodule SIP.DialogImpl.SessionTimer do
 
   @doc """
   The peer's refresh did not come. RFC 4028 §10: the session is over, and a BYE
-  says so. The dialog ends on that BYE's transaction, and `terminate/2` reports
-  `:session_expired` (`expired?/1`).
+  says so (`end_session/2`).
 
-  Returns the `{:noreply, _}` / `{:stop, _, _}` tuple `handle_info/2` expects. A
-  timer that is no longer the current one — re-armed by a refresh whose message
-  crossed it — is ignored, and so is one firing on a dialog already closing.
+  A timer that is no longer the current one — re-armed by a refresh whose message
+  crossed it — is ignored.
   """
-  def on_expired(%{session_timer: %__MODULE__{tref: tref}} = state, tref)
-      when tref != nil do
+  def on_expired(%{session_timer: %__MODULE__{tref: tref}} = state, tref) when tref != nil do
+    end_session(
+      clear_tref(state),
+      "Session timer expired: no refresh within #{state.session_timer.interval} s."
+    )
+  end
+
+  def on_expired(state, _stale_tref), do: {:noreply, state}
+
+  @doc """
+  End the session on its timer: a BYE goes out (RFC 4028 §10), the dialog ends on
+  that BYE's transaction, and `terminate/2` reports `:session_expired`
+  (`expired?/1`). Nothing is done on a dialog already closing.
+
+  Returns the `{:noreply, _}` / `{:stop, _, _}` tuple `handle_info/2` expects.
+  """
+  def end_session(state, why) do
     if state.state == :established and state.closing_transaction == nil do
       Logger.info(
         dialogpid: "#{inspect(self())}",
         module: __MODULE__,
-        message:
-          "Session timer expired: no refresh within #{state.session_timer.interval} s. " <>
-            "Sending BYE."
+        message: why <> " Sending BYE."
       )
 
-      state =
-        %{state | session_timer: %__MODULE__{state.session_timer | tref: nil, expired: true}}
-        |> SIP.Dialog.Events.ended(:timeout)
+      state = state |> mark_expired() |> SIP.Dialog.Events.ended(:timeout)
 
       case SIP.DialogImpl.send_in_dialog_request(state, expiry_bye()) do
         # Its answer is ours alone: the application never sent this BYE.
         {{:ok, trans_pid}, state} ->
-          {:noreply, %{state | internal_trans: MapSet.put(state.internal_trans, trans_pid)}}
+          {:noreply, internal(state, trans_pid)}
 
         {:already_closing, state} ->
           {:noreply, state}
@@ -393,7 +443,201 @@ defmodule SIP.DialogImpl.SessionTimer do
     end
   end
 
-  def on_expired(state, _stale_tref), do: {:noreply, state}
+  # ── Refreshing (RFC 4028 §7.4, §10) ─────────────────────────────────────────
+
+  @doc """
+  Our refresh is due — on the timer `arm/2` set, or `:now` when the previous
+  attempt asked for another at once (an UPDATE refused 405: try a re-INVITE).
+
+  The refresh is a request of the dialog's own: its answer never reaches the
+  application. One already in flight, or an offer exchange under way on the
+  dialog, defers it — what is under way refreshes the session as well if it
+  succeeds, and crossing it would be answered 491.
+  """
+  def on_refresh_due(%{session_timer: %__MODULE__{tref: tref}} = state, tref) when tref != nil,
+    do: refresh(clear_tref(state))
+
+  def on_refresh_due(state, :now), do: refresh(state)
+  def on_refresh_due(state, _stale_tref), do: {:noreply, state}
+
+  defp refresh(state) do
+    st = state.session_timer
+
+    cond do
+      not match?(%__MODULE__{refresher: :local}, st) ->
+        {:noreply, state}
+
+      state.state != :established or state.closing_transaction != nil ->
+        {:noreply, state}
+
+      st.refresh_tid != nil ->
+        {:noreply, state}
+
+      offer_in_progress?(state) ->
+        {:noreply, rearm_refresh(state, @busy_retry_ms)}
+
+      true ->
+        send_refresh(state, st)
+    end
+  end
+
+  defp send_refresh(state, st) do
+    case refresh_request(state, st.method) do
+      nil ->
+        # A far end that takes no UPDATE, and nothing of ours to re-offer it: there
+        # is no lawful refresh left (an offerless re-INVITE would ask the far end
+        # for a new offer, which is a renegotiation, not a refresh).
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message:
+            "Session refresh impossible: UPDATE not accepted and no SDP of ours to re-offer"
+        )
+
+        {:noreply, state}
+
+      req ->
+        case SIP.DialogImpl.send_in_dialog_request(state, req) do
+          {{:ok, tid}, state} ->
+            Logger.debug(
+              dialogpid: "#{inspect(self())}",
+              module: __MODULE__,
+              message: "Session refresh sent (#{req.method})"
+            )
+
+            state = internal(state, tid)
+
+            {:noreply,
+             %{state | session_timer: %__MODULE__{state.session_timer | refresh_tid: tid}}}
+
+          {rc, state} ->
+            Logger.warning(
+              dialogpid: "#{inspect(self())}",
+              module: __MODULE__,
+              message: "Could not send the session refresh: #{inspect(rc)}"
+            )
+
+            {:noreply, rearm_refresh(state, retry_ms(st.interval))}
+        end
+    end
+  end
+
+  @doc """
+  What the final response to our refresh means for the session (RFC 4028 §10).
+  Called for every final response the dialog sees; only the one answering the
+  refresh in flight is read.
+
+    * 2xx — refreshed; `on_uac_response/2`, called next, restates the timer;
+    * 491 — our refresh crossed the far end's offer: again, after the RFC 3261
+      §14.1 delay;
+    * 405 / 501 to an UPDATE — the far end does not take one: a re-INVITE now;
+    * 408 / 481 — the far end is gone or knows no such call: the session is over.
+      A 481 ends the dialog by itself; a 408 still owes the far end a BYE;
+    * anything else — a refusal of this request, not of the session: once more,
+      well before the far end's own deadline.
+  """
+  def on_refresh_outcome(
+        %{session_timer: %__MODULE__{refresh_tid: tid} = st} = state,
+        %{response: code},
+        tid
+      )
+      when is_pid(tid) and code >= 200 do
+    state = %{state | session_timer: %__MODULE__{st | refresh_tid: nil}}
+
+    cond do
+      code in 200..299 ->
+        state
+
+      code == 491 ->
+        rearm_refresh(state, 2_100 + :rand.uniform(1_900))
+
+      code in [405, 501] and st.method == :UPDATE ->
+        send(self(), {:session_refresh, :now})
+        %{state | session_timer: %__MODULE__{state.session_timer | method: :INVITE}}
+
+      code == 481 ->
+        mark_expired(state)
+
+      code == 408 ->
+        send(self(), :session_refresh_failed)
+        state
+
+      true ->
+        rearm_refresh(state, retry_ms(st.interval))
+    end
+  end
+
+  def on_refresh_outcome(state, _rsp, _tid), do: state
+
+  @doc "Our refresh got no answer, or a 408: the far end is gone."
+  def on_refresh_failed(state),
+    do: end_session(state, "Session refresh unanswered: the far end is gone.")
+
+  @doc "True when `tid` is the refresh in flight."
+  def refresh?(%{session_timer: %__MODULE__{refresh_tid: tid}}, tid) when is_pid(tid), do: true
+  def refresh?(_state, _tid), do: false
+
+  @doc "The refresh in flight goes on under another transaction (a 422 retry)."
+  def move_refresh(%{session_timer: %__MODULE__{refresh_tid: old} = st} = state, old, new)
+      when is_pid(old),
+      do: %{state | session_timer: %__MODULE__{st | refresh_tid: new}}
+
+  def move_refresh(state, _old, _new), do: state
+
+  @doc """
+  Remember the last session description we sent on this dialog: the offer of a
+  re-INVITE refresh for a far end that takes no UPDATE. Sending it unchanged —
+  same `o=` version — is a refresh that changes nothing (RFC 3264 §8).
+  """
+  def note_local_sdp(state, sdp) when is_binary(sdp) and sdp != "",
+    do: %{state | local_sdp: sdp}
+
+  def note_local_sdp(state, _no_sdp), do: state
+
+  @doc "The same, read off the fields of a response this dialog sent."
+  def note_reply_sdp(state, fields) when is_list(fields) do
+    case List.keyfind(fields, :body, 0) do
+      {:body, body} -> note_local_sdp(state, Ops.sdp_body(%{body: body}))
+      nil -> state
+    end
+  end
+
+  def note_reply_sdp(state, _fields), do: state
+
+  defp offer_in_progress?(state) do
+    Enum.any?(state.transactions, fn {pid, entry} ->
+      match?(%{req: %{method: m}} when m in [:INVITE, :UPDATE], entry) and Process.alive?(pid)
+    end)
+  end
+
+  defp refresh_request(_state, :UPDATE), do: in_dialog_request(:UPDATE)
+
+  defp refresh_request(%{local_sdp: sdp}, :INVITE) when is_binary(sdp) do
+    in_dialog_request(:INVITE)
+    |> Ops.update_sip_msg({:body, [%{contenttype: "application/sdp", data: sdp}]})
+  end
+
+  defp refresh_request(_state, :INVITE), do: nil
+
+  defp rearm_refresh(state, ms) do
+    state = cancel(state)
+    tref = :erlang.start_timer(ms, self(), :session_refresh)
+    %{state | session_timer: %__MODULE__{state.session_timer | tref: tref}}
+  end
+
+  # Another try before the far end's own deadline: an eighth of the interval puts
+  # it at 5/8, ahead of the 2/3 a far end with a short interval hangs up at (§10).
+  defp retry_ms(interval), do: min(30_000, max(500, div(interval * 1000, 8)))
+
+  defp clear_tref(%{session_timer: %__MODULE__{} = st} = state),
+    do: %{state | session_timer: %__MODULE__{st | tref: nil}}
+
+  defp mark_expired(%{session_timer: %__MODULE__{} = st} = state),
+    do: %{state | session_timer: %__MODULE__{st | expired: true}}
+
+  defp mark_expired(state), do: state
+
+  defp internal(state, tid), do: %{state | internal_trans: MapSet.put(state.internal_trans, tid)}
 
   @doc "True once this dialog has ended its session on an expired timer."
   @spec expired?(struct()) :: boolean()
@@ -403,17 +647,21 @@ defmodule SIP.DialogImpl.SessionTimer do
   defp call_dialog?(%{msg: %{method: :INVITE}}), do: true
   defp call_dialog?(_state), do: false
 
+  # The Reason is the one browsers use for the same event (JsSIP), so either end
+  # of a capture reads the same way.
+  defp expiry_bye do
+    Map.put(in_dialog_request(:BYE), "Reason", "SIP ;cause=408 ;text=\"Session Timer Expired\"")
+  end
+
   # Every addressing field is a placeholder: `send_in_dialog_request/2` fills in
   # Call-ID, CSeq, both identities and their tags, the route set and the remote
-  # target. The Reason is the one browsers use for the same event (JsSIP), so
-  # either end of a capture reads the same way.
-  defp expiry_bye do
+  # target, and the transaction stamps our Contact.
+  defp in_dialog_request(method) do
     uri = %SIP.Uri{userpart: nil, domain: nil}
 
     %{
       "Max-Forwards" => "70",
-      "Reason" => "SIP ;cause=408 ;text=\"Session Timer Expired\"",
-      method: :BYE,
+      method: method,
       ruri: uri,
       from: uri,
       to: uri,
