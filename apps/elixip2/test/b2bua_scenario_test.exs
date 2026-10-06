@@ -303,6 +303,70 @@ defmodule SIP.Test.B2bua.Scenario do
     assert_receive {:instance_done, :ok}, 10_000
   end
 
+  # RFC 4028 negotiates a session timer per dialog, so it never crosses a leg. A
+  # caller's `Session-Expires: 90;refresher=uac` relayed as is told the callee
+  # that WE would refresh its leg every 45 s; we never did, and the callee hung up
+  # after 90 s on a live call (`Reason: SIP;cause=408;text="Session Timer
+  # Expired"`, traffic of 2026-10-06). The re-INVITE is the case that bit: the
+  # initial INVITE and every relayed re-offer go through the same strip.
+  @tag timeout: 60_000
+  test "the session timer of one leg is never relayed to the other", %{
+    scenario: module,
+    stub: stub
+  } do
+    timer_headers = %{
+      "Session-Expires" => "90;refresher=uac",
+      "Min-SE" => "90",
+      "Require" => "timer"
+    }
+
+    invite =
+      inbound_invite()
+      |> Map.merge(timer_headers)
+      |> Map.put(:supported, ["timer", "replaces"])
+
+    peer = peer_uri("b2bua_session_timer")
+    tp_pid = transport_pid(peer)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
+
+    {instance, _ref} = start_instance(module, stub, invite, peer)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
+    assert_no_session_timer(fwd)
+    assert SIP.Msg.Ops.supported_extensions(fwd) == ["replaces"]
+
+    Manual.simulate(tp_pid, 200, 100)
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
+
+    reinvite =
+      %{in_dialog(:INVITE, invite) | cseq: [3, :INVITE], body: invite.body}
+      |> Map.merge(timer_headers)
+
+    send(instance, {:INVITE, reinvite, self(), stub})
+
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd_reinvite}}, 5_000
+    assert_no_session_timer(fwd_reinvite)
+
+    Manual.simulate(tp_pid, 200, 100)
+    assert_receive {:replied, 200, _reason, _answered, fields}, 5_000
+    refute Enum.any?(fields, fn {k, _} -> is_binary(k) and k =~ ~r/^session-expires$/i end)
+
+    send(instance, {:ACK, %{in_dialog(:ACK, invite) | cseq: [3, :ACK]}, nil, stub})
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, "OK", %{method: :BYE}, _}, 5_000
+  end
+
+  defp assert_no_session_timer(req) do
+    assert SIP.Msg.Ops.session_expires(req) == nil
+    assert SIP.Msg.Ops.min_se(req) == nil
+    refute "timer" in SIP.Msg.Ops.supported_extensions(req)
+    refute "timer" in SIP.Msg.Ops.required_extensions(req)
+  end
+
   # The one in-dialog request that does NOT cross, on a B2BUA with no media at all:
   # an offerless UPDATE, i.e. an RFC 4028 session-timer refresh. A session timer runs
   # between us and ONE peer — we are its UA on that leg — so the far end has nothing

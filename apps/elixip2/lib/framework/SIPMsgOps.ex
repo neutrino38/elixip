@@ -339,6 +339,146 @@ defmodule SIP.Msg.Ops do
   @spec supported_extensions(map()) :: [binary()]
   def supported_extensions(msg) when is_map(msg), do: option_tags(msg, :supported, "supported")
 
+  # ── Session timers (RFC 4028) ───────────────────────────────────────────────
+  #
+  # THE one reading of `Session-Expires` and `Min-SE`. A session timer is
+  # negotiated per DIALOG — between two UAs, never end to end — so a B2BUA runs
+  # one on each of its legs, and these headers are the leg's own business, like
+  # its Contact (see `strip_session_timer/1`).
+
+  @session_expires_names ["session-expires", "x"]
+  @min_se_names ["min-se"]
+
+  @doc """
+  The session interval a message asks for, with the refresher it names (RFC 4028
+  §4): `{delta_seconds, :uac | :uas | nil}`, or `nil` when there is no usable
+  `Session-Expires` (the compact form `x` included).
+
+  `nil` as the refresher is a header that named none — RFC 4028 §7.1 leaves the
+  choice to the UAS then. A refresher value other than `uac`/`uas` is read the
+  same way rather than refusing the message: what the peer asked for is the
+  interval, and that one is still readable.
+
+      iex> SIP.Msg.Ops.session_expires(%{"Session-Expires" => "1800;refresher=uac"})
+      {1800, :uac}
+      iex> SIP.Msg.Ops.session_expires(%{"x" => "90"})
+      {90, nil}
+  """
+  @spec session_expires(map()) :: {pos_integer(), :uac | :uas | nil} | nil
+  def session_expires(msg) when is_map(msg) do
+    msg
+    |> string_header_values(@session_expires_names)
+    |> Enum.find_value(fn value ->
+      {delta, params} = split_params(value)
+
+      case delta_seconds(delta) do
+        {:ok, seconds} -> {seconds, refresher_value(Map.get(params, "refresher"))}
+        :invalid -> nil
+      end
+    end)
+  end
+
+  @doc """
+  The smallest session interval a message says its sender accepts (RFC 4028 §5),
+  or `nil` when it carries no usable `Min-SE`.
+
+      iex> SIP.Msg.Ops.min_se(%{"Min-SE" => "90"})
+      90
+  """
+  @spec min_se(map()) :: pos_integer() | nil
+  def min_se(msg) when is_map(msg) do
+    msg
+    |> string_header_values(@min_se_names)
+    |> Enum.find_value(fn value ->
+      {delta, _params} = split_params(value)
+
+      case delta_seconds(delta) do
+        {:ok, seconds} -> seconds
+        :invalid -> nil
+      end
+    end)
+  end
+
+  @doc """
+  Remove everything a message says about ITS session timer: `Session-Expires`,
+  `Min-SE`, and the `timer` option tag from `Supported` and `Require`.
+
+  This is what a B2BUA must do to a request crossing from one leg to the other.
+  Relayed as is, a caller's `Session-Expires: 90;refresher=uac` tells the callee
+  that the B2BUA — the UAC of THAT leg — will refresh it every 45 s, which it
+  never does: the callee then hangs up after 90 s on a call that is perfectly
+  alive (traffic of 2026-10-06, `Reason: SIP;cause=408;text="Session Timer
+  Expired"`). Each leg negotiates its own, or none.
+  """
+  @spec strip_session_timer(map()) :: map()
+  def strip_session_timer(msg) when is_map(msg) do
+    Enum.reduce(msg, msg, fn
+      {key, value}, acc when is_binary(key) ->
+        name = String.downcase(key)
+
+        cond do
+          name in @session_expires_names or name in @min_se_names ->
+            Map.delete(acc, key)
+
+          name in ["supported", "require"] ->
+            drop_option_tag(acc, key, value, "timer")
+
+          true ->
+            acc
+        end
+
+      {:supported, value}, acc ->
+        drop_option_tag(acc, :supported, value, "timer")
+
+      _other, acc ->
+        acc
+    end)
+  end
+
+  # Keeps the header's shape — a parsed list stays a list, a raw value stays a
+  # string — and drops the header when nothing is left of it.
+  defp drop_option_tag(msg, key, value, tag) do
+    tags =
+      value
+      |> List.wrap()
+      |> Enum.flat_map(&String.split(to_string(&1), ","))
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == "" or String.downcase(&1) == tag))
+
+    cond do
+      tags == [] -> Map.delete(msg, key)
+      is_list(value) -> Map.put(msg, key, tags)
+      true -> Map.put(msg, key, Enum.join(tags, ", "))
+    end
+  end
+
+  # Every value of a string-keyed header, whatever its spelling, under any of
+  # `lowercase_names` (a full name and its compact form).
+  defp string_header_values(msg, lowercase_names) do
+    for {key, value} <- msg,
+        is_binary(key),
+        String.downcase(key) in lowercase_names,
+        v <- List.wrap(value),
+        do: to_string(v)
+  end
+
+  defp delta_seconds(value) do
+    case Integer.parse(String.trim(value)) do
+      {seconds, ""} when seconds > 0 -> {:ok, seconds}
+      _ -> :invalid
+    end
+  end
+
+  defp refresher_value(value) when is_binary(value) do
+    case String.downcase(String.trim(value)) do
+      "uac" -> :uac
+      "uas" -> :uas
+      _ -> nil
+    end
+  end
+
+  defp refresher_value(_value), do: nil
+
   # One reading for both: a comma-separated list that may also be spread over
   # several header lines, exactly like `Accept` above. Option tags are `token`s
   # and the IANA registry holds them in lower case, so they are compared folded —
@@ -1820,6 +1960,9 @@ defmodule SIP.Msg.Ops do
   point back at the leg the request came in on), replaces the User-Agent and
   decrements `Max-Forwards`.
 
+  The session timer does not cross either (`strip_session_timer/1`): RFC 4028
+  negotiates it per dialog, so each leg has its own or none.
+
   The body and every other header (identity `From`/`To`, custom `X-*`…) cross
   unchanged. Callers layer their own policy on top; they do not re-read the
   message.
@@ -1866,6 +2009,7 @@ defmodule SIP.Msg.Ops do
         req2 =
           req
           |> Map.drop(@b2bua_dropped_fields)
+          |> strip_session_timer()
           |> strip_asserted_identity()
           |> put_asserted_identity(Keyword.get(opts, :asserted_identity))
           |> put_contact_identity(Map.get(req, :contact))
