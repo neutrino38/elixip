@@ -74,6 +74,33 @@ boolean and file context the store needs. What is left to the site:
    `apachectl configtest && systemctl reload httpd php-fpm`;
 4. **DNS**: `files.weshwesh.eu`, `AAAA` (and `A`) to web1.
 
+What installing it on web1 taught, on 2026-10-07:
+
+- **`MD5` in capitals.** The PHP compares the algorithm `AUTH_QUERY` returns
+  with `'MD5'` and `'SHA-256'`, case included. `'md5'` reads as an unknown
+  algorithm: the 401 offers both challenges — the sign — and the upload then
+  fails.
+- **A managed base has no `pg_hba.conf`.** On Scaleway, web1 is let in by the
+  instance's allowed IPs (`scw rdb acl add <ip>/32 …`) or a private network,
+  the user is created in the console or by SQL, and the DSN takes the
+  endpoint's host and port. Test from web1 with `psql` first: when it reads
+  the row of an account, the PHP will.
+- **`/var/opt` is `/opt` to SELinux.** The policy makes them equivalent and
+  refuses a file context on the `/var/opt` path; the rules are written on
+  `/opt/belledonne-communications/…`, which `.pdo2` does in `%post`. `.pdo1`
+  left the upload directory `usr_t`, unwritable — by hand:
+
+  ```bash
+  semanage fcontext -a -t httpd_sys_rw_content_t '/opt/belledonne-communications/flexisip-http-file-transfer-tmp(/.*)?'
+  semanage fcontext -a -t httpd_sys_rw_content_t '/opt/belledonne-communications/log(/.*)?'
+  restorecon -Rv /var/opt/belledonne-communications
+  ```
+
+- **Diagnosing.** Logging is off; `LogLevel::DEBUG` in the config shows the
+  whole request in `/var/opt/belledonne-communications/log/`, file names and
+  digest headers included — set it back to `DISABLED` after. The vhost's own
+  logs are two commented lines of its sample.
+
 Then the checks of chat-media-plan S0: a 401 offering one challenge on the SIP
 domain, a 204 to the CORS preflight, 403 on `/files/tmp/` and `download.php`, an
 upload with a SIP account answering the XML, its file downloadable without

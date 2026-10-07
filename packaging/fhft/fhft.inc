@@ -6,6 +6,9 @@ Alias /files/tmp /var/opt/belledonne-communications/flexisip-http-file-transfer-
 Alias /files     /opt/belledonne-communications/share/flexisip-http-file-transfer-server
 
 <Directory /opt/belledonne-communications/share/flexisip-http-file-transfer-server/>
+    # PHP announces its version; expose_php cannot be set per directory
+    Header always unset X-Powered-By
+    Header unset X-Powered-By
     Options -Indexes
     AllowOverride None
     Require all granted

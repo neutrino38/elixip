@@ -18,8 +18,10 @@ captures Part S produces in S0. Part T needs nothing else from Part S until
 its end-to-end check.
 
 **Status (2026-10-07):** S1's code is done, its scenario pair included,
-run against the store rehearsal (`packaging/fhft/rehearsal/`); S0's files
-are written and rehearsed, waiting for access to `web1`; the provisioning
+run against the store rehearsal (`packaging/fhft/rehearsal/`); S0 is installed on `web1`
+on 2026-10-07 (`.pdo1`, its SELinux contexts set by hand; `.pdo2` sets them
+itself) and passed its HTTP checks against the Scaleway subscriber base — the
+Linphone exchange and its captures remain; the provisioning
 page is drafted (`docs/kelixip/chat-attachments.md`), to be confirmed by
 S0's captures. Part T: T0 to T5 done in Trix (`9d5975a`
 to `1adcbfb`, ADR 0012), checked by tests and, for the upload, against the

@@ -14,10 +14,15 @@
 %global opt_dir  /opt/belledonne-communications/share/flexisip-http-file-transfer-server
 %global tmp_dir  %{var_dir}/flexisip-http-file-transfer-tmp
 %global conf_dir %{_sysconfdir}/flexisip-http-file-transfer-server
+# The SELinux policy makes /var/opt equivalent to /opt: a file context is written
+# on the /opt path, or semanage refuses it, and it names the two directories PHP
+# writes, never the scripts beside them.
+%global se_tmp   /opt/belledonne-communications/flexisip-http-file-transfer-tmp(/.*)?
+%global se_log   /opt/belledonne-communications/log(/.*)?
 
 Name:           bc-flexisip-http-file-transfer-server
 Version:        1.1.1
-Release:        0.alpha.0+%{commit}.pdo1%{?dist}
+Release:        0.alpha.0+%{commit}.pdo2%{?dist}
 Summary:        Flexisip HTTP File Transfer server (PDO, php-fpm)
 
 License:        AGPL-3.0-or-later
@@ -44,7 +49,12 @@ Requires:       logrotate
 # The driver of the subscriber base: PostgreSQL for kelixip, MySQL for Flexisip's.
 Recommends:     php-pgsql
 Suggests:       php-mysqlnd
+# selinuxenabled, semanage, restorecon, setsebool: the %%post must find them, or it
+# skips the SELinux setup without a word and PHP cannot write the upload directory
+Requires(post): libselinux-utils
+Requires(post): policycoreutils
 Requires(post): policycoreutils-python-utils
+Requires(postun): libselinux-utils
 Requires(postun): policycoreutils-python-utils
 
 %description
@@ -86,16 +96,28 @@ install -m 0644 logrotate/flexisip-http-file-transfer-server.conf %{buildroot}%{
 %post
 # cron reads fresh files only: touch it once installed (upstream does the same)
 touch %{_sysconfdir}/cron.d/flexisip-http-file-transfer-server
-if selinuxenabled 2>/dev/null; then
-  setsebool -P httpd_can_network_connect_db on || :
-  semanage fcontext -a -t httpd_sys_rw_content_t '%{var_dir}(/.*)?' 2>/dev/null || :
-  restorecon -R %{var_dir} || :
+# SELinux: PHP reaches the subscriber base and writes the uploads. Added, or
+# modified when an earlier install left the rule; a failure is said, not hidden —
+# the package is installed either way, and the admin must know what to do by hand.
+if /usr/sbin/selinuxenabled; then
+  /usr/sbin/setsebool -P httpd_can_network_connect_db on \
+    || echo "%{name}: setsebool httpd_can_network_connect_db failed: run it by hand" >&2
+  for spec in '%{se_tmp}' '%{se_log}'; do
+    /usr/sbin/semanage fcontext -a -t httpd_sys_rw_content_t "$spec" 2>/dev/null \
+      || /usr/sbin/semanage fcontext -m -t httpd_sys_rw_content_t "$spec" \
+      || echo "%{name}: semanage fcontext $spec failed: run it by hand" >&2
+  done
+  /usr/sbin/restorecon -R %{var_dir} \
+    || echo "%{name}: restorecon -R %{var_dir} failed: run it by hand" >&2
 fi
+:
 
 %postun
-if [ "$1" -eq 0 ] && selinuxenabled 2>/dev/null; then
-  semanage fcontext -d '%{var_dir}(/.*)?' 2>/dev/null || :
+if [ "$1" -eq 0 ] && /usr/sbin/selinuxenabled; then
+  /usr/sbin/semanage fcontext -d '%{se_tmp}' 2>/dev/null || :
+  /usr/sbin/semanage fcontext -d '%{se_log}' 2>/dev/null || :
 fi
+:
 
 %files
 %license LICENSE.txt
@@ -117,6 +139,17 @@ fi
 %config(noreplace) %{_sysconfdir}/logrotate.d/flexisip-http-file-transfer-server.conf
 
 %changelog
+* Wed Oct 07 2026 Emmanuel BUU <latribuu@proton.me> - 1.1.1-0.alpha.0+524ab71.pdo2
+- %%post: the SELinux setup required libselinux-utils without saying so; when
+  selinuxenabled was missing, it was skipped silently and the upload directory
+  kept usr_t. It now depends on it, calls the tools by their path, modifies an
+  existing file-context rule instead of failing on it, and says what failed.
+- The file contexts are written on /opt/belledonne-communications/...: the
+  policy makes /var/opt equivalent to /opt and refuses a rule on the /var/opt
+  path. They name the upload and log directories only.
+- fhft.inc drops X-Powered-By (expose_php cannot be set per directory); the
+  vhost sample offers its own logs, commented out.
+
 * Wed Oct 07 2026 Emmanuel BUU <latribuu@proton.me> - 1.1.1-0.alpha.0+524ab71.pdo1
 - Upstream 524ab71 (1.1.1-alpha), built from a tarball of the commit.
 - common-pdo.patch: the subscriber base through PDO; AUTH_DB_DSN names it,
