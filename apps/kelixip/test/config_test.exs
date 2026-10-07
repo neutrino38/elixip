@@ -497,6 +497,42 @@ defmodule Kelix.ConfigTest do
     assert cfg.listen == []
   end
 
+  describe "parse/1 — [security]" do
+    test "absent: no file, nothing ignored" do
+      {:ok, cfg} = Config.parse("")
+      assert cfg.security == %{log_file: nil, ignore: []}
+    end
+
+    test "log_file parses" do
+      {:ok, cfg} = Config.parse(~s([security]\nlog_file = "/var/log/kelixip/security.log"))
+      assert cfg.security.log_file == "/var/log/kelixip/security.log"
+    end
+
+    test "log_file rejects a non-string" do
+      assert {:error, msg} = Config.parse(~s([security]\nlog_file = 42))
+      assert msg =~ "[security]: `log_file` must be a string"
+    end
+
+    test "ignore accepts the known incident type names" do
+      {:ok, cfg} = Config.parse(~s([security]\nignore = ["invalid-packet", "transport-error"]))
+      assert cfg.security.ignore == [:invalid_packet, :transport_error]
+    end
+
+    test "ignore refuses an unknown type name, and a non-list" do
+      assert {:error, msg} = Config.parse(~s([security]\nignore = ["bogus"]))
+      assert msg =~ ~s|unknown incident type(s) ["bogus"]|
+      assert msg =~ "invalid-packet"
+
+      assert {:error, msg} = Config.parse(~s([security]\nignore = "invalid-packet"))
+      assert msg =~ "must be a list"
+    end
+
+    test "an unknown key is refused" do
+      assert {:error, msg} = Config.parse(~s([security]\nbogus = 1))
+      assert msg =~ "[security]: unknown key"
+    end
+  end
+
   describe "parse/1 — validation errors" do
     test "unknown top-level key" do
       assert {:error, msg} = Config.parse(~s(bogus = 1))
