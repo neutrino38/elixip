@@ -1,0 +1,17 @@
+# The S0 installation, rehearsed: the RPM web1 installs, minus TLS and cron.
+# Built from packaging/ (see compose.yaml), after packaging/fhft/build-rpm.sh.
+FROM almalinux:9
+
+COPY dist/bc-flexisip-http-file-transfer-server-*.noarch.rpm /tmp/
+RUN dnf install -y /tmp/bc-flexisip-http-file-transfer-server-*.noarch.rpm php-pgsql openssl \
+ && dnf clean all \
+ && install -d /run/php-fpm \
+ # mod_ssl's default vhost wants the key systemd generates on httpd's first start
+ && openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=localhost \
+      -keyout /etc/pki/tls/private/localhost.key -out /etc/pki/tls/certs/localhost.crt 2>/dev/null
+
+COPY fhft/rehearsal/zz-fhft-rehearsal.conf /etc/httpd/conf.d/zz-fhft-rehearsal.conf
+COPY fhft/rehearsal/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+EXPOSE 80
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

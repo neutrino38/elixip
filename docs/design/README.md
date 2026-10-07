@@ -38,6 +38,8 @@ The user-facing counterparts live at the repository root —
 | [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
 | [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
 | [chat-basic-plan.md](chat-basic-plan.md) | the build order of basic chat: the `chat` function, the page relay, the Silo, phase by phase |
+| [DESIGN-CHAT-MEDIA.md](DESIGN-CHAT-MEDIA.md) | chat attachments: the RCS `fthttp` contract Linphone speaks, the file store behind Apache, the web client |
+| [chat-media-plan.md](chat-media-plan.md) | its build order: the PHP reference server first, Trix, then the Elixir store |
 
 ## Designed elsewhere
 
