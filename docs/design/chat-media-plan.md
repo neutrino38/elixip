@@ -67,45 +67,53 @@ which shrinks Part T to what is specific to files.
 ### S0 — the PHP server on `web1`, for real
 
 **Delivers** the store, installed rather than written: the reference
-`flexisip-http-file-transfer-server` under `/files/` on `web1`'s Apache,
-configured for production use, not as a demo.
+`flexisip-http-file-transfer-server`, upstream commit **`524ab71`** (read on
+2026-10-07, design §2.8), on `web1`'s Apache (AL9, php-fpm) under its own
+name, **`files.weshwesh.eu`** — the wildcard certificate covers it, and a
+name that is not the host's survives Part E moving the store elsewhere.
+Configured for production use, not as a demo:
 
-It starts with a **local checkout at a pinned commit**, read before anything
-is configured: design §2.8 was written from an automatic summary of the
-repository, so the constant names, the nonce format, the purge and the
-logging are confirmed in `hft.php` and its includes first, and the design
-corrected where they differ. The commit goes in the Apache config's
-comments.
-
-- `DIGEST_AUTH = true`, `AUTH_NONCE_KEY` random, `AUTH_REALM` **undefined** so
+- **the subscriber base through PDO.** Upstream reads it with `mysqli`; the
+  kelixip base is PostgreSQL. `packaging/fhft/common-pdo.patch` moves
+  `common.php` to PDO, the driver named by `AUTH_DB_DSN`, the query and its
+  contract unchanged; a **read-only** role with `SELECT` on `username`,
+  `domain`, `ha1` of `subscriber`;
+- `DIGEST_AUTH = true`, `AUTH_NONCE_KEY` random, `AUTH_REALM` **removed** so
   the realm is the SIP domain of the HTTP `From` (a fixed realm breaks the
-  day a second domain exists), `AUTH_QUERY` pointed at the subscriber base
-  under a **read-only** account;
-- the algorithm: `auth_db` holds **one** HA1 column hashed by one
-  `password_hash` for the whole base, with no per-row algorithm column, so
-  `AUTH_QUERY` returns that column as `password` and the algorithm as a
-  **constant** (`'MD5'` or `'SHA-256'`, whichever `password_hash` says).
-  The PHP challenges with both; which one Linphone answers is captured. If
-  it answers the one the base cannot verify, the other challenge is removed
-  from the PHP's 401 — a one-line local patch, kept with the config;
-- the URL layout: the PHP builds the file URL as `<directory of
-  hft.php>/tmp/<name>`, and `fhft_tmp_path` lies outside the document root
-  by default. Apache maps `/files/hft` to `hft.php` (rewrite) and
-  `/files/tmp/` to `fhft_tmp_path` (`Alias`), so the URLs clients see are
-  the ones Part E keeps (decision 2);
+  day a second domain exists);
+- **one challenge.** `auth_db` holds one HA1 column hashed one way for the
+  whole base, so `AUTH_QUERY` returns it as `password` and the algorithm as
+  a constant (`'MD5'` or `'SHA-256'`, as `password_hash` says). The PHP
+  offers only the challenges the rows allow: the 401 carries that one alone,
+  and no client can pick the other;
+- **the URLs**: `Alias /files` to the scripts and `Alias /files/tmp` to the
+  upload directory, **statically** — the shipped config sends `tmp/`
+  through `download.php`, which challenges, and a browser fetching with
+  `credentials: 'omit'` cannot answer. The upload URL is
+  `https://files.weshwesh.eu/files/hft.php`, `.php` included, and Part E
+  serves the same path (decision 2); `download.php` is denied;
+- **php-fpm**: the PHP limits in a `.user.ini` beside the scripts (the
+  shipped `php_value` lines need `mod_php`), `CGIPassAuth On` so that
+  `Authorization` reaches PHP; the config file loads after `php.conf` so
+  the upload directory runs no script whatever its extension;
 - `fhft_tmp_path` on a volume sized for `fhft_maximum_file_size_in_MB` times
   the expected traffic over `fhft_validity_period`; the period **at least the
-  Silo's `max_retention`** (design D8);
-- the purge: since the repository does not show one, a cron job removing
-  files under `tmp/` older than `fhft_validity_period`, written here and
-  kept with the Apache config;
-- the Apache side of design §7: `Options -Indexes`, `nosniff`,
-  `Content-Disposition: attachment` on `tmp/`, the CORS headers for Trix's
-  origin, `LimitRequestBody` equal to the PHP limit; `OPTIONS` not
-  challenged;
-- the logging rule of design §6.6 checked against what the PHP logs at
-  `fhft_logLevel`: if it writes file names or URLs, the level is set so it
-  does not, and this is noted in the Apache config's comments.
+  Silo's `max_retention`** (design D8) — both are 7 days by default;
+- **the purge is upstream's** cron job (02:00, older than 7 days), installed
+  as shipped; a validity changed in the config is changed there too;
+- the Apache side of design §7 on `tmp/`: `Options -Indexes`, `nosniff`,
+  `Content-Disposition: attachment`; CORS for `https://trix.weshwesh.eu` on
+  both directories, `always` so the 401 carries it and exposes
+  `WWW-Authenticate`; `OPTIONS` answered 204 by Apache, never challenged;
+  `LimitRequestBody` just above the PHP limit;
+- **the logging rule** of design §6.6: `fhft_logLevel` stays `DISABLED`,
+  since `ERROR` and `DEBUG` both write file names and paths; said in the
+  config's comments.
+
+The installation is rehearsed first in containers on a development machine
+— AL9, httpd, php-fpm, PostgreSQL with a `subscriber` table — with the same
+files; that rehearsal is what S1's scenario pair runs against before `web1`
+exists (S1).
 
 Two Linphone desktops provisioned with `file_transfer_server_url` and
 `cpim_in_basic_chat_rooms_enabled=1` exchange one photo and one voice
@@ -118,12 +126,15 @@ against, and the answer to design §12's two first unverified points.
 kelixip domain, in `docs/kelixip/administration.md`: which keys, where they
 go on desktop and on mobile, and that the desktop offers no UI for them.
 
-**Files** `web1`'s Apache config and cron, kept in the operations
-repository; `docs/kelixip/administration.md` and `docs/design/captures/`
-here.
+**Files** `packaging/fhft/` here: the PDO patch, the Apache config, the
+`.user.ini`, the server config with its secrets left as placeholders, and
+the rehearsal's container files; `docs/kelixip/administration.md` and
+`docs/design/captures/`.
 
 **Done when** the two desktops exchange both messages with receipts; the
-realm challenged is the SIP domain; a `GET` on `/files/tmp/` lists nothing;
+realm challenged is the SIP domain, with one algorithm; what Linphone does
+with the 400 the PHP gives its authenticated empty POST is captured (design
+§12); a `GET` on `/files/tmp/` lists nothing;
 a file older than the period is gone the next morning; and the captures
 are committed.
 
@@ -385,7 +396,7 @@ Bearer token for web clients (S2), or a second domain whose realm handling
 the PHP server gets wrong. The first of these that is asked for starts E1.
 Until then, Part E is a design with a plan, not a debt.
 
-**What it replaces.** The same URL path on `web1` (`/files/hft`,
+**What it replaces.** The same URL path on `web1` (`/files/hft.php`,
 `/files/tmp/`), so no client is re-provisioned: Apache's `ProxyPass` turns
 from the PHP handler to the loopback service, and the `Alias` points at the
 new directory. Files under the PHP server's `tmp/` stay served until they
@@ -399,7 +410,7 @@ repository's versions, `Plug`, `Bandit`, `exqlite`, `jason`, `toml`;
 `Store.Config` reading the TOML of design §6.5 and refusing to start on a
 missing or unwritable `dir`, an empty `nonce_key`, a `public_url` that is
 not `https://`; `Store.Endpoint` on `addr:port`, `Store.Router` answering
-`204` to an empty `POST /files/hft`, `404` elsewhere, `OPTIONS` with the
+`204` to an empty `POST /files/hft.php`, `404` elsewhere, `OPTIONS` with the
 CORS headers; `packaging/` with the OTP release, a systemd unit as user
 `kelifile` with `RELEASE_DISTRIBUTION=none`, an RPM built as this
 repository's `packaging/build-rpm.sh` does, `/etc/kelifile/config.toml`
@@ -536,17 +547,15 @@ gates a kelixip release.
   first to everyone and falls back on a 415 (ADR 0009); ADR 0009's real
   validation is still pending. T3 sees it on the first file sent to an
   unprovisioned desktop.
-- **The PHP server's purge and logging were not seen.** S0 adds the cron
-  and checks the log; if the PHP writes file names at the level needed for
-  debugging, the logging rule is not met until Part E, and S0 says so in the
-  config's comments.
-- **The HTTP `From` header shape.** A GRUU whose `;gr=` the PHP server
-  mishandles shows up in S0 before anything copies the behaviour.
-- **One algorithm per base, two challenges per 401.** `auth_db` holds a
-  single HA1 per subscriber, hashed one way for the whole base; the PHP
-  challenges MD5 and SHA-256. A client answering the other one fails with a
-  correct password. S0 measures which challenge Linphone answers and, if
-  needed, patches the PHP's 401 down to one challenge.
+- **The 400 to an authenticated empty POST.** With digest on, the PHP
+  answers 400 where RCS describes a 204 (design §2.8). If Linphone treats
+  it as a failure, attachments do not work against the reference server
+  with digest, and S0 falls back to digest on the file POST alone — a
+  second local patch — or to the Elixir store early.
+- **The HTTP `From` header shape.** The PHP needs a bare URI; Trix must
+  send one (T3). What Linphone sends is captured in S0.
+- **The PDO patch is ours.** Upstream changes to `common.php` have to be
+  re-applied by hand; the commit is pinned for that reason.
 - **Realm = SIP domain, on both sides.** Trix's HA1s and the base's HA1s
   were computed with the SIP domain as realm, and the store challenges with
   the domain of the HTTP `From`. A deployment whose SIP realm differs from

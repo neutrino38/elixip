@@ -282,30 +282,58 @@ true, `linphonecore.c:2065-2067`).
 
 ### 2.8 The reference file server
 
-`flexisip-http-file-transfer-server`, PHP behind Apache, read on GitHub:
+`flexisip-http-file-transfer-server`, PHP behind Apache, AGPL-3.0, read in a
+checkout at commit `524ab71` (2026-10-07). It ships an RPM spec, an Apache
+config, a cron job and a logrotate file beside the scripts.
 
 | Setting | Default | Role |
 |---|---|---|
 | `fhft_tmp_path` | `/var/opt/belledonne-communications/flexisip-http-file-transfer-tmp/` | files |
-| `fhft_validity_period` | 7 days | written in `until` |
-| `fhft_maximum_file_size_in_MB` | 256 | above: 400 |
-| `fhft_extension_black_list` / `fhft_extension_fallback` | html, php, jsp… / `txt` | server-side extensions get `.txt` appended |
-| `DIGEST_AUTH` | false | challenge uploads and proxied downloads |
-| `AUTH_REALM` | `sip.example.org` | fixed realm; if undefined, the domain of the HTTP `From` |
-| `AUTH_NONCE_KEY`, `MIN_NONCE_VALIDITY_PERIOD` | –, 10 s | nonce = HMAC-SHA256 of the time window; current and previous windows accepted |
-| `AUTH_QUERY`, `AUTH_DB_*` | MySQL | returns `password` and `algorithm` (`CLRTXT`, `MD5`, `SHA-256`); in MD5 the stored value is the **SIP HA1** |
+| `fhft_validity_period` | 7 days | written in `until`; the cron job repeats it |
+| `fhft_maximum_file_size_in_MB` | 256 | above: 400; below PHP's `upload_max_filesize` / `post_max_size` |
+| `fhft_extension_black_list` / `fhft_extension_fallback` | html, php, js, py… / `txt` | a listed extension gets `.txt` appended |
+| `fhft_logLevel` | `DISABLED` | `DEBUG` and `ERROR` write file names and paths |
+| `DIGEST_AUTH` | false | challenge uploads, and downloads through `download.php` |
+| `AUTH_REALM` | `sip.example.org` | fixed realm; when the line is removed, the domain of the HTTP `From` |
+| `AUTH_NONCE_KEY`, `MIN_NONCE_VALIDITY_PERIOD` | –, 10 s | nonce = HMAC-SHA256 of the time window; current and previous windows accepted; 500 if the key is under 12 characters |
+| `AUTH_QUERY`, `AUTH_DB_*` | MySQL, `mysqli` | binds `(username, realm)`, returns rows of `password` and `algorithm` (`CLRTXT`, `MD5`, `SHA-256`); in MD5 the stored value is the **SIP HA1** |
 
-`hft.php`: empty POST → 204; otherwise `$_FILES['File']`, size checks → 400,
-stored as `uniqid() . "_" . bin2hex(random 10 bytes) . ".$ext"`, URL
-`<scheme>://<host>:<port><dir of hft.php>/tmp/<name>`, so the file is served
-**statically** by Apache, with no authentication: the URL is the capability.
-The 401 carries two challenges, MD5 and SHA-256, `qop="auth"`,
-`opaque=md5(realm)`. A valid TLS client certificate
-(`SSL_CLIENT_VERIFY == SUCCESS`) bypasses the digest; "the server won't
-check the individual access but only certificate validity"
-(`tester/message_tester.c:144-146`). `download.php` requires the
-authentication, serves `Content-Type: application/octet-stream`,
-`Content-Disposition: attachment`, `Content-Length`, 404 when absent.
+`hft.php`: without `DIGEST_AUTH`, an empty POST gets **204** and a POST with
+`$_FILES['File']` the XML. **With it, every request is authenticated first,
+the empty one included, and an authenticated POST without a file is a 400**
+(`process_request` finds no `File`): the 204 of the RCS flow exists only on
+an unauthenticated server. Size checks → 400; the file is stored as
+`uniqid() . "_" . bin2hex(random 10 bytes) . ".$ext"` and its URL is
+`<scheme>://<SERVER_NAME>:<port><dir of the request path>/tmp/<name>` — the
+upload URL ends in `hft.php`, and the port is always written.
+
+The digest:
+
+- the username is the text between the first `:` and the first `@` of the
+  HTTP `From`, the realm what follows up to a `;` or the end. A `From` with a
+  display name or angle brackets leaves a `>` in the realm: **the `From` must
+  be a bare URI**, a GRUU's `;gr=` being the one tolerated parameter;
+- the 401 offers MD5, SHA-256 or both, **as the rows of `AUTH_QUERY` allow**
+  for that user (both when the user is unknown or the base unreachable),
+  `qop="auth"`, `opaque=md5(realm)`;
+- the response's `uri` must equal the request path exactly; `Auth-Digest`
+  is read before `Authorization`;
+- a valid TLS client certificate (`SSL_CLIENT_VERIFY == SUCCESS`) bypasses
+  it; "the server won't check the individual access but only certificate
+  validity" (`tester/message_tester.c:144-146`).
+
+Downloads: the shipped Apache config aliases `tmp/` to **`download.php`**,
+which authenticates like the upload and serves `application/octet-stream`,
+`Content-Disposition: attachment`, `Content-Length`, 404 when absent; a
+commented alternative serves the directory statically, and then the URL is
+the capability. `download.php` is also the `?target=` proxy when
+`PROXY_SELF_DOMAIN` is set.
+
+The purge is a cron job, as the web server's user, at 02:00: files older
+than 7 days are deleted, a period written there a second time. The shipped
+Apache config sets the PHP limits with `php_value`, which only `mod_php`
+reads; under `php-fpm` they are a `.user.ini` beside the scripts, and
+`CGIPassAuth On` is needed for `Authorization` to reach PHP at all.
 
 On the client side the digest uses **the SIP credentials**, found by
 username and domain of the local address, from realm to domain to username
@@ -390,7 +418,7 @@ is visible.
                                   ▼                     │                    │ Silo (SQL)
                      ┌─────────────────────────┐        │                    ▼
                      │ Apache on web1          │        │              subscriber base
-                     │  /files/hft     ──proxy──┼──► Elixir file store :4010   ▲  (MySQL/PostgreSQL)
+                     │  /files/hft.php ──proxy──┼──► Elixir file store :4010   ▲  (MySQL/PostgreSQL)
                      │  /files/download ──proxy─┼──►   ├ Plug.Router           │  read-only: HA1
                      │  /files/tmp/*  (static) │        │  ├ Auth (digest/bearer)──┘
                      │  CORS headers, mTLS opt.│        │  ├ Upload → disk + SQLite
@@ -407,9 +435,11 @@ not by coupling them.
 ## 5. The HTTP contract (normative)
 
 Base path: whatever is provisioned as `file_transfer_server_url`, here
-`https://files.example.com/files/hft`.
+`https://files.example.com/files/hft.php` — the reference server's own path,
+kept so the switch of Part E re-provisions no client (chat-media-plan,
+decision 2).
 
-### 5.1 `POST /files/hft` — upload
+### 5.1 `POST /files/hft.php` — upload
 
 **Empty body** (`Content-Length: 0`, or no body):
 
@@ -427,7 +457,10 @@ Base path: whatever is provisioned as `file_transfer_server_url`, here
   configured domain**. The nonce is `HMAC-SHA256(key, floor(now / window))`
   encoded in hex; the current and previous windows are valid; `window` is
   10 s by default. No nonce state is kept;
-- valid `Authorization` → `204`.
+- valid `Authorization` → `204`. The reference server answers **400**
+  there (§2.8); 204 is what RCS describes, and what this store answers.
+  Should S0 show Linphone failing on the 204 it never met, this line
+  follows the reference instead.
 
 **Multipart body** (`Content-Type: multipart/form-data`):
 
@@ -627,8 +660,8 @@ A sketch of the vhost, to be adapted to the existing one:
     LimitRequestBody 67108864            # = [limits].max_size_mb
 
     ProxyPreserveHost On
-    ProxyPass        /files/hft      http://127.0.0.1:4010/files/hft
-    ProxyPassReverse /files/hft      http://127.0.0.1:4010/files/hft
+    ProxyPass        /files/hft.php  http://127.0.0.1:4010/files/hft.php
+    ProxyPassReverse /files/hft.php  http://127.0.0.1:4010/files/hft.php
     ProxyPass        /files/download http://127.0.0.1:4010/files/download
     ProxyPassReverse /files/download http://127.0.0.1:4010/files/download
     RequestHeader set X-Forwarded-Proto "https"
@@ -680,7 +713,7 @@ Pushed by remote provisioning (an XML rc file) or written in `linphonerc`:
 
 ```ini
 [misc]
-file_transfer_server_url=https://files.example.com/files/hft
+file_transfer_server_url=https://files.example.com/files/hft.php
 file_transfer_server_get_proxy=https://files.example.com/files/download   ; optional
 
 [proxy_0]
@@ -785,9 +818,10 @@ to the store.
 
 ## 10. Verification plan
 
-1. **The oracle.** Install the reference PHP server on `web1` under
-   `/files-ref/`, pointed at the subscriber base, and provision a Linphone
-   desktop against it. One photo and one voice message, both directions,
+1. **The oracle.** The reference PHP server on `web1`, at `/files/` of
+   `files.weshwesh.eu`, pointed at the subscriber base through the PDO
+   patch of `packaging/fhft/`, and a Linphone desktop provisioned against
+   it. One photo and one voice message, both directions,
    captured: this is the trace the store is diffed against. It also proves
    the provisioning path before any Elixir is written.
 2. **Unit, in the store.** The digest against the three algorithms the
@@ -832,11 +866,13 @@ to the store.
 
 ## 12. Not verified
 
-- The reference PHP server was read **through an automatic summary of its
-  GitHub source**, not a local checkout: constant names and the nonce
-  format are from that summary. Its purge mechanism was not seen.
-- The exact shape of the HTTP `From` header value (brackets, display name,
-  `;gr=`) was not observed on the wire; the parser is tolerant on purpose.
+- What Linphone does with the **400 to its authenticated empty POST**
+  (§2.8): whether it goes on to the file POST, or reports a failure. Read in
+  neither code base; S0 shows it.
+- The exact shape of the HTTP `From` header value Linphone sends was not
+  observed on the wire. The reference server only works with a bare URI
+  (§2.8), which suggests Linphone sends one; the Elixir parser stays
+  tolerant on purpose.
 - mediastreamer2's MKV reader on a browser WebM/Opus; `.mka` Opus playback
   in Firefox.
 - The relay and the Silo on an `rcs-ft-http` and a `message/cpim` body: read
