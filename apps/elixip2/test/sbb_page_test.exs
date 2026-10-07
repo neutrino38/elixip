@@ -127,6 +127,10 @@ defmodule SIP.Test.SbbPage do
   setup_all do
     SIP.Test.AppEnv.preserve_proxy()
     SIP.Test.AppEnv.preserve([:sequence_output])
+    # Registered after `preserve`, so it runs first: the last test's relay still
+    # lingers (state `linger`), and its journal must reach this module's sink
+    # rather than a .puml file in the working directory once the env is restored.
+    on_exit(fn -> Process.sleep(800) end)
     :ok = SIP.Scenario.start_stack()
     Application.put_env(:elixip2, :proxyusesrv, false)
     :ok
