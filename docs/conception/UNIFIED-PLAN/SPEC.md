@@ -346,6 +346,13 @@ Comment E3 est tenu :
   `sendonly` avec exactement les codecs du flux reçu ; les flux de même rang
   s'attachent directement, sans transcodeur (§9) ; la réponse reconstruite
   vers l'appelant se restreint à ce que l'appelé a pris, ou décline ;
+- un flux reçu est retiré quand sa section passe en port 0 **ou** quand le
+  pair n'y émet plus (`a=recvonly`, `a=inactive`) : c'est ainsi qu'un
+  navigateur arrête un partage, la section reste. La réponse décline la
+  section en port 0 ; en B2BUA, le flux relayé est supprimé avec sa source et
+  sa section reste dans nos offres en port 0, ce qui dit à l'appelé que
+  l'écran a disparu (trafic Trix ↔ Trix du 2026-10-07 : sans cette règle,
+  l'appelé gardait l'écran figé) ;
 - une réponse à notre offre ne lit plus la seconde section vidéo par type :
   elle écrasait la première (le `StartSending` de la caméra visait le port
   de l'écran), et un écran refusé refusait toute la vidéo.

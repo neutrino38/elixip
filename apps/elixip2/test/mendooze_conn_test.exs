@@ -3631,11 +3631,24 @@ defmodule Mendooze.ConnTest do
                    |> String.replace("m=text", @screen_section <> "m=text", global: false)
                    |> String.replace("a=group:BUNDLE 0 1\r\n", "")
 
+  # The browser stopped sharing: the section stays, with its mid, and the
+  # browser no longer sends on it (removeTrack turns a transceiver recvonly)
+  @stopped_screen_offer String.replace(
+                          @two_video_offer,
+                          @screen_section,
+                          String.replace(@screen_section, "a=sendrecv", "a=recvonly")
+                        )
+
   # Chrome's default `balanced` policy: one group, the second video bundle-only
   @bundled_offer @chrome_offer
                  |> String.replace("m=text", @screen_section <> "m=text", global: false)
                  |> String.replace("a=group:BUNDLE 0 1", "a=group:BUNDLE 0 1 2")
                  |> String.replace("m=video 46095", "m=video 0")
+                 # what Chrome writes on a bundle-only section: no address of its own
+                 |> String.replace(
+                   ~r/(m=video 0 [^\r\n]*\r\n)c=IN IP4 172\.22\.0\.4/,
+                   "\\1c=IN IP4 0.0.0.0"
+                 )
                  |> String.replace("a=mid:2\r\n", "a=mid:2\r\na=bundle-only\r\n")
 
   # The stream the server creates for the second video gets role 2 and, without
@@ -3653,6 +3666,14 @@ defmodule Mendooze.ConnTest do
   defp bundle_handler("EndpointStartReceiving", [_, 6 | _]), do: {:ok, [22_000]}
   defp bundle_handler("GetMediaCandidates", [_, 6 | _]), do: {:ok, ["rtp://192.168.5.5:22000"]}
   defp bundle_handler(method, params), do: extra_video_handler(method, params)
+
+  # The screen section of a bundled offer with its `a=sendrecv` taken out, so
+  # that the `a=inactive` added next to the mid is the section's one direction.
+  defp stopped_without_sendrecv(offer) do
+    [head, screen_and_rest] = String.split(offer, "a=mid:2\r\n", parts: 2)
+    [screen, rest] = String.split(screen_and_rest, "m=text", parts: 2)
+    head <> "a=mid:2\r\n" <> String.replace(screen, "a=sendrecv\r\n", "") <> "m=text" <> rest
+  end
 
   defp sections(sdp) do
     sdp
@@ -3750,6 +3771,32 @@ defmodule Mendooze.ConnTest do
       assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 4]}
     end
 
+    test "a section the peer stops sending on withdraws its stream" do
+      %{server: server} = start_media_server(&extra_video_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @two_video_offer)
+      assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 4]}
+      _ = calls("EndpointStartReceiving")
+
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, @stopped_screen_offer)
+
+      # the stream goes, nothing is opened for it, and the section is declined
+      # — the camera stands, with its own port
+      assert_received {:jsr309_call, "EndpointDeleteVideoStream", [3, 4, 2]}
+      refute Enum.any?(calls("EndpointStartReceiving"), &(List.last(&1) == 2))
+      [_audio, camera, screen] = sections(answer)
+      assert hd(camera) =~ ~r/^m=video 22002 /
+      assert "a=sendrecv" in camera
+      assert hd(screen) =~ ~r/^m=video 0 /
+      assert "a=mid:2" in screen
+
+      # the same stopped section again: nothing to delete twice, still declined
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, @stopped_screen_offer)
+      refute_received {:jsr309_call, "EndpointDeleteVideoStream", _}
+      [_audio, _camera, screen] = sections(answer)
+      assert hd(screen) =~ ~r/^m=video 0 /
+    end
+
     test "an FIR on the stream is forwarded to that stream" do
       %{server: server, stream: stream} = start_media_server(&extra_video_handler/2)
       {conn, sess_tag} = webrtc_av_conn(server)
@@ -3839,6 +3886,8 @@ defmodule Mendooze.ConnTest do
     test "the answer states the group: one port, one transport, the MID extension" do
       %{server: server} = start_media_server(&bundle_handler/2)
       {conn, _tag} = webrtc_av_conn(server)
+      # the fixture is Chrome's: the bundle-only section has no address of its own
+      assert @bundled_offer =~ ~r/m=video 0 [^\r\n]*\r\nc=IN IP4 0\.0\.0\.0/
       assert {:ok, answer} = Mendooze.set_remote_offer(conn, @bundled_offer)
 
       assert answer =~ "a=group:BUNDLE 0 1 2\r\n"
@@ -3856,6 +3905,32 @@ defmodule Mendooze.ConnTest do
       assert_received {:jsr309_call, "EndpointStartReceiving", [3, 6, 1, _map, _offer, "", 2]}
       assert "a=recvonly" in screen
       refute "a=bundle-only" in screen
+    end
+
+    test "a bundle-only screen the browser stops sending on is declined, out of the group" do
+      stopped =
+        String.replace(
+          @bundled_offer,
+          "a=mid:2\r\na=bundle-only\r\n",
+          "a=mid:2\r\na=bundle-only\r\na=inactive\r\n"
+        )
+
+      # the section's own direction line now comes second; the first wins in
+      # the parser, so drop the original
+      stopped =
+        String.replace(stopped, "a=inactive\r\n" <> "a=extmap:14", "a=inactive\r\na=extmap:14")
+
+      %{server: server} = start_media_server(&bundle_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @bundled_offer)
+      assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 6]}
+
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, stopped_without_sendrecv(stopped))
+      assert_received {:jsr309_call, "EndpointDeleteVideoStream", [3, 6, 2]}
+      [_audio, camera, screen] = sections(answer)
+      assert hd(camera) =~ ~r/^m=video 22000 /
+      assert hd(screen) =~ ~r/^m=video 0 /
+      assert answer =~ "a=group:BUNDLE 0 1\r\n"
     end
 
     test "an RTP section left out of the group is declined" do
@@ -4074,6 +4149,38 @@ defmodule Mendooze.ConnTest do
       assert hd(screen) =~ ~r/^m=video 22104 /
       assert "a=sendonly" in screen
       assert "a=mid:video-2" in screen
+    end
+
+    test "a stream the caller stopped is withdrawn towards the callee" do
+      %{server: server} = start_media_server(&relay_handler/2)
+      {conn, out} = relayed_call(server)
+      {:ok, offer} = Mendooze.get_local_offer(out)
+      :ok = Mendooze.set_remote_answer(out, callee_answer(offer))
+      {:ok, _} = Mendooze.bridge(conn, out, [])
+
+      _ = calls("EndpointCreateVideoStream")
+
+      # the caller stops sharing: its stream goes on the inbound leg…
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @stopped_screen_offer)
+      assert_received {:jsr309_call, "EndpointDeleteVideoStream", [3, 4, 2]}
+
+      # …and the relayed one goes with it when the re-INVITE is relayed: the
+      # section stays in our offer, at port 0, under the mid the callee knows
+      assert {:ok, reoffer} = Mendooze.get_local_offer(out)
+      assert_received {:jsr309_call, "EndpointDeleteVideoStream", [3, 5, 2]}
+      refute_received {:jsr309_call, "EndpointCreateVideoStream", [3, 5]}
+      [_audio, camera, screen] = sections(reoffer)
+      assert hd(camera) =~ ~r/^m=video 22002 /
+      assert hd(screen) =~ ~r/^m=video 0 UDP\/TLS\/RTP\/SAVPF /
+      assert "a=mid:video-2" in screen
+
+      # the callee's answer declines it too: nothing is sent, nothing attached
+      _ = calls("EndpointStartSending")
+      assert :ok = Mendooze.set_remote_answer(out, callee_answer(reoffer, nil))
+      refute Enum.any?(calls("EndpointStartSending"), &(List.last(&1) == 2))
+      _ = calls("EndpointAttachToEndpoint")
+      assert {:ok, _} = Mendooze.bridge(conn, out, [])
+      refute_received {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 1, 2]}
     end
 
     test "unbridging detaches the streams too" do

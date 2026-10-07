@@ -1654,6 +1654,13 @@ defmodule MediaServer.Mendooze.Conn do
          # video sections beyond the first are extra streams of this leg (E3)
          extras = extra_video_sections(answerable),
          primary = answerable -- extras,
+         descs = mark_extras(descs, extras),
+         # a received stream the peer no longer sends on (removeTrack: the
+         # section stays, `a=recvonly` or `a=inactive`) is withdrawn; a stream
+         # we relay is ours to send on, whatever the far end's direction
+         {live_extras, dead_extras} =
+           Enum.split_with(extras, &(relayed?(state, &1) or peer_sends?(&1))),
+         _ = Enum.each(dead_extras, &log_dead_extra(state, &1)),
          state = Enum.reduce(withdrawn, state, &note_declined(&2, &1.type)),
          state = Enum.reduce(primary, state, &clear_declined(&2, &1.type)),
          :ok <- ensure_media_present(primary),
@@ -1675,9 +1682,10 @@ defmodule MediaServer.Mendooze.Conn do
          {:ok, state, negotiated} <- open_offered_receive_plane(state, primary),
          :ok <- ensure_negotiated(negotiated),
          {:ok, state, negotiated} <- apply_offered_medias(state, primary, negotiated),
-         {:ok, state} <- open_extra_videos(state, extras) do
-      # a stream whose section this offer no longer carries leaves the server
-      state = delete_withdrawn_videos(state, extras)
+         {:ok, state} <- open_extra_videos(state, live_extras) do
+      # a stream whose section this offer no longer carries, or no longer
+      # sends on, leaves the server
+      state = delete_withdrawn_videos(state, live_extras)
 
       # :ice_connected deferred to the first validated RTP packet (type 7);
       # see the set_remote_answer path and handle_server_event below. Every
@@ -3129,9 +3137,12 @@ defmodule MediaServer.Mendooze.Conn do
   # sending (music on hold), so it stays armed; what starves our reception is the
   # peer declaring it will not send — `a=recvonly`, `a=inactive` — or blackholing
   # the media (RFC 3264 §8.4, the legacy hold).
+  # A bundled section's `c=` says nothing — the transport is the carrier's, and
+  # a browser writes `c=IN IP4 0.0.0.0` on every bundle-only section — so only
+  # an unbundled section can be blackholed.
   defp peer_sends?(desc) do
     Map.get(desc, :direction, :sendrecv) not in [:recvonly, :inactive] and
-      not Sdp.blackholed?(desc)
+      not (Sdp.blackholed?(desc) and not Map.get(desc, :bundled, false))
   end
 
   # What this media's watchdog must be, from the description just applied: the
@@ -3565,17 +3576,16 @@ defmodule MediaServer.Mendooze.Conn do
       # An extra video stream answers with its own negotiation, received only
       # (UNIFIED-PLAN E3). It goes with the camera: a call whose video is declined
       # — by the other leg, say — carries no second video either.
-      Map.has_key?(negotiated, :video) and extra_role(state, desc) != @role_main ->
-        case Map.fetch!(state.extra_videos, section_key(desc)) do
-          %{neg: nil} ->
-            reject_media_spec(desc)
-
+      Map.get(desc, :extra, false) ->
+        case {Map.has_key?(negotiated, :video), Map.get(state.extra_videos, section_key(desc))} do
           # nothing left once restricted to what the far end took: declined
-          %{neg: %{rtp_map: map}} when map_size(map) == 0 ->
-            reject_media_spec(desc)
-
-          %{neg: neg} ->
+          {true, %{neg: %{rtp_map: map} = neg}} when map_size(map) > 0 ->
             answer_media_spec(state, %{video: neg}, Map.put(desc, :role, neg.role))
+
+          # no stream (withdrawn, declined, or the peer stopped sending), or
+          # the camera itself declined: the section is declined too
+          _ ->
+            reject_media_spec(desc)
         end
 
       # A configured text-over-WebSocket section is answered for real, URL
@@ -4388,9 +4398,25 @@ defmodule MediaServer.Mendooze.Conn do
     live = MapSet.new(extras, &section_key/1)
 
     state.extra_videos
-    |> Map.keys()
-    |> Enum.reject(&MapSet.member?(live, &1))
-    |> Enum.reduce(state, &delete_video_stream(&2, &1))
+    |> Enum.reject(fn {key, stream} -> stream[:relayed] == true or MapSet.member?(live, key) end)
+    |> Enum.reduce(state, fn {key, _stream}, st -> delete_video_stream(st, key) end)
+  end
+
+  # Every video section after the first carries the mark, so that the answer
+  # never reads one with the camera's negotiation — live or not.
+  defp mark_extras(descs, extras) do
+    marked = MapSet.new(extras, & &1.index)
+    Enum.map(descs, &if(&1.index in marked, do: Map.put(&1, :extra, true), else: &1))
+  end
+
+  defp log_dead_extra(state, desc) do
+    Logger.info(
+      module: __MODULE__,
+      cnx_tag: state.sess_tag,
+      message:
+        "video section #{section_key(desc)} offered #{Map.get(desc, :direction, :sendrecv)}: " <>
+          "the peer no longer sends on it, its stream is withdrawn"
+    )
   end
 
   defp delete_video_stream(state, key) do
@@ -4452,9 +4478,9 @@ defmodule MediaServer.Mendooze.Conn do
   # endpoints create their streams in the same order, so the same rank gets the
   # same role on each — which `EndpointAttachToEndpoint(…, role)` requires.
 
-  defp offer_extra_videos(state, %{extras: []}), do: {:ok, state}
-
   defp offer_extra_videos(state, %{extras: extras}) do
+    state = withdraw_relayed(state, extras)
+
     if :video in state.medias do
       Enum.reduce_while(extras, {:ok, state}, fn {key, src}, {:ok, st} ->
         case offer_extra_video(st, key, src) do
@@ -4465,6 +4491,31 @@ defmodule MediaServer.Mendooze.Conn do
     else
       {:ok, state}
     end
+  end
+
+  # A relayed stream whose source the other leg no longer receives is deleted
+  # on the server, and kept as a withdrawn section: an offer keeps one m= per
+  # section it ever carried (RFC 3264 §8), at port 0 from now on — which is
+  # what tells the far end the screen has gone.
+  defp withdraw_relayed(state, extras) do
+    sources = MapSet.new(extras, fn {key, _src} -> key end)
+
+    state.extra_videos
+    |> Enum.filter(fn {_key, s} ->
+      s[:relayed] == true and s.neg != nil and s.peer_key not in sources
+    end)
+    |> Enum.reduce(state, fn {key, stream}, st ->
+      rpc(st, "EndpointDeleteVideoStream", [st.sess_id, st.endpoint_id, stream.role])
+
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: st.sess_tag,
+        message: "relayed video stream #{key} (role #{stream.role}) withdrawn: its source is gone"
+      )
+
+      fmt = stream.neg.rtp_map |> Map.keys() |> Enum.map(&String.to_integer/1) |> Enum.sort()
+      put_extra_video(st, key, %{stream | neg: nil} |> Map.merge(%{withdrawn: true, fmt: fmt}))
+    end)
   end
 
   # The relayed stream lives under the mid WE offer, which is what the far end
@@ -4536,19 +4587,33 @@ defmodule MediaServer.Mendooze.Conn do
 
   # One `m=video … a=sendonly` per relayed stream, after the medias, in role order.
   defp extra_offer_specs(state) do
-    for {_key, %{mid: mid, neg: neg}} <- relayed_extras(state) do
-      %{
-        type: :video,
-        port: neg.rec_port,
-        bandwidth: bandwidth_kbps(state, :video),
-        direction: :sendonly,
-        crypto: local_crypto_spec(state, :actpass),
-        ice: state.local_ice,
-        rtcp_mux: false
-      }
-      |> add_offer_webrtc(state, :video, neg.rec_port, mid)
-      |> add_offer_rtp_profile(state, :video)
-      |> Map.merge(relayed_offer_codecs(neg))
+    for {_key, stream} <- relayed_extras(state) do
+      case stream do
+        %{withdrawn: true, mid: mid, fmt: fmt} ->
+          %{type: :video, port: 0, protocol: offer_protocol(state), reject_fmt: fmt, mid: mid}
+
+        %{mid: mid, neg: neg} ->
+          %{
+            type: :video,
+            port: neg.rec_port,
+            bandwidth: bandwidth_kbps(state, :video),
+            direction: :sendonly,
+            crypto: local_crypto_spec(state, :actpass),
+            ice: state.local_ice,
+            rtcp_mux: false
+          }
+          |> add_offer_webrtc(state, :video, neg.rec_port, mid)
+          |> add_offer_rtp_profile(state, :video)
+          |> Map.merge(relayed_offer_codecs(neg))
+      end
+    end
+  end
+
+  defp offer_protocol(state) do
+    cond do
+      webrtc?(state) -> "UDP/TLS/RTP/SAVPF"
+      rtp_profile(state) == :avpf -> "RTP/AVPF"
+      true -> "RTP/AVP"
     end
   end
 
@@ -4581,11 +4646,16 @@ defmodule MediaServer.Mendooze.Conn do
 
     relayed_extras(state)
     |> Enum.zip(answered)
-    |> Enum.reduce_while({:ok, state}, fn {{key, stream}, desc}, {:ok, st} ->
-      case apply_extra_answer(st, key, stream, desc) do
-        {:ok, st} -> {:cont, {:ok, st}}
-        {:error, _} = err -> {:halt, err}
-      end
+    |> Enum.reduce_while({:ok, state}, fn
+      # a withdrawn section has no stream behind it any more
+      {{_key, %{withdrawn: true}}, _desc}, {:ok, st} ->
+        {:cont, {:ok, st}}
+
+      {{key, stream}, desc}, {:ok, st} ->
+        case apply_extra_answer(st, key, stream, desc) do
+          {:ok, st} -> {:cont, {:ok, st}}
+          {:error, _} = err -> {:halt, err}
+        end
     end)
   end
 

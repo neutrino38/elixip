@@ -517,7 +517,12 @@ and every further video section is a stream it creates on demand
 (`EndpointCreateVideoStream`) and names by the role it returns. The adapter
 keeps that role under the section's key — its `a=mid`, or its position — for
 the life of the leg, so a re-offer finds the stream again, a section withdrawn
-(port 0) deletes it, and a role is never reused. Everything keyed by media type
+deletes it, and a role is never reused. Withdrawn means port 0 — or, for a
+received stream, a direction the peer no longer sends on: a browser that stops
+sharing keeps the section and turns it `recvonly` or `inactive`, and the
+answer declines it with port 0. Through a B2BUA the relayed stream is deleted
+with its source and its section stays in our offers at port 0, which is what
+tells the far end the screen has gone. Everything keyed by media type
 in the leg describes the role-0 sections, on the path every call takes; the
 role is appended **last** to the RPCs aimed at a stream, after every optional
 parameter, and only when it is not 0 — a role-0 call is byte for byte the one a
