@@ -20,7 +20,8 @@ its end-to-end check.
 **Status (2026-10-07):** S1's code is done, its scenario pair included,
 run against the store rehearsal (`packaging/fhft/rehearsal/`); S0's files
 are written and rehearsed, waiting for access to `web1`; the provisioning
-page waits for S0's captures. Part T: T0 to T5 done in Trix (`9d5975a`
+page is drafted (`docs/kelixip/chat-attachments.md`), to be confirmed by
+S0's captures. Part T: T0 to T5 done in Trix (`9d5975a`
 to `1adcbfb`, ADR 0012), checked by tests and, for the upload, against the
 rehearsal; T6 not expected; T7, the video message, planned. Every live
 check waits for `web1`. What this plan says of
@@ -128,12 +129,12 @@ loopback capture of the HTTP side. These bytes are what Part E is diffed
 against, and the answer to design §12's two first unverified points.
 
 **Also delivers** the provisioning recipe for a Linphone account on a
-kelixip domain, in `docs/kelixip/administration.md`: which keys, where they
+kelixip domain, in `docs/kelixip/chat-attachments.md`: which keys, where they
 go on desktop and on mobile, and that the desktop offers no UI for them.
 
 **Files** `packaging/fhft/` here: the PDO patch, the Apache config, the
 `.user.ini`, the server config with its secrets left as placeholders, and
-the rehearsal's container files; `docs/kelixip/administration.md` and
+the rehearsal's container files; `docs/kelixip/chat-attachments.md` and
 `docs/design/captures/`.
 
 **Done when** the two desktops exchange both messages with receipts; the
@@ -237,7 +238,7 @@ framework, as CLAUDE.md asks of any SIP reading:
 **Files** `apps/elixip2/lib/framework/SIPMsg.ex`, `SIPMsgBodyCoding.ex`,
 `SIPMsgTemplate.ex`, `SIPTransaction.ex`, `SIPSessionPage.ex`,
 `SIPDialogImpl.ex`; `apps/kelix_modules/lib/kelix/mod/silo.ex`; the tests
-above; still to come with S0: `docs/kelixip/administration.md`.
+above; still to come with S0: `docs/kelixip/chat-attachments.md`.
 
 **Done when** the tests are green, the scenario pair against the PHP
 server; a Linphone desktop, offline during the upload and the MESSAGE, gets
