@@ -33,70 +33,56 @@ Point 4 is where SIP servers usually get this wrong — see §3.
 
 So the work is almost entirely **"emit the line"**. That is the good news.
 
-## 3. The trap: a 401 is not a failure
+## 3. The event to catch
 
-Every SIP UA sends its first REGISTER **without** credentials and gets a `401`.
-That is the protocol working as designed. A filter that counts 401s bans every
-phone on the network within a minute of a restart.
+- `invalid-domain`: a request is sent to a domain that is not served by the configured kelixip
+- `auth-failure`: a request is served and `auth_db` determines that there is a mismatch between the response and the expected response.
+- `auth-failure`: a request is served and `auth_db` that the user is not defined the DB
+- `invalid-packet`: an invalid packet that is not SIP, not STUN not a keepalive is sent. Or a SIP packet that is not parsable or a packet that is too big.
+- `transport-error`: lingering TCP / TLS / Websocket without activity is closed by kelixip after a given timeout.
+- `unusual-traffic`: a single IP that send a number request above a certain threshold. Requires some instrumentaion (counters) and exceptions for defined SIP peers / servers. To be done later
+- `api-auth`: REST API is called with an invalid token
+- `api-error`: REST API is called on an invalid endpoint or with invalid arguments
 
-The line must therefore carry a **cause**, decided from what the request contained,
-not from the response code:
+## 4. The modules, beahviors and functions
 
-| Situation | Verdict today | Countable? |
-|---|---|---|
-| No `Authorization` header at all | `{:requireauth, false}` → 401 | **No** — normal first contact |
-| Authorization present, nonce expired | `{:requireauth, true}` → 401 stale | **No** — normal, the client replays |
-| Authorization present, nonce forged/unknown realm | `{:requireauth, false}` → 401 | **Yes**, weakly — a scanner, or a client that lost sync |
-| Authorization present, digest mismatch | `{:reject, 403, …}` | **Yes** — wrong password |
-| Authorization present, user unknown | `{:reject, 403, …}` | **Yes, strongly** — nobody mistypes a username 5 times; this is enumeration |
-| `realm` ≠ served domain | `{:reject, 403, …}` | **Yes** — a probe |
+A new module Security in elixip2. My ideas below: 
 
-Two reason codes carry most of the value: `bad_password` and `unknown_user`. They
-deserve **different jails** (5 tries vs. 1–2), which is only possible if the line
-distinguishes them.
+Elixir
+```
+defmodule Security do
 
-> Note the asymmetry that must be preserved: the *SIP response* stays `403 Forbidden`
-> for both, so the wire leaks no user enumeration. Only the *log* distinguishes them.
-> **OPEN:** are we comfortable with that distinction living in a log an operator may
-> ship off-host?
+   def module Incident do
+       defstruct srcip: nil,
+                 srcport: 5060,
+                 type: :unspecified,
+	 	 realm: "unknown",
+		 user: nil,
+		 method: nil,
+		 reason: nil
 
-## 4. Where the line is emitted from
 
-Three candidates:
+      defimpl String.Chars do
+         def to_string(incident) do
+	   # Implementation
+           end
+        end
+      end
+   end
 
-- **(a) in `Kelix.Mod.AuthDb`** — it knows the verdict. But it is a *loadable module*:
-  a host without the package gets no protection, and a second backend (see
-  [evolution-auth-db.md](evolution-auth-db.md)) would have to re-implement the
-  logging. Also, the module does not see the transport (it gets `req`, which does
-  carry the IP — so this is workable but duplicated).
-- **(b) in the scenario** — worst option. Every script author must remember to log,
-  and forgetting is silent.
-- **(c) in the core, observing the outcome** — `Kelix.Router` / the dialog layer see
-  every inbound request and every final response on it. One observer turns
-  "final response 401/403/407 to an initial request" plus "what the request
-  carried" into one line, for **every** script and **every** backend, present or
-  future.
+   def report_incident(product , incident = %Security.Incident{}) do
+       # Check if there is any registered process for incident reporting
+       # get its PID
+       GenServer.cast( pid_incident_reporter, :report_incident, incident) 
+   end 
+end
+```
 
-**Recommendation: (c)**, with the same argument that put `Kelix.Options` in the core
-(design §8.3): answering a liveness ping is not a SIP *function*, and neither is
-telling the infrastructure that someone is knocking. A server whose brute-force
-visibility depends on which optional package is installed is a trap.
+Kelixip impléments such a LOCAL process and produce a specific file in a module called
+`Kelix.Security.IncidentReporter`. The file is:
 
-**The authentication SBB does not change this, and it is worth saying because it
-looks like it should.** `Kelix.Mod.AuthDb.SBB.authenticate/1` now runs the
-challenge cycle for the reference scripts and counts rejected attempts, so it is
-the one place that knows "this dialog failed three times". Emitting from there is
-still option (b) in disguise: a script that writes its own authentication states —
-which the block deliberately keeps possible — would emit nothing, and so would
-every scenario authenticating against a future non-`auth_db` backend. Its
-`{:auth, :refused, …}` outcome exists to bound work, not to raise an alarm.
+/var/log/kelixip/security.log
 
-**OPEN:** (c) needs the verdict cause, which only the auth backend knows. Two ways:
-carry it back in the rejection (`{:reject, 403, "Forbidden", reason: :bad_password}`
-— a contract change on the module facade), or have the core re-derive it from the
-request (it can distinguish "no Authorization" from "Authorization present", which
-is the 80 % case, but not `bad_password` from `unknown_user`). The first is cleaner
-and is the one to spec.
 
 ## 5. Line format
 
@@ -117,7 +103,7 @@ ignoreregex =
 
 Rules the format must hold to:
 
-- the **prefix `kelixip: auth-failure`** is a contract. It is versioned with the
+- the **prefix `kelixip: `** is a contract. It is versioned with the
   filter shipped alongside, and a test asserts the emitted line matches the shipped
   regex (see §8);
 - `user=` is quoted and escaped — a username is attacker-controlled text and must
@@ -128,22 +114,13 @@ Rules the format must hold to:
   username;
 - IPv6 unbracketed in `src=` (fail2ban's `<HOST>` handles both).
 
-**OPEN:** should a *successful* authentication also be logged (`auth-ok`)? It costs
-one line per registration refresh — noisy at scale — but it is what lets an operator
-answer "who registered from this IP" during an incident. Suggested: off by default,
-`[log] auth_success = true`.
+*Successful* authentication are not logged. This is only for reporting
+security **incidents**.
 
 ## 6. Where the line goes
 
-- **always** to the normal logger (stdout → journald, plus syslog when enabled). A
-  jail can then use `backend = systemd` + `journalmatch`, which is the modern default;
-- **optionally** to a dedicated file — `[log] security_file = "/var/log/kelixip/security.log"` —
-  so `logpath` is trivial and the jail never scans gigabytes of call logs. This is the
-  variant most operators will actually use. Needs logrotate config in the package;
-- **OPEN:** a third variant is syslog facility `authpriv`, which rsyslog files into
-  `/var/log/secure` — the file fail2ban already watches on RHEL/Alma. Tempting
-  (zero config for the operator) but it splits our logs across two facilities and
-  couples us to a distro convention.
+- In the regular journald as warning traces.
+- To a dedicated file — `[log] security_file = "/var/log/kelixip/security.log"`
 
 ## 7. Banning: outside vs. inside
 
