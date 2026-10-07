@@ -509,6 +509,52 @@ that would have failed:
 (`SetupDataChannel`), never from a constant on this side — the same rule as the
 announced address.
 
+#### Several video streams, and BUNDLE
+
+A browser sharing its screen next to its camera offers **two `m=video`
+sections**. The media server speaks in `(media, role)`: role 0 is the camera,
+and every further video section is a stream it creates on demand
+(`EndpointCreateVideoStream`) and names by the role it returns. The adapter
+keeps that role under the section's key — its `a=mid`, or its position — for
+the life of the leg, so a re-offer finds the stream again, a section withdrawn
+(port 0) deletes it, and a role is never reused. Everything keyed by media type
+in the leg describes the role-0 sections, on the path every call takes; the
+role is appended **last** to the RPCs aimed at a stream, after every optional
+parameter, and only when it is not 0 — a role-0 call is byte for byte the one a
+media server predating the parameter accepts.
+
+A stream other than the camera is **received only**: its section is answered
+`a=recvonly` whatever the offer said, nothing of ours is ever sent on it, and
+its connectivity events are logged and nothing else — the call's connectivity
+is the role-0 sections' business.
+
+With a browser's default `bundlePolicy`, the second video is `a=bundle-only` on
+port 0, so it exists only inside the `a=group:BUNDLE` of the offer. The server
+groups an endpoint **at creation**: the adapter re-creates the endpoint with
+`bundle` on the first bundled offer — the new one before the old is deleted, so
+a server refusing it leaves the call unbundled, its bundle-only sections
+declined. On a bundled leg every section is pushed its `mid`, the
+`sdes:mid` extension id and its `a=ssrc` before `StartReceiving`, the answer
+states the group and the MID extension, one port and one transport for all
+sections, and an RTP or data channel section left out of the group is
+declined. Port 0 is a withdrawal **only** when the section is not
+`bundle-only`.
+
+A re-offer **keeps the leg's ICE credentials**: minting new ones is an ICE
+restart asked for by nothing, and on a bundled leg it restarts the whole call.
+A trickled candidate is taken with the `sdpMid` of its section
+(`add_remote_candidate/2`), which says which stream it is for; on a bundled
+leg every candidate is the carrier's.
+
+Through a **B2BUA**, the leg we offer on creates one stream per stream the
+other leg receives — same keys, same order, hence the same roles on both
+endpoints, which `EndpointAttachToEndpoint(…, role)` requires — and offers
+each as a `sendonly` section carrying exactly the codecs the received stream
+carries. The streams relay as they are, there is no transcoder behind them:
+the caller's rebuilt answer restricts each one to what the callee took, and
+declines it when the callee declined. The callee's **own** extra streams are
+not relayed back towards the caller yet.
+
 ### 6.6 Media connectivity — when may a scenario send?
 
 `:ice_connected` used to mean "some media flowed", and that is not the same

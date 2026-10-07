@@ -1,7 +1,8 @@
 # Flux vidéo multiples et BUNDLE : ce qu'elixip doit faire
 
-> Statut : **en cours**. E0 (côté conférence), E1 et E2 sont codés et testés ;
-> E3 et E4 restent à faire. Branche `feat/unified-plan`.
+> Statut : **en cours**. E0 (côté conférence), E1, E2 et E3 sont codés et
+> testés sur bouchon ; E4 reste à faire, et la recette réelle (lot 5 du
+> serveur) n'a pas commencé. Branche `feat/unified-plan`.
 >
 > Ce document est le lot 4 de la conception du serveur média :
 > `mediaserver/docs/conception/UNIFIED-PLAN/SPEC.md` (appelée « SPEC serveur »
@@ -299,11 +300,11 @@ appels et leur ordre, et la réponse SDP.
 | **E0** | Corrections préalables côté conférence : défauts 1 (port 0), 2 (listes dupliquées), 6 (retrait en renégociation). **Fait.** | rien | `mcu_call_test.exs`, « sections withdrawn and renegotiated » |
 | **E1** | Conférence, N vidéos sans BUNDLE (§4.2) : `CreateVideoStream`, `recvonly`, slot épinglé en VAD, nom, mise en page par source, `DeleteVideoStream` en renégociation. **Fait.** | lot 1 (**fait**) | `mcu_webrtc_test.exs`, « a second video section is an extra stream » ; `mcu_call_test.exs`, « a leg with two videos counts as two tiles ». Recette : Chrome en `max-compat`, caméra + écran, deux slots (scénario 5 de la SPEC serveur §7) |
 | **E2** | Conférence, BUNDLE (§4.3) : SDP, `bundle=1`, `mid`, `remote-ssrc`, extmap `sdes:mid`. **Fait**, actif dès que l'offre porte le groupe (décision du 2026-09-30). | lot 2 (**fait**) | `mcu_webrtc_test.exs`, « BUNDLE (UNIFIED-PLAN E2) ». Recette : Chrome et Firefox par défaut (scénarios 1 à 3, 7, 8) |
-| **E3** | JSR-309, N vidéos et BUNDLE (§4.4), défauts 4 et 5. | lots 2 et 3 | tests `jsr309_fake_server` ; recette : B2BUA Chrome ↔ Chrome (scénario 6) |
+| **E3** | JSR-309, N vidéos et BUNDLE (§4.4), défauts 4 et 5, relais B2BUA des flux. **Fait.** | lots 2 et 3 (**faits**) | `mendooze_conn_test.exs`, « UNIFIED-PLAN E3 » (trois groupes) ; recette : B2BUA Chrome ↔ Chrome (scénario 6), à faire |
 | **E4** | BFCP pour endpoint SIP (§4.5). | lot 1b (**fait**) | tests bouchon ; recette réelle (scénarios 9 et 10) reportée faute d'endpoint |
 
-E2, E3 et E4 peuvent commencer : les lots 2 et 3 du serveur sont faits. E4 est
-indépendant des autres.
+E4 peut commencer : le lot 1b du serveur est fait. Il est indépendant des
+autres.
 
 Limites d'E1, à reprendre si le besoin se confirme :
 
@@ -326,6 +327,39 @@ Comment E2 est tenu :
   WebSocket (TCP) reste servi ;
 - un BUNDLE offert seulement à une renégociation n'est pas pris : le serveur
   le fixe à la création.
+
+Comment E3 est tenu :
+
+- l'endpoint créé avec la jambe est **recréé** avec `bundle` à la première
+  offre groupée, comme le participant côté conférence, et avant toute
+  ouverture de port : un BUNDLE offert seulement à une renégociation n'est pas
+  pris ;
+- le rôle vient **en dernier** sur tous les `Endpoint*` d'une jambe, et n'est
+  envoyé que s'il est différent de 0 : les appels de rôle 0 restent octet pour
+  octet ceux qu'accepte un serveur antérieur au paramètre ;
+- une réoffre garde les identifiants ICE de la jambe (défaut 4) ; un candidat
+  ICE suit le `sdpMid` qui l'accompagne (défaut 5), l'audio sans `mid` ;
+- une section vidéo supplémentaire est reçue seulement ; ses événements de
+  connectivité sont journalisés et ne décident rien pour l'appel ;
+- en B2BUA, la jambe qui offre crée autant de flux que l'autre jambe en
+  reçoit, sous les mêmes clés et dans le même ordre, et offre chacun en
+  `sendonly` avec exactement les codecs du flux reçu ; les flux de même rang
+  s'attachent directement, sans transcodeur (§9) ; la réponse reconstruite
+  vers l'appelant se restreint à ce que l'appelé a pris, ou décline ;
+- une réponse à notre offre ne lit plus la seconde section vidéo par type :
+  elle écrasait la première (le `StartSending` de la caméra visait le port
+  de l'écran), et un écran refusé refusait toute la vidéo.
+
+Limites d'E3, à reprendre si le besoin se confirme :
+
+- les flux supplémentaires de l'**appelé** (son propre écran) ne sont pas
+  relayés vers l'appelant : la jambe qui a répondu ne sait pas encore offrir
+  des sections de plus que celles qu'elle a reçues ;
+- une réoffre de l'appelé sur un flux relayé est répondue sans rejouer
+  `StartSending` : l'adresse ne change pas en pratique ;
+- comme E1, une section supplémentaire chiffrée en SDES seul est déclinée ;
+- `a=ssrc` et `a=msid` ne sont pas écrits sur nos sections : le MID sur le
+  fil suffit aux navigateurs.
 
 Chaque lot met à jour la documentation qu'il rend fausse :
 `docs/design/DESIGN-MCU.md` (§ BUNDLE, hors périmètre BFCP),

@@ -3893,4 +3893,199 @@ defmodule Mendooze.ConnTest do
       refute_received {:jsr309_call, "EndpointCreateVideoStream", _}
     end
   end
+
+  describe "a B2BUA relays the extra streams rank by rank (UNIFIED-PLAN E3)" do
+    # Two endpoints (4 inbound, 5 outbound); the outbound stream's own port is
+    # 22104, the inbound stream's 22004. Both get role 2: each endpoint numbers
+    # its streams from 2, in creation order.
+    defp relay_handler("EndpointCreateVideoStream", [_sess, _ep]), do: {:ok, [2]}
+    defp relay_handler("EndpointStartReceiving", [_, 4, 1, _, _, _, 2]), do: {:ok, [22_004]}
+    defp relay_handler("EndpointStartReceiving", [_, 5, 1, _, _, _, 2]), do: {:ok, [22_104]}
+
+    defp relay_handler("GetMediaCandidates", [_, 4, 0, 1, 2]),
+      do: {:ok, ["rtp://192.168.5.5:22004"]}
+
+    defp relay_handler("GetMediaCandidates", [_, 5, 0, 1, 2]),
+      do: {:ok, ["rtp://192.168.5.5:22104"]}
+
+    defp relay_handler(method, params), do: two_leg_handler(method, params)
+
+    # The callee's answer to our three-section offer: the screen taken on VP8
+    # alone (`codecs: nil` declines it with port 0).
+    defp callee_answer(offer, codecs \\ ["VP8"]) do
+      [_audio, _camera, screen] = sections(offer)
+      [mid] = for "a=mid:" <> mid <- screen, do: mid
+
+      dtls = %{
+        crypto: {:dtls, :passive, "sha-256", @fp},
+        ice: %{ufrag: "callee-uf", pwd: "callee-pwd-1234567890123456"},
+        protocol: "UDP/TLS/RTP/SAVPF",
+        rtcp_mux: true
+      }
+
+      Sdp.build(%{
+        ip: "10.9.8.6",
+        medias: [
+          Map.merge(dtls, %{
+            type: :audio,
+            port: 41_000,
+            codecs: ["OPUS"],
+            dtmf: false,
+            mid: "audio"
+          }),
+          Map.merge(dtls, %{type: :video, port: 41_002, codecs: ["H264"], mid: "video"}),
+          if codecs do
+            Map.merge(dtls, %{
+              type: :video,
+              port: 41_004,
+              codecs: codecs,
+              direction: :recvonly,
+              mid: mid
+            })
+          else
+            %{type: :video, port: 0, codecs: ["VP8"], mid: mid}
+          end
+        ]
+      })
+    end
+
+    defp relayed_call(server) do
+      {conn, _tag} = webrtc_av_conn(server)
+
+      {:ok, out} =
+        Mendooze.create_peer_connection(server, self(),
+          media: [:audio, :video],
+          bridge_with: conn,
+          webrtc_support: :yes
+        )
+
+      assert {:ok, _answer} = Mendooze.set_remote_offer(conn, @two_video_offer)
+      assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 4]}
+      {conn, out}
+    end
+
+    test "our offer carries one sendonly section per stream the other leg receives" do
+      %{server: server} = start_media_server(&relay_handler/2)
+      {_conn, out} = relayed_call(server)
+
+      assert {:ok, offer} = Mendooze.get_local_offer(out)
+
+      # a stream of the same rank on the outbound endpoint, opened with its role
+      assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 5]}
+      assert_received {:jsr309_call, "EndpointSetLocalSTUNCredentials", [3, 5, 1, _, _, 2]}
+
+      assert_received {:jsr309_call, "EndpointStartReceiving",
+                       [3, 5, 1, map, %{"fmtp" => %{}}, "", 2]}
+
+      assert_received {:jsr309_call, "GetMediaCandidates", [3, 5, 0, 1, 2]}
+      # exactly the codecs the inbound stream carries, in OUR numbering
+      assert Map.values(map) |> Enum.sort() ==
+               Sdp.codec_codes(:video, ["H264", "VP8"]) |> Enum.sort()
+
+      [audio, camera, screen] = sections(offer)
+      assert hd(audio) =~ ~r/^m=audio 22000 /
+      assert hd(camera) =~ ~r/^m=video 22002 /
+      assert "a=sendrecv" in camera
+      assert hd(screen) =~ ~r/^m=video 22104 UDP\/TLS\/RTP\/SAVPF/
+      assert "a=sendonly" in screen
+      assert "a=mid:video-2" in screen
+      assert attr(screen, "candidate") =~ " 22104 typ host"
+      assert Enum.any?(screen, &(&1 =~ ~r/^a=rtpmap:\d+ VP8\/90000/))
+      assert Enum.any?(screen, &(&1 =~ ~r/^a=rtpmap:\d+ H264\/90000/))
+    end
+
+    test "the callee's answer starts the stream towards it, and the bridge attaches it" do
+      %{server: server} = start_media_server(&relay_handler/2)
+      {conn, out} = relayed_call(server)
+      {:ok, offer} = Mendooze.get_local_offer(out)
+
+      assert :ok = Mendooze.set_remote_answer(out, callee_answer(offer))
+
+      # the remote side of the stream, with its role: crypto, then StartSending
+      # — the profile sent empty so that the role can come last
+      assert_received {:jsr309_call, "EndpointSetRemoteCryptoDTLS", [3, 5, 1, _, _, _, 2]}
+
+      assert_received {:jsr309_call, "EndpointStartSending",
+                       [3, 5, 1, "10.9.8.6", 41_004, send_map, "", 2]}
+
+      # and the camera's StartSending aims at the camera's port, not the screen's
+      assert_received {:jsr309_call, "EndpointStartSending", [3, 5, 1, "10.9.8.6", 41_002, _]}
+      refute_received {:jsr309_call, "EndpointStartSending", [3, 5, 1, "10.9.8.6", 41_004, _]}
+
+      assert [vp8] = Map.values(send_map)
+      assert Sdp.codec_codes(:video, ["VP8"]) == [vp8]
+
+      assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, [])
+
+      # attached in both directions under the SAME role, sequence numbers kept
+      assert_received {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 1, 2]}
+      assert_received {:jsr309_call, "EndpointAttachToEndpoint", [3, 5, 4, 1, 2]}
+
+      assert_received {:jsr309_call, "EndpointSetRTPProperties",
+                       [3, 4, 1, %{"useOriSeqNum" => "1"}, 2]}
+
+      assert_received {:jsr309_call, "EndpointSetRTPProperties",
+                       [3, 5, 1, %{"useOriSeqNum" => "1"}, 2]}
+
+      # the caller is told what the relay can honour on its screen: VP8 alone
+      [_audio, camera, screen] = sections(rebuilt)
+      assert hd(screen) =~ ~r/^m=video 22004 UDP\/TLS\/RTP\/SAVPF 96$/
+      assert "a=recvonly" in screen
+      assert hd(camera) =~ ~r/^m=video 22002 /
+
+      # a second bridge (a renegotiation) does not attach the stream again
+      assert {:ok, _} = Mendooze.bridge(conn, out, [])
+      refute_received {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 1, 2]}
+    end
+
+    test "a stream the callee declines is not attached, and declined to the caller" do
+      %{server: server} = start_media_server(&relay_handler/2)
+      {conn, out} = relayed_call(server)
+      {:ok, offer} = Mendooze.get_local_offer(out)
+
+      assert :ok = Mendooze.set_remote_answer(out, callee_answer(offer, nil))
+      refute_received {:jsr309_call, "EndpointStartSending", [3, 5, 1, _, _, _, _, 2]}
+
+      assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, [])
+      refute_received {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 1, 2]}
+      # the camera is bridged all the same, through the policy's transcoder
+      assert_received {:jsr309_call, "VideoTranscoderAttachToEndpoint", [3, _tr, 5]}
+
+      [_audio, camera, screen] = sections(rebuilt)
+      assert hd(camera) =~ ~r/^m=video 22002 /
+      assert hd(screen) =~ ~r/^m=video 0 /
+    end
+
+    test "the callee's re-offer finds the relayed stream by the mid we offered" do
+      %{server: server} = start_media_server(&relay_handler/2)
+      {conn, out} = relayed_call(server)
+      {:ok, offer} = Mendooze.get_local_offer(out)
+      :ok = Mendooze.set_remote_answer(out, callee_answer(offer))
+      {:ok, _} = Mendooze.bridge(conn, out, [])
+      assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 5]}
+
+      # a hold, say: the same three sections come back as an offer of the callee's
+      assert {:ok, answer} = Mendooze.set_remote_offer(out, callee_answer(offer))
+
+      refute_received {:jsr309_call, "EndpointCreateVideoStream", _}
+      refute_received {:jsr309_call, "EndpointDeleteVideoStream", _}
+      [_audio, _camera, screen] = sections(answer)
+      # still our stream, still sent on, still on its own port
+      assert hd(screen) =~ ~r/^m=video 22104 /
+      assert "a=sendonly" in screen
+      assert "a=mid:video-2" in screen
+    end
+
+    test "unbridging detaches the streams too" do
+      %{server: server} = start_media_server(&relay_handler/2)
+      {conn, out} = relayed_call(server)
+      {:ok, offer} = Mendooze.get_local_offer(out)
+      :ok = Mendooze.set_remote_answer(out, callee_answer(offer))
+      {:ok, _} = Mendooze.bridge(conn, out, [])
+
+      assert :ok = Mendooze.unbridge(conn, out)
+      assert_received {:jsr309_call, "EndpointDettach", [3, 4, 1, 2]}
+      assert_received {:jsr309_call, "EndpointDettach", [3, 5, 1, 2]}
+    end
+  end
 end
