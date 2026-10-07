@@ -3597,13 +3597,22 @@ defmodule MediaServer.Mendooze.Conn do
         rtcp_fb: media == :video,
         # transport-wide-cc, when configured: the builder pairs it with its
         # `a=rtcp-fb:<pt> transport-cc` lines. The property is posted only if the
-        # peer's answer takes it (`transport_cc_props/1`).
-        extmaps: List.wrap(Sdp.transport_cc_offer(media))
+        # peer's answer takes it (`transport_cc_props/1`). On a bundled leg, the
+        # MID extension the peer negotiated, under its id: a browser demuxes a
+        # bundled transport by MID, and a section we add is nothing without it.
+        extmaps: List.wrap(Sdp.transport_cc_offer(media)) ++ offer_bundle_extmaps(state)
       })
     else
       base
     end
   end
+
+  defp offer_bundle_extmaps(%{bundle: true} = state), do: List.wrap(leg_mid_extmap(state))
+  defp offer_bundle_extmaps(_state), do: []
+
+  # The sdes:mid extension as the peer offered it on this leg — one id for the
+  # whole session in every browser.
+  defp leg_mid_extmap(state), do: Enum.find_value(state.offer_descs || [], &Sdp.mid_extmap/1)
 
   # A section's mid does not change once it is negotiated (RFC 8843 §6.3.2, JSEP
   # §5.2.1). On a leg where we ANSWERED, the mid is the peer's — echoed verbatim
@@ -4513,7 +4522,7 @@ defmodule MediaServer.Mendooze.Conn do
     props =
       %{"mid" => mid}
       |> then(fn p ->
-        case Sdp.mid_extmap(desc) do
+        case Sdp.mid_extmap(desc) || leg_mid_extmap(state) do
           %{id: id} -> Map.put(p, Sdp.sdes_mid_uri(), Integer.to_string(id))
           nil -> p
         end
@@ -4766,7 +4775,10 @@ defmodule MediaServer.Mendooze.Conn do
           Sdp.restrict_send_map(n.rtp_map, neg.rtp_map, neg.accepted)
           |> one_pt_per_codec(:video, n)
 
+        # on a bundled leg the stream is stamped with the mid we offered it
+        # under, or the peer cannot tell its packets from the camera's
         with :ok <- set_rtp_properties(state, m, desc),
+             :ok <- push_bundle_props(state, m, desc),
              :ok <- set_remote_crypto(state, m, desc),
              {:ok, _} <-
                rpc(

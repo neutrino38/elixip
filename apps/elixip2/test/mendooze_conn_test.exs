@@ -4310,6 +4310,103 @@ defmodule Mendooze.ConnTest do
       refute Enum.any?(sending, &match?([3, 4, 1, "10.9.8.7", 40_004 | _], &1))
     end
 
+    # The inbound leg bundled (endpoint 6, one port), the outbound one plain
+    defp bundled_relay_handler("EndpointCreate", [_sess, _tag, _a, _v, _t, true]), do: {:ok, [6]}
+    defp bundled_relay_handler("EndpointStartReceiving", [_, 6 | _]), do: {:ok, [22_000]}
+
+    defp bundled_relay_handler("GetMediaCandidates", [_, 6 | _]),
+      do: {:ok, ["rtp://192.168.5.5:22000"]}
+
+    defp bundled_relay_handler(method, params), do: relay_handler(method, params)
+
+    # The caller's answer on its bundled session, the callee's screen taken
+    defp bundled_caller_answer(reoffer) do
+      [_audio, _camera, screen] = sections(reoffer)
+      [mid] = for "a=mid:" <> mid <- screen, do: mid
+
+      dtls = %{
+        crypto: {:dtls, :active, "sha-256", @fp},
+        ice: %{ufrag: "mx0p", pwd: "xstrY7K5+U2iAZlJGRPUzyq8"},
+        protocol: "UDP/TLS/RTP/SAVPF",
+        rtcp_mux: true,
+        extmaps: [%ExSDP.Attribute.Extmap{id: 4, uri: "urn:ietf:params:rtp-hdrext:sdes:mid"}]
+      }
+
+      Sdp.build(%{
+        ip: "172.22.0.4",
+        bundle: ["0", "1", mid],
+        medias: [
+          Map.merge(dtls, %{type: :audio, port: 53_521, codecs: ["OPUS"], dtmf: false, mid: "0"}),
+          Map.merge(dtls, %{type: :video, port: 53_521, codecs: ["H264"], mid: "1"}),
+          Map.merge(dtls, %{
+            type: :video,
+            port: 53_521,
+            codecs: ["VP8"],
+            direction: :recvonly,
+            mid: mid
+          })
+        ]
+      })
+    end
+
+    test "on a bundled leg a relayed stream is offered and stamped with its mid" do
+      %{server: server} = start_media_server(&bundled_relay_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+
+      {:ok, out} =
+        Mendooze.create_peer_connection(server, self(),
+          media: [:audio, :video],
+          bridge_with: conn,
+          webrtc_support: :yes
+        )
+
+      dtls = %{
+        crypto: {:dtls, :actpass, "sha-256", @fp},
+        ice: %{ufrag: "callee-uf", pwd: "callee-pwd-1234567890123456"},
+        protocol: "UDP/TLS/RTP/SAVPF",
+        rtcp_mux: true
+      }
+
+      callee_medias = [
+        Map.merge(dtls, %{type: :audio, port: 41_000, codecs: ["OPUS"], dtmf: false, mid: "audio"}),
+        Map.merge(dtls, %{type: :video, port: 41_002, codecs: ["H264"], mid: "video"})
+      ]
+
+      # the caller's session is bundled, with the MID extension under id 4
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @chrome_offer)
+      {:ok, _offer} = Mendooze.get_local_offer(out)
+      :ok = Mendooze.set_remote_answer(out, Sdp.build(%{ip: "10.9.8.6", medias: callee_medias}))
+      {:ok, _} = Mendooze.bridge(conn, out, [])
+
+      # the callee shares; the re-offer towards the caller carries its screen
+      # inside the group, with the MID extension the caller negotiated
+      share =
+        Sdp.build(%{
+          ip: "10.9.8.6",
+          medias:
+            callee_medias ++
+              [Map.merge(dtls, %{type: :video, port: 41_006, codecs: ["VP8", "H264"], mid: "2"})]
+        })
+
+      assert {:ok, _} = Mendooze.set_remote_offer(out, share)
+      assert {:ok, reoffer} = Mendooze.get_local_offer(conn)
+      assert reoffer =~ "a=group:BUNDLE 0 1 video-2\r\n"
+      [_audio, _camera, screen] = sections(reoffer)
+      assert "a=mid:video-2" in screen
+      assert "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid" in screen
+      assert "a=sendonly" in screen
+
+      # the caller's answer: the stream is stamped BEFORE anything is sent on it
+      _ = calls("EndpointSetRTPProperties")
+      _ = calls("EndpointStartSending")
+      assert :ok = Mendooze.set_remote_answer(conn, bundled_caller_answer(reoffer))
+
+      props = calls("EndpointSetRTPProperties")
+      [stamp] = Enum.filter(props, &match?([3, 6, 1, %{"mid" => "video-2"}, 2], &1))
+      assert Enum.at(stamp, 3)["urn:ietf:params:rtp-hdrext:sdes:mid"] == "4"
+      assert Enum.any?(calls("EndpointStartSending"), &match?([3, 6, 1, _, _, _, "", 2], &1))
+    end
+
     test "unbridging detaches the streams too" do
       %{server: server} = start_media_server(&relay_handler/2)
       {conn, out} = relayed_call(server)
