@@ -20,8 +20,10 @@ its end-to-end check.
 **Status (2026-10-07):** S1's code is done, its scenario pair included,
 run against the store rehearsal (`packaging/fhft/rehearsal/`); S0's files
 are written and rehearsed, waiting for access to `web1`; the provisioning
-page waits for S0's captures. Part T: T0 and T1 done in Trix (`9d5975a`,
-ADR 0012), checked by tests only; T2 next. What this plan says of
+page waits for S0's captures. Part T: T0 to T5 done in Trix (`9d5975a`
+to `1adcbfb`, ADR 0012), checked by tests and, for the upload, against the
+rehearsal; T6 not expected; T7, the video message, planned. Every live
+check waits for `web1`. What this plan says of
 Trix was read in its code at `ff2d8c5` (0.10.8) on 2026-10-06, and its
 ADRs 0008 to 0010: CPIM, IMDN and the SHA-256 digest already exist there,
 which shrinks Part T to what is specific to files.
@@ -35,6 +37,7 @@ which shrinks Part T to what is specific to files.
 | the relay and the Silo carrying the bodies verbatim — **a fix** for a bare multipart, a test for the rest | the Silo keeps only the first part of a multipart (§2); the rest was read in the code, never captured (design §12) |
 | `deflate` on a MESSAGE that would pass 1300 octets on UDP | XML, CPIM and a caption reach that size, and a UDP-registered Linphone cannot be reached over TCP |
 | Trix: receive and show a photo, play a voice message, send both, a caption; isComposing, which it lacks | the second client, and the one that shows the Linphone-side loss of a caption; its CPIM and IMDN already exist and carry files unchanged |
+| Trix: a video message, recorded by default, the voice message one choice away (T7) | asked on 2026-10-07: both recorders, video the default |
 | the Elixir store, as the last part | what replaces the PHP server when quotas, control, metrics or the logging rule are needed |
 
 | Out | Where it re-enters |
@@ -417,6 +420,21 @@ caption included, on a Linphone desktop; a Linphone desktop provisioned
 with CPIM shows "delivered" then "read" for it, and Trix shows the same for
 a photo from Linphone.
 
+**T2 to T5, built on 2026-10-07** (Trix `73186c7`, `0ac46d6`, `1adcbfb`,
+ADR 0012 D6 to D10), with these departures from the text above:
+
+- T2: images and voice messages up to 10 MB are fetched as their card
+  shows; an `<audio>` error turns the card into a file to save, which is
+  how the browser matrix will show up — it is not measured yet. A fetch
+  redraws its card alone, so playback survives other updates;
+- T3: no client-side size limit and no progress bar — the store says "too
+  large" with its 400, and `fetch` does not report upload progress; the
+  file is kept in memory only, and one lost to a reload fails, said so;
+- T5 came with T3: what is being typed when the photo is picked leaves as
+  its caption, in a multipart inside the CPIM envelope;
+- T4: the WAV fallback is not built — it waits for the measurement on a
+  Linphone desktop.
+
 ### T6 — the Bearer path (conditional, not expected)
 
 **Delivers**, only if S2 was built and Part E has reached E4: the token
@@ -426,6 +444,45 @@ when the store answers 401 anyway.
 
 **Done when** an upload from Trix carries no digest and the store's
 `auth_failures_total` does not move.
+
+### T7 — a video message, by default
+
+**Delivers** the recorder of T4 turned into a video recorder, the voice
+message kept beside it:
+
+- **video by default**: the record button opens the camera and the
+  microphone, with a live preview while recording; "voice only" is one
+  choice away and sends exactly what T4 sends today. The choice is per
+  message, not a setting; a camera that is refused, absent or busy — in a
+  video call, say — falls back to voice and says so;
+- `MediaRecorder` on the camera stream, the container the browser offers
+  in an order fixed by the measurement below (`video/mp4` H.264/AAC where
+  available, else `video/webm` VP8 or VP9 with Opus), a bitrate and a
+  resolution bounded (of the order of 640×480 at 1 Mb/s) and a duration
+  bound (of the order of two minutes), so a message stays well inside the
+  store's `fhft_maximum_file_size_in_MB`;
+- **sent as an ordinary file**, not as a voice message: Linphone has a
+  type for a recorded voice message (`audio/wav;voice-recording=yes`) and
+  none for a recorded video, so it is named `video_<date>.<ext>`, typed
+  with its real container, and carries no `playing-length` unless the
+  measurement shows Linphone reads one for video;
+- **received as a video**: T2's card gains the `video/*` kind, sniffed on
+  its first bytes like audio (`ftyp` for MP4, EBML for WebM), played in a
+  `<video controls>` within the card, and auto-fetched under the same 10 MB
+  bound — a larger one waits for the button;
+- the typing indicator while recording carries the video's type; what
+  Linphone shows for it is part of the measurement.
+
+**Measured, not assumed**: what a Linphone desktop does with a browser's
+video file — plays it inline, hands it to the system player, or only
+offers to save it — for MP4/H.264 and WebM/VP8; which container each
+browser records; the size of a two-minute message at the chosen bitrate.
+The container order and the bounds are set from these, and written in
+the ADR.
+
+**Done when** a video message recorded in Trix plays in a second Trix and
+opens on a Linphone desktop; "voice only" still arrives on Linphone as a
+voice message; a refused camera falls back to voice.
 
 ## 5. Part E — the Elixir store, later
 
@@ -569,7 +626,9 @@ Linphone checks wait for S0. S2 waits for T3.
 
 Part T: T0 → T1 → T2 is reception and starts the day S0's captures exist.
 T3 → T4 → T5 is emission, against the PHP server; T5's fallback to a bare
-multipart needs S1 deployed. T6 waits for S2 and E4.
+multipart needs S1 deployed. T6 waits for S2 and E4. T7 follows T4 and
+needs T2's player extended to video; its measurements need a Linphone
+desktop, so it is built against the rehearsal and checked with S0.
 
 Part E starts on its trigger (§5), in order E1 → E2 → E3 → E4 → E6, with E5
 after E3 whenever a client is provisioned with the proxy. Its two release
