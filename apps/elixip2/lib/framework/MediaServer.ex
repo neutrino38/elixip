@@ -415,8 +415,15 @@ defmodule MediaServer do
     @callback set_remote_offer(conn :: pid(), MediaServer.sdp()) ::
                 {:ok, answer :: MediaServer.sdp()} | {:error, term()}
 
-    @doc "Feed a trickle ICE candidate received from the remote peer."
-    @callback add_remote_candidate(conn :: pid(), candidate :: String.t()) ::
+    @doc """
+    Feed a trickle ICE candidate received from the remote peer: the candidate
+    line, alone or with the `sdpMid` of the section it is for. Without a mid the
+    candidate is taken for the audio's.
+    """
+    @callback add_remote_candidate(
+                conn :: pid(),
+                candidate :: String.t() | {String.t(), mid :: String.t()}
+              ) ::
                 :ok | {:error, term()}
 
     @doc """

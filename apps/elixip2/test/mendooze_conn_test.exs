@@ -3453,7 +3453,7 @@ defmodule Mendooze.ConnTest do
     assert answer =~ "a=max-message-size:65536"
     assert answer =~ "a=mid:1"
     assert answer =~ "a=setup:passive"
-    # nothing RTP-shaped on it, and no BUNDLE anywhere
+    # nothing RTP-shaped on it, and no BUNDLE: the offer carried no group
     refute answer =~ "a=rtpmap:106"
     refute answer =~ "a=group:BUNDLE"
     # the audio leg is unaffected
@@ -3609,5 +3609,288 @@ defmodule Mendooze.ConnTest do
     refute offer =~ "m=text"
     assert offer =~ "m=audio 22000"
     assert log =~ "the medium is left out of the offer"
+  end
+
+  # ── Several video streams and BUNDLE (UNIFIED-PLAN E3) ─────────────────────
+
+  @chrome_offer Path.expand("SDP-chrome-142-offer.txt", __DIR__) |> File.read!()
+
+  # A browser sharing its screen next to its camera: a second m=video with a mid
+  # of its own, right after the first.
+  @screen_section (fn ->
+                     [_, video] = Regex.run(~r/(m=video .*?)(?=m=text)/s, @chrome_offer)
+
+                     video
+                     |> String.replace("m=video 46093", "m=video 46095")
+                     |> String.replace("a=mid:1", "a=mid:2")
+                     |> String.replace("a=ssrc:1281632320", "a=ssrc:777000001")
+                   end).()
+
+  # Chrome in `max-compat`: a port per section, no group
+  @two_video_offer @chrome_offer
+                   |> String.replace("m=text", @screen_section <> "m=text", global: false)
+                   |> String.replace("a=group:BUNDLE 0 1\r\n", "")
+
+  # Chrome's default `balanced` policy: one group, the second video bundle-only
+  @bundled_offer @chrome_offer
+                 |> String.replace("m=text", @screen_section <> "m=text", global: false)
+                 |> String.replace("a=group:BUNDLE 0 1", "a=group:BUNDLE 0 1 2")
+                 |> String.replace("m=video 46095", "m=video 0")
+                 |> String.replace("a=mid:2\r\n", "a=mid:2\r\na=bundle-only\r\n")
+
+  # The stream the server creates for the second video gets role 2 and, without
+  # BUNDLE, a port of its own (22004). The role-0 calls are the stock handler's.
+  defp extra_video_handler("EndpointCreateVideoStream", [_sess, _ep]), do: {:ok, [2]}
+  defp extra_video_handler("EndpointStartReceiving", [_, _, 1, _, _, _, 2]), do: {:ok, [22_004]}
+
+  defp extra_video_handler("GetMediaCandidates", [_, _, 0, 1, 2]),
+    do: {:ok, ["rtp://192.168.5.5:22004"]}
+
+  defp extra_video_handler(method, params), do: rpc_handler(method, params)
+
+  # A bundled endpoint (id 6) answers ONE port for every leg: the carrier's.
+  defp bundle_handler("EndpointCreate", [_sess, _tag, _a, _v, _t, true]), do: {:ok, [6]}
+  defp bundle_handler("EndpointStartReceiving", [_, 6 | _]), do: {:ok, [22_000]}
+  defp bundle_handler("GetMediaCandidates", [_, 6 | _]), do: {:ok, ["rtp://192.168.5.5:22000"]}
+  defp bundle_handler(method, params), do: extra_video_handler(method, params)
+
+  defp sections(sdp) do
+    sdp
+    |> String.split(~r/\r?\n/, trim: true)
+    |> Enum.reduce([], fn
+      "m=" <> _ = line, acc -> [[line] | acc]
+      _line, [] -> []
+      line, [current | rest] -> [current ++ [line] | rest]
+    end)
+    |> Enum.reverse()
+  end
+
+  defp attr(section, name), do: Enum.find_value(section, &(&1 =~ ~r/^a=#{name}:/ && &1))
+
+  defp calls(method) do
+    receive do
+      {:jsr309_call, ^method, params} -> [params | calls(method)]
+    after
+      0 -> []
+    end
+  end
+
+  defp webrtc_av_conn(server) do
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :video],
+        webrtc_support: :if_offered
+      )
+
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+    {conn, sess_tag}
+  end
+
+  describe "a second video section is an extra stream (UNIFIED-PLAN E3)" do
+    test "it gets its own stream on the media server, received only, on its own port" do
+      %{server: server} = start_media_server(&extra_video_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, @two_video_offer)
+
+      # the camera is role 0, on the calls every leg makes; the screen is a
+      # stream of its own, keyed and opened with the role the server gave it —
+      # the role LAST, after the offer struct and the (empty) profile
+      assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 4]}
+      assert_received {:jsr309_call, "EndpointSetLocalSTUNCredentials", [3, 4, 1, _u, _p, 2]}
+
+      assert_received {:jsr309_call, "EndpointStartReceiving",
+                       [3, 4, 1, _map, %{"fmtp" => _}, "", 2]}
+
+      assert_received {:jsr309_call, "GetMediaCandidates", [3, 4, 0, 1, 2]}
+      assert_received {:jsr309_call, "EndpointSetRemoteCryptoDTLS", [3, 4, 1, "active", _, _, 2]}
+      assert_received {:jsr309_call, "EndpointSetRemoteSTUNCredentials", [3, 4, 1, "mx0p", _, 2]}
+
+      # nothing is sent on it: StartSending once per role-0 media, none for the screen
+      sending = calls("EndpointStartSending")
+      assert length(sending) == 2
+      refute Enum.any?(sending, &(List.last(&1) == 2))
+
+      [audio, camera, screen] = sections(answer)
+      assert hd(audio) =~ ~r/^m=audio 22000 /
+      assert hd(camera) =~ ~r/^m=video 22002 /
+      assert hd(screen) =~ ~r/^m=video 22004 /
+      assert "a=recvonly" in screen
+      assert "a=sendrecv" in camera
+      assert attr(screen, "mid") == "a=mid:2"
+      assert attr(screen, "candidate") =~ " 22004 typ host"
+      refute answer =~ "a=group:BUNDLE"
+    end
+
+    test "a renegotiation keeps the stream's role, and withdrawing the section deletes it" do
+      %{server: server} = start_media_server(&extra_video_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @two_video_offer)
+      assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 4]}
+
+      # the same sections again: the stream is found by its mid, not created twice
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, @two_video_offer)
+      refute_received {:jsr309_call, "EndpointCreateVideoStream", _}
+      refute_received {:jsr309_call, "EndpointDeleteVideoStream", _}
+      assert_received {:jsr309_call, "EndpointStartReceiving", [3, 4, 1, _map, _offer, "", 2]}
+      [_audio, _camera, screen] = sections(answer)
+      assert hd(screen) =~ ~r/^m=video 22004 /
+
+      # the screen section withdrawn (port 0, RFC 3264 §8.2): its stream goes
+      withdrawn = String.replace(@two_video_offer, "m=video 46095", "m=video 0")
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, withdrawn)
+      assert_received {:jsr309_call, "EndpointDeleteVideoStream", [3, 4, 2]}
+      [_audio, camera, screen] = sections(answer)
+      assert hd(camera) =~ ~r/^m=video 22002 /
+      assert hd(screen) =~ ~r/^m=video 0 /
+
+      # and shared again: a NEW stream, the old role is never reused
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @two_video_offer)
+      assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 4]}
+    end
+
+    test "an FIR on the stream is forwarded to that stream" do
+      %{server: server, stream: stream} = start_media_server(&extra_video_handler/2)
+      {conn, sess_tag} = webrtc_av_conn(server)
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @two_video_offer)
+
+      send(stream, {:chunk, Jsr309FakeServer.event_frame([2, sess_tag, 4, 1, 2])})
+      assert_receive {:jsr309_call, "EndpointRequestUpdate", [3, 4, 1, 2]}, 1_000
+
+      # connectivity on the stream is the stream's own: it neither releases nor
+      # reaps the call
+      send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, 1, 2])})
+      send(stream, {:chunk, Jsr309FakeServer.event_frame([6, sess_tag, 4, 1, 2])})
+      refute_receive {:ms_event, ^conn, :ice_connected}, 200
+      refute_receive {:ms_event, ^conn, {:media_timeout, _}}, 100
+    end
+
+    test "a trickled candidate goes to the section its mid names" do
+      %{server: server} = start_media_server(&extra_video_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @two_video_offer)
+
+      line = "1 1 udp 2122260223 10.9.8.7 50000 typ host"
+      assert :ok = Mendooze.add_remote_candidate(conn, {line, "2"})
+      assert_receive {:jsr309_call, "EndpointAddICECandidate", [3, 4, 1, ^line, 2]}
+
+      assert :ok = Mendooze.add_remote_candidate(conn, {line, "1"})
+      assert_receive {:jsr309_call, "EndpointAddICECandidate", [3, 4, 1, ^line]}
+
+      # no mid: the audio, as before
+      assert :ok = Mendooze.add_remote_candidate(conn, line)
+      assert_receive {:jsr309_call, "EndpointAddICECandidate", [3, 4, 0, ^line]}
+    end
+
+    test "a re-offer keeps the leg's ICE credentials (no restart)" do
+      %{server: server} = start_media_server()
+      {conn, _tag} = webrtc_av_conn(server)
+
+      assert {:ok, first} = Mendooze.set_remote_offer(conn, @chrome_offer)
+      assert {:ok, second} = Mendooze.set_remote_offer(conn, @chrome_offer)
+
+      [audio | _] = sections(first)
+      [audio2 | _] = sections(second)
+      assert attr(audio, "ice-ufrag") == attr(audio2, "ice-ufrag")
+      assert attr(audio, "ice-pwd") == attr(audio2, "ice-pwd")
+      assert attr(audio, "fingerprint") == attr(audio2, "fingerprint")
+    end
+  end
+
+  describe "BUNDLE (UNIFIED-PLAN E3)" do
+    test "a bundled offer re-creates the endpoint with bundle, the new one first" do
+      %{server: server} = start_media_server(&bundle_handler/2)
+      {conn, sess_tag} = webrtc_av_conn(server)
+      assert_receive {:jsr309_call, "EndpointCreate", [3, ^sess_tag, true, true, false]}
+
+      assert {:ok, _answer} = Mendooze.set_remote_offer(conn, @bundled_offer)
+
+      assert_received {:jsr309_call, "EndpointCreate", [3, ^sess_tag, true, true, false, true]}
+      assert_received {:jsr309_call, "EndpointDelete", [3, 4]}
+      # everything after that is on the bundled endpoint
+      assert_received {:jsr309_call, "EndpointStartReceiving", [3, 6, 0 | _]}
+      refute_received {:jsr309_call, "EndpointStartReceiving", [3, 4 | _]}
+    end
+
+    test "every section gets its mid before its StartReceiving" do
+      %{server: server} = start_media_server(&bundle_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+      assert {:ok, _answer} = Mendooze.set_remote_offer(conn, @bundled_offer)
+
+      props =
+        calls("EndpointSetRTPProperties")
+        |> Enum.filter(&match?([_, _, _, %{"mid" => _} | _], &1))
+
+      assert [3, 6, 0, audio_props] = Enum.find(props, &(Enum.at(&1, 2) == 0))
+      assert audio_props["mid"] == "0"
+      assert audio_props["urn:ietf:params:rtp-hdrext:sdes:mid"] == "4"
+      assert audio_props["remote-ssrc"] == "2825193056"
+
+      assert [3, 6, 1, camera_props] = Enum.find(props, &match?([_, _, 1, _], &1))
+      assert camera_props["mid"] == "1"
+      assert camera_props["remote-ssrc"] == "1281632320"
+
+      assert [3, 6, 1, screen_props, 2] = Enum.find(props, &match?([_, _, 1, _, 2], &1))
+      assert screen_props["mid"] == "2"
+      assert screen_props["remote-ssrc"] == "777000001"
+    end
+
+    test "the answer states the group: one port, one transport, the MID extension" do
+      %{server: server} = start_media_server(&bundle_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, @bundled_offer)
+
+      assert answer =~ "a=group:BUNDLE 0 1 2\r\n"
+      [audio, camera, screen] = sections(answer)
+
+      for section <- [audio, camera, screen] do
+        assert hd(section) =~ ~r/^m=\w+ 22000 /
+        assert "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid" in section
+        assert "a=rtcp-mux" in section
+        assert attr(section, "ice-ufrag") == attr(audio, "ice-ufrag")
+        assert attr(section, "fingerprint") == attr(audio, "fingerprint")
+      end
+
+      # the bundle-only screen is a live section of the group, received only
+      assert_received {:jsr309_call, "EndpointStartReceiving", [3, 6, 1, _map, _offer, "", 2]}
+      assert "a=recvonly" in screen
+      refute "a=bundle-only" in screen
+    end
+
+    test "an RTP section left out of the group is declined" do
+      offer = String.replace(@bundled_offer, "a=group:BUNDLE 0 1 2", "a=group:BUNDLE 0 2")
+      %{server: server} = start_media_server(&bundle_handler/2)
+      {conn, _tag} = webrtc_av_conn(server)
+
+      assert {:ok, answer} =
+               Mendooze.set_remote_offer(conn, offer)
+
+      [_audio, camera, screen] = sections(answer)
+      assert hd(camera) =~ ~r/^m=video 0 /
+      # the bundle-only section is then the first live video: the camera's role
+      assert hd(screen) =~ ~r/^m=video 22000 /
+      assert answer =~ "a=group:BUNDLE 0 2\r\n"
+    end
+
+    test "a media server refusing BUNDLE leaves the call unbundled" do
+      handler = fn
+        "EndpointCreate", [_, _, _, _, _, true] -> {:error, "unknown parameter"}
+        m, p -> extra_video_handler(m, p)
+      end
+
+      %{server: server} = start_media_server(handler)
+      {conn, _tag} = webrtc_av_conn(server)
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, @bundled_offer)
+
+      refute_received {:jsr309_call, "EndpointDelete", _}
+      refute answer =~ "a=group:BUNDLE"
+      [audio, camera, screen] = sections(answer)
+      assert hd(audio) =~ ~r/^m=audio 22000 /
+      assert hd(camera) =~ ~r/^m=video 22002 /
+      # bundle-only means "nowhere but in the group": declined
+      assert hd(screen) =~ ~r/^m=video 0 /
+      refute_received {:jsr309_call, "EndpointCreateVideoStream", _}
+    end
   end
 end
