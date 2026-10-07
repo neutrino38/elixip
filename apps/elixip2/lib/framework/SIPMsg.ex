@@ -690,16 +690,16 @@ defmodule SIPMsg do
   # part of it (parse_multi_part_body/2).
   defp parse_sub_body(subbody) do
     [headers, data] =
-      cond do
+      case skip_blank_lines_before_headers(subbody) do
         # No MIME header at all: the part starts with the blank line.
-        String.starts_with?(subbody, "\r\n") ->
-          ["", binary_part(subbody, 2, byte_size(subbody) - 2)]
+        "\r\n" <> data ->
+          ["", data]
 
-        String.starts_with?(subbody, "\n") ->
-          ["", binary_part(subbody, 1, byte_size(subbody) - 1)]
+        "\n" <> data ->
+          ["", data]
 
-        true ->
-          case String.split(subbody, ~r/\r?\n\r?\n/, parts: 2) do
+        part ->
+          case String.split(part, ~r/\r?\n\r?\n/, parts: 2) do
             [h, d] ->
               [h, d]
 
@@ -768,6 +768,19 @@ defmodule SIPMsg do
       _ ->
         # Single body
         [%{contenttype: ctype, data: body}]
+    end
+  end
+
+  # Blank lines between a delimiter and the part's MIME headers. Not RFC 2046 —
+  # there, a blank line right after the delimiter means "no headers" — but the
+  # examples of RFC 6442 (location conveyance) are printed that way and were
+  # copied by implementations. Skipped only when a `Content-*` field follows, the
+  # only header fields a body part carries (RFC 2045 §9): a part with no header
+  # whose text happens to begin like one is the price, and an improbable one.
+  defp skip_blank_lines_before_headers(part) do
+    case Regex.run(~r/\A(?:\r?\n)+(?=content-[a-z0-9-]*:)/i, part) do
+      [blank] -> binary_part(part, byte_size(blank), byte_size(part) - byte_size(blank))
+      nil -> part
     end
   end
 

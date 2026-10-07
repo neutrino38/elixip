@@ -178,6 +178,18 @@ defmodule SIP.Test.BodyCodingDatagram do
       assert part.data == "see --b1 here"
     end
 
+    test "a blank line between a delimiter and Content-* headers is skipped (RFC 6442 examples)" do
+      body =
+        "--b1\r\n\r\nContent-Type: application/pidf+xml\r\nContent-ID: <t@x>\r\n\r\n<presence/>\r\n" <>
+          "--b1\r\n\r\nTo: not a MIME header\r\n--b1--\r\n"
+
+      [pidf, bare] = SIPMsg.parse_multi_part_body("multipart/mixed;boundary=b1", body)
+
+      assert pidf.contenttype == "application/pidf+xml"
+      assert pidf.data == "<presence/>"
+      assert bare.data == "To: not a MIME header"
+    end
+
     test "a bare body, a part without boundary, no body" do
       assert SIPMsg.body_octets("hello") == "hello"
       assert SIPMsg.body_octets([%{contenttype: "text/plain", data: "hello"}]) == "hello"
