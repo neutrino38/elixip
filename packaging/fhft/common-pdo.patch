@@ -1,0 +1,117 @@
+--- a/common.php
++++ b/common.php
+@@ -73,16 +73,36 @@
+ 
+ 
+ /*** User authentication ***/
++// PDO rather than mysqli, so that the subscriber base may be PostgreSQL:
++// AUTH_DB_DSN names the driver ("pgsql:host=…;dbname=…" or "mysql:host=…;dbname=…").
+ function auth_get_db_conn()
+ {
+-	$conn = (USE_PERSISTENT_CONNECTIONS)
+-		? mysqli_connect('p:' . AUTH_DB_HOST, AUTH_DB_USER, AUTH_DB_PASSWORD, AUTH_DB_NAME)
+-		: mysqli_connect(AUTH_DB_HOST, AUTH_DB_USER, AUTH_DB_PASSWORD, AUTH_DB_NAME);
++	try {
++		return new PDO(AUTH_DB_DSN, AUTH_DB_USER, AUTH_DB_PASSWORD, [
++			PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
++			PDO::ATTR_PERSISTENT => USE_PERSISTENT_CONNECTIONS,
++		]);
++	} catch (PDOException $e) {
++		fhft_log(LogLevel::ERROR, "Unable to connect to the subscriber base: " . $e->getMessage() . "\n");
++		return null;
++	}
++}
+ 
+-	if (!$conn) {
+-		fhft_log(LogLevel::ERROR, "Unable to connect to MySQL base " . AUTH_DB_NAME . ".\nDebugging errno: " . mysqli_connect_errno() . "\nDebugging error: " . mysqli_connect_error() . "\n");
++// The rows AUTH_QUERY returns for ($username, $realm); null when the base cannot be read.
++function auth_query_rows($username, $realm)
++{
++	$db = auth_get_db_conn();
++	if ($db === null) {
++		return null;
++	}
++	try {
++		$stmt = $db->prepare(AUTH_QUERY);
++		$stmt->execute([$username, $realm]);
++		return $stmt->fetchAll(PDO::FETCH_ASSOC);
++	} catch (PDOException $e) {
++		fhft_log(LogLevel::ERROR, "Unable to execute " . AUTH_QUERY . ": " . $e->getMessage() . "\n");
++		return null;
+ 	}
+-	return $conn;
+ }
+ 
+ // Nonce are one-time usage, in order to avoid storing them in a table
+@@ -106,18 +126,13 @@
+ 
+ 	if ($username != null) {
+ 		// Get the password/hash from database to include only available password hash in the authenticate header
+-		$db = auth_get_db_conn();
+-		$stmt = $db->prepare(AUTH_QUERY);
+-		if (!$stmt) {
+-			fhft_log(LogLevel::ERROR, "Unable to execute " . AUTH_QUERY . ".\nDebugging errno: " . mysqli_connect_errno() . "\nDebugging error: " . mysqli_connect_error() . "\n");
++		$rows = auth_query_rows($username, $realm);
++		if ($rows === null) {
+ 			$has_md5 = true;
+ 			$has_sha256 = true;
+ 		} else {
+-			$stmt->bind_param('ss', $username, $realm);
+-			$stmt->execute();
+-
+-			if ($query_result = $stmt->get_result()) {
+-				while ($row = $query_result->fetch_assoc()) {
++			{
++				foreach ($rows as $row) {
+ 					$algorithm = $row['algorithm'];
+ 					if ($algorithm == 'CLRTXT') {
+ 						fhft_log(LogLevel::DEBUG, "User  " . $username . " has clear text password in db \n");
+@@ -135,10 +150,7 @@
+ 					}
+ 				}
+ 			}
+-
+-			$stmt->close();
+ 		}
+-		$db->close();
+ 	} else { // we don't have the username authorize both MD5 and SHA256
+ 		$has_md5 = true;
+ 		$has_sha256 = true;
+@@ -192,14 +204,10 @@
+ 	}
+ 
+ 	// Get the password/hash from database
+-	$db = auth_get_db_conn();
+-	$stmt = $db->prepare(AUTH_QUERY);
+-	if (!$stmt) {
+-		fhft_log(LogLevel::ERROR, "Unable to execute " . AUTH_QUERY . ".\nDebugging errno: " . mysqli_connect_errno() . "\nDebugging error: " . mysqli_connect_error() . "\n");
++	$rows = auth_query_rows($username, $realm);
++	if ($rows === null) {
+ 		return;
+ 	}
+-	$stmt->bind_param('ss', $username, $realm);
+-	$stmt->execute();
+ 
+ 	// Default requested to MD5 if not specified in header
+ 	$requested_algorithm = (array_key_exists('algorithm', $data))
+@@ -207,8 +215,8 @@
+ 		: 'MD5';
+ 
+ 	$password = null;
+-	if ($query_result = $stmt->get_result()) {
+-		while ($row = $query_result->fetch_assoc()) {
++	{
++		foreach ($rows as $row) {
+ 			$password = $row['password'];
+ 			$algorithm = $row['algorithm'];
+ 			if ($algorithm == 'CLRTXT') {
+@@ -224,9 +232,6 @@
+ 		}
+ 	}
+ 
+-	$stmt->close();
+-	$db->close();
+-
+ 	if (is_null($password)) {
+ 		fhft_log(LogLevel::ERROR, "Unable to find password for User: " . $username . " in format " . $requested_algorithm);
+ 		return;
