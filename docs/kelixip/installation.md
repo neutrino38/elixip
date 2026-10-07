@@ -68,7 +68,9 @@ and [§ Building the deb packages](../../BUILD.md#building-the-deb-packages-ubun
 | `/usr/sbin/kelictl` | Admin CLI (a command inside the release) |
 | `/usr/sbin/kelixip` | The release's own control script (`start`, `rpc`, …) |
 | `/usr/share/bash-completion/completions/kelictl` | Shell completion for the CLI ([administration](administration.md#shell-completion)); inert without the `bash-completion` package |
-| `/var/lib/kelixip/`, `/var/log/kelixip/` | Mutable state; logs when stdout is redirected |
+| `/usr/share/kelixip/fail2ban/` | The fail2ban filters (`filter.d/`) and the jail example (`jail.d/`), to link into `/etc/fail2ban` ([running](running.md#fail2ban)) |
+| `/etc/logrotate.d/kelixip` | Weekly rotation of the security log (kept on upgrade) |
+| `/var/lib/kelixip/`, `/var/log/kelixip/` | Mutable state; the security incident log (`[security] log_file`), and logs when stdout is redirected |
 
 `module_dir` is root-owned and **not writable by the service** on purpose: loading
 a `.beam` is executing code.
@@ -196,6 +198,13 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `target` | `stdout` \| `syslog` | `stdout` | `syslog` adds an RFC 3164 sink over the local `/dev/log` socket (journald and rsyslog both listen there). It **adds** a sink: stdout stays live, since systemd captures it |
 | `facility` | `kern`, `user`, `daemon`, `local0`…`local7`, … | `local0` | Syslog facility. Validated against the RFC 3164 list; unused while `target = "stdout"` |
 | `level` | `debug` \| `info` \| `warning` \| `error` | `info` | Also changeable at runtime with `kelictl log-level` |
+
+#### `[security]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `log_file` | path | *none* | Where the security incident lines go, one per line, UTC timestamp first — the file the shipped fail2ban filters read ([running.md](running.md#fail2ban)). The same lines always go to the journal as warnings; absent, that copy is all there is. The packaged `config.toml` sets `/var/log/kelixip/security.log`, rotated by `/etc/logrotate.d/kelixip` |
+| `ignore` | list of `auth-failure`, `invalid-domain`, `invalid-packet`, `transport-error`, `api-auth` | `[]` | Incident types dropped on arrival, written nowhere. For a UA whose messages the parser refuses: `["invalid-packet"]` keeps the other jails working |
 
 #### `[[listen]]` — one entry per inbound socket
 

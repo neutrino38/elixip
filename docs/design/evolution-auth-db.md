@@ -153,7 +153,9 @@ Only to check that the shape above survives contact with it. Cx/Dx (IMS HSS):
    nothing before it does.
 
 Steps 1–2 are internal and safe. Step 3 is the one that changes what scripts look
-like; it also feeds [integration-fail2ban.md](integration-fail2ban.md) §4, which
-needs a reason code (`bad_password` vs. `unknown_user`) on the rejection verdict —
-worth landing in step 1 while the verdict type is being touched anyway.
+like. The fail2ban integration does not wait on it: a backend reports its own
+refusals, with the cause, through `Elixip.Security.report/1`
+([fail2ban-plan.md](fail2ban-plan.md) §3), so the rejection verdict carries no
+reason code and a second backend only has to call the same function from the place
+that knows why it refused.
 

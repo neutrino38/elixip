@@ -1,7 +1,9 @@
 # fail2ban integration — design discussion
 
-**Status: discussion, nothing implemented.** Decisions marked **OPEN** are the ones
-to settle before writing code.
+**Status: implemented** (2026-10-07) along [fail2ban-plan.md](fail2ban-plan.md),
+which is the build order and, in its §3, settles every point marked **OPEN**
+below — the sketches of §4 to §6 and §8 read as the starting point, the plan as
+what was built. §7's forwarded-address handling and in-process ACL stay open.
 
 Goal: make kelixip *trivially* protectable by fail2ban. "Trivially" means an
 operator installs the package, drops in the shipped filter, enables a jail, and is

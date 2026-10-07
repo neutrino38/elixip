@@ -352,6 +352,20 @@ Gauges are sampled by **one poller on one tick**: a module exporting
 module exporting `status/0` contributes a line to `kelictl status`. The core
 names no module in either case — a module exporting neither contributes nothing.
 
+**Security incidents** are the other observable. Anything in the stack that sees
+someone knocking — a transport refusing a packet, the router refusing a domain, the
+auth module refusing a credential, the control API refusing a token — builds an
+`Elixip.Security.Incident` and calls `Elixip.Security.report/1`, the library's one
+entry point. The library keeps no sink: `Kelix.Config` names
+`Kelix.Security.IncidentReporter` in the `:elixip2` app env (`:security_sink`, the
+`{module, fun}` convention of `:sequence_output` and `:mediaserver_selector`), and
+the reporter writes each incident twice — to the logger as a warning, and to
+`[security] log_file`, one timestamped line per incident, opened and closed per
+batch so rotation needs no signal. The line's shape is a contract with the
+fail2ban filters shipped under `packaging/fail2ban/`, pinned by
+`fail2ban_filter_test.exs`. The incident types, their raising points and what is
+deliberately not one are in [fail2ban-plan.md](fail2ban-plan.md) §3.
+
 ---
 
 ## 12. Packaging
