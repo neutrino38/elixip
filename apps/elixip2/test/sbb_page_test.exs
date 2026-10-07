@@ -404,7 +404,7 @@ defmodule SIP.Test.SbbPage do
 
   defp key(name), do: "sip:alice@#{name}.unit.test;unittest=alice-#{name}"
 
-  defp inbound_wire(body \\ "Rendez-vous jeudi", type \\ "text/plain;charset=UTF-8") do
+  defp inbound_wire(body, type) do
     "MESSAGE sip:alice@unit.test SIP/2.0\r\n" <>
       "Via: SIP/2.0/UDP 82.184.8.2:53936;branch=z9hG4bKinjected1\r\n" <>
       "Max-Forwards: 69\r\n" <>

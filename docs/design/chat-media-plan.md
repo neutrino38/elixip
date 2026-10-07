@@ -17,9 +17,10 @@ The contract between the parts is **§5 and §9 of the design**, plus the
 captures Part S produces in S0. Part T needs nothing else from Part S until
 its end-to-end check.
 
-**Status (2026-10-06): S1's code done** — the Silo fix, `deflate` on UDP,
-the relay keeping a multipart's Content-Type, and their tests; S1's scenario
-pair and provisioning page wait for S0. Nothing else started. What this plan says of
+**Status (2026-10-07):** S1's code is done, its scenario pair included,
+run against the store rehearsal (`packaging/fhft/rehearsal/`); S0's files
+are written and rehearsed, waiting for access to `web1`; the provisioning
+page waits for S0's captures. Part T not started. What this plan says of
 Trix was read in its code at `ff2d8c5` (0.10.8) on 2026-10-06, and its
 ADRs 0008 to 0010: CPIM, IMDN and the SHA-256 digest already exist there,
 which shrinks Part T to what is specific to files.
@@ -205,12 +206,34 @@ message layer and the tests that pin them.
   415 retry) and `apps/kelix_modules/test/silo_test.exs` (the multipart
   through store and flush, failing before the fix).
 
+**The scenario pair, done on 2026-10-07.** What a scenario needed became
+framework, as CLAUDE.md asks of any SIP reading:
+
+- `SIP.FileTransfer` — the `fthttp` XML read (`file-info` of type `file`
+  alone, name percent-decoded, `playing-length` in milliseconds) and
+  written in Linphone's shape; the upload, the empty POST sent to learn the
+  challenge and the credentials put on the file POST, since the reference
+  server answers 400 to an authenticated empty POST (design §2.8); the
+  download;
+- `SIP.Msg.Ops.file_transfer_xml/1` — the XML found bare, in CPIM, or as the
+  part of a multipart, bare or in CPIM;
+- `SIP.Session.FileTransfer`, used by `SIP.Scenario` — `upload_file`,
+  `download_file` (one tagged event each, as `http_GET`), `send_file_page`,
+  `file_info`; the credentials are the context's HA1 and algorithm, the HTTP
+  `From` the account's bare URI;
+- `SIPMsg.parse_challenge/1` — a `WWW-Authenticate` value read, SIP's or
+  HTTP's;
+- `apps/elixip2/scenarios/uac_file_message.exs` and `uas_file_message.exs`,
+  defaulting to the rehearsal and its `alice@unit.test`; run through
+  `elixipp`, the UAS downloaded the 380 octets the XML announced;
+- `apps/elixip2/test/file_transfer_test.exs` — the XML, the four places it
+  is found, and the upload against a `Req` adapter behaving as the reference
+  server does, plus one `:live` upload and download against `FHFT_URL`.
+
 **Files** `apps/elixip2/lib/framework/SIPMsg.ex`, `SIPMsgBodyCoding.ex`,
 `SIPMsgTemplate.ex`, `SIPTransaction.ex`, `SIPSessionPage.ex`,
 `SIPDialogImpl.ex`; `apps/kelix_modules/lib/kelix/mod/silo.ex`; the tests
-above; still to come with S0:
-`apps/elixip2/scenarios/uac_file_message.exs`, `uas_file_message.exs`,
-`docs/kelixip/administration.md`.
+above; still to come with S0: `docs/kelixip/administration.md`.
 
 **Done when** the tests are green, the scenario pair against the PHP
 server; a Linphone desktop, offline during the upload and the MESSAGE, gets

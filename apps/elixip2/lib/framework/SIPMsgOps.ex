@@ -554,6 +554,67 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The `fthttp` XML a MESSAGE carries — a file sent in chat (RCS, GSMA RCC.07
+  §3.5.4.8; DESIGN-CHAT-MEDIA §2) — or `nil`.
+
+  Found where clients put it: the body itself, the content of a CPIM envelope
+  (a Linphone provisioned for receipts), or the part of that type in a
+  multipart, bare or in CPIM (a photo with its caption). What the XML says is
+  `SIP.FileTransfer.parse/1`'s to read.
+  """
+  @spec file_transfer_xml(map()) :: binary() | nil
+  def file_transfer_xml(msg) when is_map(msg) do
+    case Map.get(msg, :body) do
+      [_first, _second | _] = parts -> ft_part(parts)
+      _single -> ft_content(body_content_type(msg), body_string(msg))
+    end
+  end
+
+  @ft_type "application/vnd.gsma.rcs-ft-http+xml"
+
+  defp ft_content(@ft_type, body), do: body
+
+  defp ft_content("message/cpim", body) when is_binary(body) do
+    # Envelope headers, blank line, MIME headers of the content, blank line, content.
+    with [_envelope, mime, content] <- String.split(body, ~r/\r?\n\r?\n/, parts: 3),
+         type when is_binary(type) <- mime_content_type(mime) do
+      if String.starts_with?(type, "multipart/"),
+        do: ft_part(SIPMsg.parse_multi_part_body(type, content)),
+        else: ft_content(type |> split_params() |> elem(0) |> String.downcase(), content)
+    else
+      _ -> nil
+    end
+  rescue
+    # a multipart inside the envelope that does not parse names no file
+    _ -> nil
+  end
+
+  defp ft_content(_type, _body), do: nil
+
+  defp ft_part(parts) do
+    Enum.find_value(parts, fn part ->
+      type = part |> Map.get(:contenttype) |> to_string() |> split_params() |> elem(0)
+      if String.downcase(type) == @ft_type, do: part.data
+    end)
+  end
+
+  # The full Content-Type line of a MIME header block, parameters kept (a
+  # multipart's boundary is one).
+  defp mime_content_type(block) do
+    block
+    |> String.split(~r/\r?\n/)
+    |> Enum.find_value(fn line ->
+      case String.split(line, ":", parts: 2) do
+        [name, value] ->
+          if String.downcase(String.trim(name)) == "content-type", do: String.trim(value)
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  @doc """
   What a MESSAGE is, in one line a log or a report may carry: its kind
   (`message_kind/1`), its sender's AOR, its media type and its size —
   `"im from alice@example.com (text/plain, 17 octets)"`. **Never its content**

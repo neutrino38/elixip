@@ -318,6 +318,15 @@ defmodule SIPMsg do
     {:ok, value}
   end
 
+  @doc """
+  Read one digest challenge — the value of a `WWW-Authenticate` header, SIP's or
+  HTTP's, the grammar being the same (RFC 3261 §25.1, RFC 7616) — into the
+  string-keyed map an `Authorization` is computed from, `:authproc` included.
+  """
+  @spec parse_challenge(binary()) :: {:ok, map()} | {atom(), binary()}
+  def parse_challenge(value) when is_binary(value),
+    do: parse_header_content(:wwwauthenticate, String.trim(value))
+
   defp auth_param_value(header, key, value) do
     cond do
       key in @unquoted_auth_params -> value
