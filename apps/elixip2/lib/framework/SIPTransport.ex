@@ -30,11 +30,15 @@ defmodule SIP.Transport do
     end
 
     defp parse_and_get_clen([line | rest]) do
-      case String.split(line, ": ", parts: 2) do
-        ["Content-Length", val] ->
-          case Integer.parse(String.trim(val)) do
-            {clen, ""} when clen >= 0 -> {:ok, clen}
-            _ -> :invalid
+      case String.split(line, ":", parts: 2) do
+        [name, val] ->
+          if String.downcase(String.trim_trailing(name)) in ["content-length", "l"] do
+            case Integer.parse(String.trim(val)) do
+              {clen, ""} when clen >= 0 -> {:ok, clen}
+              _ -> :invalid
+            end
+          else
+            parse_and_get_clen(rest)
           end
 
         _ ->

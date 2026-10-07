@@ -98,4 +98,33 @@ defmodule SIP.Test.SIP.Depack do
     {:ok, reparsed} = SIPMsg.parse(framed, fn _c, _m, _l, _li -> nil end)
     assert [%{data: ^sdp}] = reparsed.body
   end
+
+  # Framing reads Content-Length the way the parser does (RFC 3261 §7.3): compact
+  # `l:`, any case, and HCOLON with no space. It used to match the one spelling
+  # `Content-Length: `, so a peer writing `l: 0` over TCP was unframeable — a 400
+  # and a closed connection for a legal message.
+  test "Content-Length is found under its compact form, any case, HCOLON without a space" do
+    body = "v=0\r\n"
+
+    for clen_line <- [
+          "l: #{byte_size(body)}",
+          "content-length:#{byte_size(body)}",
+          "CONTENT-LENGTH :  #{byte_size(body)}"
+        ] do
+      wire =
+        "OPTIONS sip:bob@example.com SIP/2.0\r\n" <>
+          "Via: SIP/2.0/TCP 172.21.105.71:5070;branch=z9hG4bKclen\r\n" <>
+          "From: <sip:alice@example.com>;tag=1\r\nTo: sip:bob@example.com\r\n" <>
+          "Call-ID: clen-1\r\nCSeq: 1 OPTIONS\r\n" <> clen_line <> "\r\n\r\n" <> body
+
+      me = self()
+
+      SIP.Transport.Depack.on_data_received(%SIP.Transport.Depack{}, wire, fn what, msg ->
+        send(me, {what, msg})
+      end)
+
+      assert_received {:msg, ^wire}
+      refute_received {_, _}
+    end
+  end
 end
