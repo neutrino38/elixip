@@ -1,25 +1,21 @@
-# flexisip-http-file-transfer-server 524ab71 + common-pdo.patch
-# (docs/design/chat-media-plan.md, S0). Included by the vhost only, never
-# loaded on its own: its name does not end in .conf.
-# Downloads are static: the random name is the capability (DESIGN-CHAT-MEDIA §2.7).
+# flexisip-http-file-transfer-server — included by the vhost only.
 Alias /files/tmp /var/opt/belledonne-communications/flexisip-http-file-transfer-tmp
 Alias /files     /opt/belledonne-communications/share/flexisip-http-file-transfer-server
 
 <Directory /opt/belledonne-communications/share/flexisip-http-file-transfer-server/>
-    # PHP announces its version; expose_php cannot be set per directory
-    Header always unset X-Powered-By
-    Header unset X-Powered-By
     Options -Indexes
     AllowOverride None
     Require all granted
-    # php-fpm: without it the Authorization header never reaches the PHP
+    # php-fpm: pass Authorization to PHP
     CGIPassAuth On
     <Files "download.php">
         Require all denied
     </Files>
 
-    # CORS for Trix. "always" so the 401 carries them too, or the browser
-    # hides the challenge from the client.
+    Header always unset X-Powered-By
+    Header unset X-Powered-By
+
+    # CORS for Trix
     Header always set Access-Control-Allow-Origin "https://trix.weshwesh.eu"
     Header always set Access-Control-Allow-Methods "POST, OPTIONS"
     Header always set Access-Control-Allow-Headers "Authorization, From, Content-Type"
@@ -27,7 +23,7 @@ Alias /files     /opt/belledonne-communications/share/flexisip-http-file-transfe
     Header always set Access-Control-Max-Age "86400"
     Header always append Vary "Origin"
 
-    # The preflight is answered here, never challenged by the PHP
+    # Preflight answered by Apache, not challenged
     RewriteEngine On
     RewriteCond %{REQUEST_METHOD} OPTIONS
     RewriteRule ^ - [R=204,L]
@@ -37,13 +33,12 @@ Alias /files     /opt/belledonne-communications/share/flexisip-http-file-transfe
     Options -Indexes -ExecCGI
     AllowOverride None
     Require all granted
-    # No script ever runs from the upload directory, whatever its extension
+    # Never execute an upload
     <FilesMatch ".*">
         SetHandler none
     </FilesMatch>
     Header always set X-Content-Type-Options "nosniff"
     Header always set Content-Disposition "attachment"
-    # Trix reads the file with fetch() to build a blob URL
     Header always set Access-Control-Allow-Origin "https://trix.weshwesh.eu"
     Header always append Vary "Origin"
 </Directory>
