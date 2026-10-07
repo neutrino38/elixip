@@ -223,6 +223,17 @@ install -D -m 0644 systemd/kelixip.service %{buildroot}%{_unitdir}/%{name}.servi
 install -D -m 0644 completion/kelictl \
     %{buildroot}%{_datadir}/bash-completion/completions/kelictl
 
+# The fail2ban filters and the jail example, as data: the operator links them into
+# /etc/fail2ban (doc/running.md, "fail2ban"). Not required: fail2ban is optional.
+install -d -m 0755 %{buildroot}%{_datadir}/%{name}/fail2ban/filter.d
+install -d -m 0755 %{buildroot}%{_datadir}/%{name}/fail2ban/jail.d
+install -m 0644 fail2ban/filter.d/*.conf %{buildroot}%{_datadir}/%{name}/fail2ban/filter.d/
+install -m 0644 fail2ban/jail.d/*.conf %{buildroot}%{_datadir}/%{name}/fail2ban/jail.d/
+
+# Rotation of the security log ([security] log_file). Inert while the file does
+# not exist (missingok).
+install -D -m 0644 logrotate/kelixip %{buildroot}%{_sysconfdir}/logrotate.d/%{name}
+
 # Mutable state (future usrloc persistence, operator-installed scripts) and the log
 # directory used when stdout is redirected. The unit also declares them, so a
 # tmpfs-only deployment still gets them.
@@ -283,6 +294,7 @@ fi
 %config(noreplace) %attr(0640,root,kelixip) %{_sysconfdir}/%{name}/config.toml
 %config(noreplace) %attr(0640,root,kelixip) %{_sysconfdir}/%{name}/domains.toml
 %config(noreplace) %attr(0644,root,root) %{_sysconfdir}/sysconfig/%{name}
+%config(noreplace) %attr(0644,root,root) %{_sysconfdir}/logrotate.d/%{name}
 %{_unitdir}/%{name}.service
 %{_sbindir}/kelictl
 %{_sbindir}/kelixip
@@ -301,6 +313,7 @@ fi
 %exclude %{_datadir}/%{name}/registrar-presence.exs
 %exclude %{_datadir}/%{name}/*-chat.exs
 %dir %{_datadir}/%{name}/sql
+%{_datadir}/%{name}/fail2ban
 %dir %attr(0755,root,root) %{kelixdir}
 %{kelixdir}/bin
 %{kelixdir}/erts-*

@@ -1,3 +1,4 @@
 /etc/kelixip/config.toml
 /etc/kelixip/domains.toml
 /etc/default/kelixip
+/etc/logrotate.d/kelixip
