@@ -478,7 +478,9 @@ defmodule Kelix.Mod.AuthDb do
           reject(
             req,
             :bad_realm,
-            "credential minted for realm #{inspect(auth["realm"])}, not #{realm}"
+            "credential minted for realm #{inspect(auth["realm"])}, not #{realm}",
+            auth["username"],
+            realm
           )
         end
     end
@@ -552,10 +554,10 @@ defmodule Kelix.Mod.AuthDb do
       # fail2ban jail) can treat 5 wrong passwords and 5 unknown users very
       # differently — nobody mistypes a username five times.
       :notfound ->
-        reject(req, :unknown_user, "no subscriber #{inspect(user)}@#{domain}")
+        reject(req, :unknown_user, "no subscriber #{inspect(user)}@#{domain}", user, domain)
 
       false ->
-        reject(req, :bad_password, "digest mismatch for #{inspect(user)}@#{domain}")
+        reject(req, :bad_password, "digest mismatch for #{inspect(user)}@#{domain}", user, domain)
 
       {:error, reason} ->
         Logger.error(module: __MODULE__, message: "credential lookup failed: #{inspect(reason)}")
@@ -616,14 +618,29 @@ defmodule Kelix.Mod.AuthDb do
     end
   end
 
-  # One 403 on the wire, one named cause in the log. The cause is what tells a
-  # misprovisioned phone from a scanner, and it exists nowhere else: until now a
-  # refused REGISTER produced no log line at all.
-  defp reject(req, cause, detail) do
+  # One 403 on the wire, one named cause in the log, one security incident. The
+  # cause is what tells a misprovisioned phone from a scanner, and it exists
+  # nowhere else: until now a refused REGISTER produced no log line at all. The
+  # incident is the same cause with the source the request came from, which is
+  # what a fail2ban jail reads (docs/design/fail2ban-plan.md).
+  defp reject(req, cause, detail, user, realm) do
     Logger.warning(
       module: __MODULE__,
       message: "#{req_method(req)} refused (#{cause}): #{detail}"
     )
+
+    {proto, ip, port} = SIP.Msg.Ops.source_flow(req) || {nil, nil, nil}
+
+    Elixip.Security.report(%Elixip.Security.Incident{
+      type: :auth_failure,
+      src: ip,
+      port: port,
+      proto: proto,
+      method: req_method(req),
+      realm: realm,
+      user: if(is_binary(user), do: user),
+      reason: cause
+    })
 
     {:reject, 403, "Forbidden"}
   end

@@ -44,10 +44,10 @@ defmodule Kelix.ControlAPI.Auth do
       ["Bearer " <> presented] ->
         if Plug.Crypto.secure_compare(presented, token),
           do: conn,
-          else: deny(conn, 401, "invalid token")
+          else: deny(conn, 401, "invalid token", :invalid_token)
 
       _ ->
-        deny(conn, 401, "missing bearer token")
+        deny(conn, 401, "missing bearer token", :missing_token)
     end
   end
 
@@ -59,16 +59,40 @@ defmodule Kelix.ControlAPI.Auth do
   defp check_mtls(conn) do
     case get_peer_data(conn) do
       %{ssl_cert: cert} when is_binary(cert) -> conn
-      _ -> deny(conn, 403, "client certificate required")
+      _ -> deny(conn, 403, "client certificate required", :no_client_cert)
     end
   end
 
   # ── rejection ────────────────────────────────────────────────────────────────
 
-  defp deny(conn, status, message) do
+  # `reason` names the credential failure the client is responsible for, and is
+  # reported as an `api-auth` incident (docs/design/fail2ban-plan.md). The two
+  # fail-closed denials of a misconfigured API carry none: they are ours, not the
+  # client's, and counting them would ban the operator's own tooling.
+  defp deny(conn, status, message, reason \\ nil) do
+    if reason, do: report(conn, reason)
+
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(status, Jason.encode!(%{error: message}))
     |> halt()
+  end
+
+  defp report(conn, reason) do
+    Elixip.Security.report(%Elixip.Security.Incident{
+      type: :api_auth,
+      src: conn.remote_ip,
+      port: peer_port(conn),
+      proto: conn.scheme |> Atom.to_string() |> String.upcase(),
+      method: conn.method,
+      reason: reason
+    })
+  end
+
+  defp peer_port(conn) do
+    case get_peer_data(conn) do
+      %{port: port} when is_integer(port) -> port
+      _ -> nil
+    end
   end
 end
