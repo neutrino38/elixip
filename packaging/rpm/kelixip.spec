@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.2
+Version:        1.7.0
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        3%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -365,6 +365,18 @@ fi
 %{_datadir}/%{name}/sql/conversation
 
 %changelog
+* Wed Oct 07 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.0-1
+- Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
+  Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
+  store-and-forward intact.
+- A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
+  a 415 without deflate in Accept-Encoding gets the page again in clear.
+- The page relay keeps the sender's multipart Content-Type and relays a bare
+  multipart byte for byte.
+- Multipart parts keep their trailing whitespace; a blank line before a
+  part's Content-* headers is tolerated.
+- User-Agent is now Kelixip/1.7.0.
+
 * Wed Sep 30 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.2-1
 - Basic instant messaging (page mode, RFC 3428): a [[domain.chat]] block routes
   a MESSAGE to the `chat` function; a MESSAGE's content is never logged.

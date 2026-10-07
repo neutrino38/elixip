@@ -9,7 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.6.2
+Version:        1.7.0
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
@@ -46,6 +46,13 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Wed Oct 07 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.0-1
+- Released together with kelixip 1.7.0-1.
+- File transfer verbs for scenarios (upload_file, download_file,
+  send_file_page, file_info) and the example pair uac_file_message.exs /
+  uas_file_message.exs.
+- User-Agent is now Elixipp-1.7.0.
+
 * Wed Sep 30 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.2-1
 - Released together with kelixip 1.6.2-1.
 - UAC.Page and UAS.Page: built-in page-mode MESSAGE scenarios, driven by
