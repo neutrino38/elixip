@@ -116,6 +116,11 @@ Configured for production use, not as a demo:
   since `ERROR` and `DEBUG` both write file names and paths; said in the
   config's comments.
 
+It is installed as an RPM under upstream's name,
+`bc-flexisip-http-file-transfer-server`, built from the pinned commit with the
+patch and these files (`packaging/fhft/build-rpm.sh`); upstream's own spec
+installs an Apache config httpd refuses under php-fpm.
+
 The installation is rehearsed first in containers on a development machine
 — AL9, httpd, php-fpm, PostgreSQL with a `subscriber` table — with the same
 files; that rehearsal is what S1's scenario pair runs against before `web1`
@@ -132,9 +137,9 @@ against, and the answer to design §12's two first unverified points.
 kelixip domain, in `docs/kelixip/chat-attachments.md`: which keys, where they
 go on desktop and on mobile, and that the desktop offers no UI for them.
 
-**Files** `packaging/fhft/` here: the PDO patch, the Apache config, the
-`.user.ini`, the server config with its secrets left as placeholders, and
-the rehearsal's container files; `docs/kelixip/chat-attachments.md` and
+**Files** `packaging/fhft/` here: the spec and its build script, the PDO
+patch, the Apache config, the `.user.ini`, the server config with its
+secrets left as placeholders, and the rehearsal, which installs the RPM; `docs/kelixip/chat-attachments.md` and
 `docs/design/captures/`.
 
 **Done when** the two desktops exchange both messages with receipts; the

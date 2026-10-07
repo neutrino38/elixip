@@ -1,6 +1,7 @@
-# The S0 rehearsal: the reference file store as web1 runs it, against a
+# The S0 rehearsal: the file store's RPM as web1 installs it, against a
 # PostgreSQL subscriber base. http://localhost:8089/files/hft.php
 #
+#   packaging/fhft/build-rpm.sh
 #   docker compose -f packaging/fhft/rehearsal/compose.yaml up -d --build
 #   docker compose -f packaging/fhft/rehearsal/compose.yaml down -v
 name: fhft-rehearsal
@@ -20,8 +21,8 @@ services:
 
   fhft:
     build:
-      context: ..
-      dockerfile: rehearsal/Containerfile
+      context: ../..
+      dockerfile: fhft/rehearsal/Containerfile
     environment:
       AUTH_DB_DSN: "pgsql:host=db;port=5432;dbname=kamailio"
       AUTH_DB_USER: fhft_ro

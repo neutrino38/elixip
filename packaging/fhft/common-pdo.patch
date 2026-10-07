@@ -1,18 +1,29 @@
---- a/common.php
-+++ b/common.php
-@@ -73,16 +73,36 @@
+diff --git a/src/common.php b/src/common.php
+index f6758f4..7986343 100644
+--- a/src/common.php
++++ b/src/common.php
+@@ -73,16 +73,45 @@ date_default_timezone_set(@date_default_timezone_get());
  
  
  /*** User authentication ***/
-+// PDO rather than mysqli, so that the subscriber base may be PostgreSQL:
-+// AUTH_DB_DSN names the driver ("pgsql:host=…;dbname=…" or "mysql:host=…;dbname=…").
++// PDO rather than mysqli, so that the subscriber base may be MySQL or PostgreSQL.
++// AUTH_DB_DSN names the driver ("pgsql:host=...;dbname=..." or "mysql:host=...;dbname=...");
++// without it, the MySQL base of AUTH_DB_HOST and AUTH_DB_NAME is used, as before.
++function auth_db_dsn()
++{
++	if (defined("AUTH_DB_DSN") && strlen(AUTH_DB_DSN) > 0) {
++		return AUTH_DB_DSN;
++	}
++	return "mysql:host=" . AUTH_DB_HOST . ";dbname=" . AUTH_DB_NAME . ";charset=utf8mb4";
++}
++
  function auth_get_db_conn()
  {
 -	$conn = (USE_PERSISTENT_CONNECTIONS)
 -		? mysqli_connect('p:' . AUTH_DB_HOST, AUTH_DB_USER, AUTH_DB_PASSWORD, AUTH_DB_NAME)
 -		: mysqli_connect(AUTH_DB_HOST, AUTH_DB_USER, AUTH_DB_PASSWORD, AUTH_DB_NAME);
 +	try {
-+		return new PDO(AUTH_DB_DSN, AUTH_DB_USER, AUTH_DB_PASSWORD, [
++		return new PDO(auth_db_dsn(), AUTH_DB_USER, AUTH_DB_PASSWORD, [
 +			PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
 +			PDO::ATTR_PERSISTENT => USE_PERSISTENT_CONNECTIONS,
 +		]);
@@ -43,7 +54,7 @@
  }
  
  // Nonce are one-time usage, in order to avoid storing them in a table
-@@ -106,18 +126,13 @@
+@@ -106,18 +135,13 @@ function request_authentication($realm = "sip.example.org", $username = null)
  
  	if ($username != null) {
  		// Get the password/hash from database to include only available password hash in the authenticate header
@@ -66,7 +77,7 @@
  					$algorithm = $row['algorithm'];
  					if ($algorithm == 'CLRTXT') {
  						fhft_log(LogLevel::DEBUG, "User  " . $username . " has clear text password in db \n");
-@@ -135,10 +150,7 @@
+@@ -135,10 +159,7 @@ function request_authentication($realm = "sip.example.org", $username = null)
  					}
  				}
  			}
@@ -77,7 +88,7 @@
  	} else { // we don't have the username authorize both MD5 and SHA256
  		$has_md5 = true;
  		$has_sha256 = true;
-@@ -192,14 +204,10 @@
+@@ -192,14 +213,10 @@ function authenticate($auth_digest, $realm = "sip.example.org")
  	}
  
  	// Get the password/hash from database
@@ -94,7 +105,7 @@
  
  	// Default requested to MD5 if not specified in header
  	$requested_algorithm = (array_key_exists('algorithm', $data))
-@@ -207,8 +215,8 @@
+@@ -207,8 +224,8 @@ function authenticate($auth_digest, $realm = "sip.example.org")
  		: 'MD5';
  
  	$password = null;
@@ -105,7 +116,7 @@
  			$password = $row['password'];
  			$algorithm = $row['algorithm'];
  			if ($algorithm == 'CLRTXT') {
-@@ -224,9 +232,6 @@
+@@ -224,9 +241,6 @@ function authenticate($auth_digest, $realm = "sip.example.org")
  		}
  	}
  
@@ -115,3 +126,19 @@
  	if (is_null($password)) {
  		fhft_log(LogLevel::ERROR, "Unable to find password for User: " . $username . " in format " . $requested_algorithm);
  		return;
+diff --git a/src/flexisip-http-file-transfer-server.conf b/src/flexisip-http-file-transfer-server.conf
+index 7e47e24..b148150 100644
+--- a/src/flexisip-http-file-transfer-server.conf
++++ b/src/flexisip-http-file-transfer-server.conf
+@@ -56,6 +56,11 @@ define ("fhft_logDomain", "FHFT"); // in case Logs are mixed with other applicat
+ define("DIGEST_AUTH", false);
+ 
+ // Flexisip database access for authentication
++// The base is reached through PDO. AUTH_DB_DSN names it, any PDO driver installed
++// (php-pdo plus php-mysqlnd or php-pgsql), e.g.
++//   define("AUTH_DB_DSN", "pgsql:host=db.example.org;port=5432;dbname=flexisip;sslmode=require");
++// Left undefined, the MySQL base of AUTH_DB_HOST and AUTH_DB_NAME is used.
++// define("AUTH_DB_DSN", "");
+ define("AUTH_DB_HOST", "");
+ define("AUTH_DB_USER", "");
+ define("AUTH_DB_PASSWORD", "");
