@@ -557,8 +557,12 @@ endpoints, which `EndpointAttachToEndpoint(…, role)` requires — and offers
 each as a `sendonly` section carrying exactly the codecs the received stream
 carries. The streams relay as they are, there is no transcoder behind them:
 the caller's rebuilt answer restricts each one to what the callee took, and
-declines it when the callee declined. The callee's **own** extra streams are
-not relayed back towards the caller yet.
+declines it when the callee declined. It works in both directions: a leg
+that answered re-offers every section it answered, in the peer's order and
+under the peer's mids — the live ones, the declined ones at port 0, the
+streams it receives as `recvonly` — and appends the streams it relays; the
+peer's answer is then read by mid, since its sections mix its own streams
+and ours.
 
 ### 6.6 Media connectivity — when may a scenario send?
 

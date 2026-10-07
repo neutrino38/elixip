@@ -1590,12 +1590,14 @@ defmodule MediaServer.Mendooze.Conn do
          {:ok, state} <- start_receiving_all(state, cross),
          {:ok, state} <- offer_extra_videos(state, cross),
          {:ok, state} <- ensure_local_address(state) do
+      medias = offer_specs(state, cross)
+
       offer =
         Sdp.build(%{
           ip: state.local_ip,
-          medias:
-            Enum.map(state.medias, &offer_media_spec(state, &1, cross)) ++
-              extra_offer_specs(state)
+          # a bundled leg stays bundled: the group names every live section
+          bundle: offered_bundle(state, medias),
+          medias: medias
         })
 
       Logger.debug(
@@ -3408,6 +3410,75 @@ defmodule MediaServer.Mendooze.Conn do
 
   # ── SDP spec builders ───────────────────────────────────────────────────────
 
+  # The sections of an offer of ours. A leg that never answered offers its
+  # medias, then the streams it relays. A leg that ANSWERED re-offers every
+  # section it answered, in the peer's order and under the peer's mids — the
+  # live ones, the declined ones at port 0, the streams it receives as
+  # `recvonly` — and appends the relayed streams the peer has not seen yet.
+  # An offer never drops a section (RFC 3264 §8): a browser matches a re-offer
+  # against its own m= lines and refuses one whose count or order moved.
+  defp offer_specs(%{offer_descs: nil} = state, cross),
+    do: Enum.map(state.medias, &offer_media_spec(state, &1, cross)) ++ extra_offer_specs(state)
+
+  defp offer_specs(state, cross) do
+    descs = Enum.reject(state.offer_descs, &omit_from_answer?(&1, state.negs))
+    known = MapSet.new(descs, &Map.get(&1, :mid))
+
+    {specs, _seen} =
+      Enum.map_reduce(descs, MapSet.new(), fn desc, seen ->
+        cond do
+          Map.get(desc, :extra, false) ->
+            {extra_reoffer_spec(state, desc), seen}
+
+          desc.type in state.medias and desc.type not in seen ->
+            {offer_media_spec(state, desc.type, cross), MapSet.put(seen, desc.type)}
+
+          true ->
+            {reject_media_spec(desc), seen}
+        end
+      end)
+
+    new_relayed =
+      for {_key, %{mid: mid} = stream} <- relayed_extras(state),
+          mid not in known,
+          do: relayed_offer_spec(state, stream)
+
+    specs ++ new_relayed
+  end
+
+  defp extra_reoffer_spec(state, desc) do
+    case Map.get(state.extra_videos, section_key(desc)) do
+      %{relayed: true} = stream -> relayed_offer_spec(state, stream)
+      %{neg: %{} = neg} -> received_offer_spec(state, desc, neg)
+      _ -> reject_media_spec(desc)
+    end
+  end
+
+  # A stream we receive, offered back to the peer that sends it: its own
+  # section, `recvonly` from our side, in ITS payload-type numbering.
+  defp received_offer_spec(state, desc, neg) do
+    {rtpmaps, fmtp} = answer_codecs(desc, neg)
+
+    %{
+      type: :video,
+      port: neg.rec_port,
+      rtpmaps: rtpmaps,
+      fmtp: fmtp,
+      bandwidth: bandwidth_kbps(state, :video),
+      direction: :recvonly,
+      crypto: local_crypto_spec(state, :actpass),
+      ice: state.local_ice,
+      rtcp_mux: false
+    }
+    |> add_offer_webrtc(state, :video, neg.rec_port, Map.get(desc, :mid))
+    |> add_offer_rtp_profile(state, :video)
+  end
+
+  defp offered_bundle(%{bundle: true}, medias),
+    do: for(%{port: port, mid: mid} <- medias, port != 0, is_binary(mid), do: mid)
+
+  defp offered_bundle(_state, _medias), do: []
+
   defp offer_media_spec(state, media, cross) do
     cond do
       Map.has_key?(state.data_channels, media) -> dc_offer_media_spec(state, media)
@@ -4586,27 +4657,25 @@ defmodule MediaServer.Mendooze.Conn do
   defp relayed_local_ice(_state, _role), do: :ok
 
   # One `m=video … a=sendonly` per relayed stream, after the medias, in role order.
-  defp extra_offer_specs(state) do
-    for {_key, stream} <- relayed_extras(state) do
-      case stream do
-        %{withdrawn: true, mid: mid, fmt: fmt} ->
-          %{type: :video, port: 0, protocol: offer_protocol(state), reject_fmt: fmt, mid: mid}
+  defp extra_offer_specs(state),
+    do: for({_key, stream} <- relayed_extras(state), do: relayed_offer_spec(state, stream))
 
-        %{mid: mid, neg: neg} ->
-          %{
-            type: :video,
-            port: neg.rec_port,
-            bandwidth: bandwidth_kbps(state, :video),
-            direction: :sendonly,
-            crypto: local_crypto_spec(state, :actpass),
-            ice: state.local_ice,
-            rtcp_mux: false
-          }
-          |> add_offer_webrtc(state, :video, neg.rec_port, mid)
-          |> add_offer_rtp_profile(state, :video)
-          |> Map.merge(relayed_offer_codecs(neg))
-      end
-    end
+  defp relayed_offer_spec(state, %{withdrawn: true, mid: mid, fmt: fmt}),
+    do: %{type: :video, port: 0, protocol: offer_protocol(state), reject_fmt: fmt, mid: mid}
+
+  defp relayed_offer_spec(state, %{mid: mid, neg: neg}) do
+    %{
+      type: :video,
+      port: neg.rec_port,
+      bandwidth: bandwidth_kbps(state, :video),
+      direction: :sendonly,
+      crypto: local_crypto_spec(state, :actpass),
+      ice: state.local_ice,
+      rtcp_mux: false
+    }
+    |> add_offer_webrtc(state, :video, neg.rec_port, mid)
+    |> add_offer_rtp_profile(state, :video)
+    |> Map.merge(relayed_offer_codecs(neg))
   end
 
   defp offer_protocol(state) do
@@ -4638,15 +4707,28 @@ defmodule MediaServer.Mendooze.Conn do
   # the streams we offered, in role order. A section answered live gets the
   # remote side of its stream and a StartSending with its role; one declined
   # (port 0) leaves the stream without a far end, and it is not attached.
+  # Each relayed stream finds its answer section by the mid we offered it under;
+  # the answer's sections may also hold the peer's own streams, which we receive
+  # and have nothing to do with here. Without mids — a peer that names nothing —
+  # the video sections after the first are the relayed ones, in role order.
   defp apply_extra_answers(state, descs) do
     answered =
       descs
       |> Enum.filter(&(&1.type == :video and Map.get(&1, :transport, :rtp) == :rtp))
       |> Enum.drop(1)
 
-    relayed_extras(state)
-    |> Enum.zip(answered)
-    |> Enum.reduce_while({:ok, state}, fn
+    relayed = relayed_extras(state)
+
+    pairs =
+      if Enum.all?(answered, &is_binary(Map.get(&1, :mid))) do
+        for {key, stream} <- relayed,
+            desc = Enum.find(answered, &(&1.mid == stream.mid)),
+            do: {{key, stream}, desc}
+      else
+        Enum.zip(relayed, answered)
+      end
+
+    Enum.reduce_while(pairs, {:ok, state}, fn
       # a withdrawn section has no stream behind it any more
       {{_key, %{withdrawn: true}}, _desc}, {:ok, st} ->
         {:cont, {:ok, st}}
