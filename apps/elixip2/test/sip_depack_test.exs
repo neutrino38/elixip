@@ -127,4 +127,24 @@ defmodule SIP.Test.SIP.Depack do
       refute_received {_, _}
     end
   end
+
+  # A stream that does not start with a SIP line is somebody else's protocol: the
+  # depacketizer drops the buffer, as it always did, and now says so once — the
+  # transport names the sender as an invalid packet, which is what fail2ban reads.
+  test "a stream that starts with an HTTP request yields :garbage once, then nothing" do
+    me = self()
+    cb = fn what, msg -> send(me, {what, msg}) end
+
+    buf =
+      SIP.Transport.Depack.on_data_received(
+        %SIP.Transport.Depack{},
+        "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        cb
+      )
+
+    assert_received {:garbage, "GET / HTTP/1.1"}
+    refute_received {_, _}
+    assert buf.buffer == ""
+    assert buf.state == :wait_for_msg
+  end
 end

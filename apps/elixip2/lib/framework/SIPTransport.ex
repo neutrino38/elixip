@@ -72,6 +72,8 @@ defmodule SIP.Transport do
 
       * `cb_fun.(:msg, message)`      — one complete SIP message;
       * `cb_fun.(:ping, "")`          — a CRLF keep-alive (RFC 5626 §4.4.1);
+      * `cb_fun.(:garbage, line)`     — a stream that does not start with a SIP
+        line; the buffer is dropped and framing resumes on the next octets;
       * `cb_fun.(:too_large, hdrs)`   — refused, answer **513** then CLOSE;
       * `cb_fun.(:bad_frame, hdrs)`   — unframeable, answer **400** then CLOSE.
 
@@ -114,7 +116,7 @@ defmodule SIP.Transport do
 
           :error ->
             # Invalid SIP - discard eveything
-            # IO.puts("invalid SIP msg: first_line = #{first_line}")
+            cb_fun.(:garbage, first_line)
             %Depack{buf | buffer: "", clen: 0}
         end
       else
@@ -542,8 +544,10 @@ defmodule SIP.Transport do
             module: __MODULE__,
             message:
               "#{tp_name}: dropping an unparsable " <>
-                "message from #{inspect(destip)}:#{destport} (#{Exception.message(e)})"
+                "message from #{peer_str(destip, destport)} (#{Exception.message(e)})"
           )
+
+          report_incident(:invalid_packet, tp_name, destip, destport, :unparsable)
 
           Logger.debug(
             module: __MODULE__,
@@ -656,10 +660,49 @@ defmodule SIP.Transport do
 
         _ ->
           Logger.error(
-            "Received an invalid SIP message from #{SIP.NetUtils.ip2string(destip)}:#{destport}"
+            module: __MODULE__,
+            message:
+              "#{tp_name}: received an invalid SIP message from #{peer_str(destip, destport)}"
           )
 
+          report_incident(:invalid_packet, tp_name, destip, destport, :unparsable)
           {:noreply, state}
+      end
+    end
+
+    @doc """
+    Report a security incident seen by a transport: `type` is `:invalid_packet` or
+    `:transport_error`, `tp_name` the transport's wire name ("UDP", "TCP", "TLS",
+    "WSS"). `destip` is only written when it is an address: the WSS fallback can be
+    a hostname, and a line with a name where an address belongs misleads whoever
+    reads it.
+    """
+    @spec report_incident(
+            Elixip.Security.Incident.type(),
+            String.t(),
+            any(),
+            any(),
+            atom()
+          ) :: :ok
+    def report_incident(type, tp_name, destip, destport, reason) do
+      Elixip.Security.report(%Elixip.Security.Incident{
+        type: type,
+        src: if(is_tuple(destip), do: destip),
+        port: if(is_integer(destport), do: destport),
+        proto: String.upcase(tp_name),
+        reason: reason
+      })
+    end
+
+    @doc """
+    The peer of an accepted TLS socket, handshaken or not — `{ip, port}`, or
+    `{nil, nil}` when the socket is already gone.
+    """
+    @spec peer_of(:ssl.sslsocket()) :: {:inet.ip_address() | nil, :inet.port_number() | nil}
+    def peer_of(ssl_socket) do
+      case :ssl.peername(ssl_socket) do
+        {:ok, {ip, port}} -> {ip, port}
+        _ -> {nil, nil}
       end
     end
 
@@ -680,6 +723,7 @@ defmodule SIP.Transport do
         msgstr -> send_outside_this_callback(msgstr, destip, destport, false)
       end
 
+      report_incident(:invalid_packet, tp_name, destip, destport, :too_large)
       {:noreply, state}
     end
 
@@ -753,6 +797,8 @@ defmodule SIP.Transport do
         )
       end
 
+      reason = if code == 513, do: :too_large, else: :bad_frame
+      report_incident(:invalid_packet, tp_name, destip, destport, reason)
       send_outside_this_callback(msgstr, destip, destport, true)
     end
 
