@@ -53,6 +53,17 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
   uas_file_message.exs.
 - User-Agent is now Elixipp-1.7.0.
 
+* Tue Oct 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-2
+- Released together with kelixip 1.6.3-2.
+- RFC 4028 session timers in the dialog layer, off by default
+  (config :elixip2, :session_timer): scenarios send and answer what they did
+  before unless they enable them.
+
+* Sat Oct 03 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-1
+- Released together with kelixip 1.6.3-1.
+- PIDF: extension elements of <rpid:activities> are read and written as marks.
+- User-Agent is now Elixipp-1.6.3.
+
 * Wed Sep 30 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.2-1
 - Released together with kelixip 1.6.2-1.
 - UAC.Page and UAS.Page: built-in page-mode MESSAGE scenarios, driven by

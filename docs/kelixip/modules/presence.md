@@ -162,10 +162,22 @@ A `presence` document is composed from every device of the presentity:
 - **tuples** — one per device: the tuples each live publication carries, and one
   **open** tuple per registered device that publishes nothing, offering its
   contact. The presentity is open when one device is;
-- **person** — the activity and note of the last publication that carried a
-  document. A document with no activity clears them; a refresh leaves them. They
-  stay after the device that set them goes, while another publication of the
-  presentity remains.
+- **person** — the activity, its marks and the note of the last publication that
+  carried a document. A document with no activity clears them; a refresh leaves
+  them. They stay after the device that set them goes, while another publication
+  of the presentity remains.
+
+A **mark** is an element of a client's own namespace inside `<rpid:activities>`,
+beside the RPID activity — Trix's `<trix:dnd/>` ("do not disturb") and
+`<trix:auto/>` ("set by a rule"). Marks are returned as empty elements in their
+own namespace, after the activity; at most eight per document are kept.
+
+```xml
+<rpid:activities>
+  <rpid:busy/>
+  <trix:dnd/>
+</rpid:activities>
+```
 
 A device that both registers and publishes counts once: its publication. Tuple ids
 are the module's own, and stable for a device across its refreshes and

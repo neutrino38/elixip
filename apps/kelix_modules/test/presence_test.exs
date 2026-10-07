@@ -352,6 +352,25 @@ defmodule Kelix.Mod.PresenceTest do
       assert_receive {:presence, :state, _, %SIP.Presence.Doc{activity: :busy, tuples: [_]}}
     end
 
+    # Trix publishes "do not disturb" as busy plus `<trix:dnd/>`, and reads its
+    # own status back from the composite: a mark lost on the way turned DND into
+    # busy on the next page load (2026-10-03).
+    test "the person keeps the marks it was published with" do
+      dnd = [{"urn:trix:params:xml:ns:pidf", "dnd"}]
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "bob"))
+
+      {:ok, _, _} =
+        Presence.publish(
+          @domain,
+          publication("bob",
+            doc: SIP.Presence.Doc.new("sip:bob@#{@domain}", :open, activity: :busy, marks: dnd)
+          )
+        )
+
+      assert_receive {:presence, :state, _, %SIP.Presence.Doc{activity: :busy, marks: ^dnd}}
+      assert bob().marks == dnd
+    end
+
     # Linphone stamps every PUBLISH anew and mints new tuple ids: neither is news.
     test "republishing what the composite says notifies nobody" do
       {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))

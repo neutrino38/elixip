@@ -142,6 +142,12 @@ defmodule Kelix.DirectCallWithAuth do
       {:bridge, :callee_hung_up, _} ->
         scenario_success("call relayed and ended: callee hung up")
 
+      # One leg's session timer ran out (RFC 4028): its peer stopped refreshing,
+      # or stopped answering our refreshes — gone, not hung up. That leg is
+      # already closed; the automatic teardown hangs up the other.
+      {:bridge, :session_expired, %{leg: leg}} ->
+        scenario_success("session timer expired on the #{leg}'s leg")
+
       {:bridge, :max_duration, _} ->
         scenario_success("maximum call duration reached")
 

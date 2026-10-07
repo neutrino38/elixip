@@ -120,7 +120,7 @@ defmodule Kelix.Mod.Presence do
       while his mobile publishes. A device is told publishing by the flow, as a
       publisher is (`SIP.Publication.published_over?/2`): a binding whose flow
       carries a live publication adds nothing — the publication speaks for it;
-    * the **person** — activity and note — is one state per resource, held here:
+    * the **person** — activity, marks and note — is one state per resource, held here:
       every publication that carries a document sets it, and a document with no
       activity clears it (the field clients say "available" by saying nothing).
       A refresh carries no document and leaves it. It survives the departure of
@@ -1043,6 +1043,7 @@ defmodule Kelix.Mod.Presence do
     person = %SIP.Presence.Doc{
       entity: "sip:#{user}@#{rdomain}",
       activity: doc.activity,
+      marks: doc.marks,
       note: doc.note
     }
 

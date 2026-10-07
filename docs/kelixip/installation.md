@@ -416,6 +416,32 @@ produces are kept. They are held in memory only; a restart loses them. See
 | `max_traces` | integer, > 0 | `100` | How many are kept; the oldest is dropped to make room |
 | `max_trace_bytes` | bytes, > 0 | `1048576` | How much SIP message text one journal keeps; past it, the journal is cut |
 
+#### `[session_timer]` — RFC 4028 session timers
+
+Absent ⇒ **enabled**, with the defaults below. Every call leg negotiates a
+session timer with its own peer: the two legs of a relayed call are timed
+independently, and nothing about one leg's timer is passed to the other. A leg
+whose peer stops refreshing — or stops answering this node's refreshes — is hung
+up with `Reason: SIP ;cause=408 ;text="Session Timer Expired"`, and the script
+receives `{:bridge, :session_expired, %{leg: :caller | :callee}}` (or
+`{:dialog_terminated, _, :session_expired}` outside `bridge()`).
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | bool | `true` | `false`: no `Session-Expires` is stated or accepted, no peer is held to a refresh |
+| `expires` | seconds, ≥ `min_se` | `1800` | The interval asked for, and the largest one accepted |
+| `min_se` | seconds, ≥ 90 | `90` | The smallest interval accepted; a request asking for less is answered `422` |
+| `refresher` | `local` \| `remote` | `local` | Who refreshes when the peer leaves the choice. `local`: this node sends an `UPDATE` every `expires`/2 on each leg, so a call does not depend on a browser's timers |
+
+A peer that names the refresher keeps its choice. A peer that does not support
+session timers is refreshed by this node. A peer that does not accept `UPDATE`
+is refreshed with a re-INVITE carrying the last SDP sent to it, unchanged.
+
+```toml
+[session_timer]
+expires = 600
+```
+
 ##### `tag` and `networks` — the side of the network
 
 Two uses: announcing the right media address for the side the correspondent is

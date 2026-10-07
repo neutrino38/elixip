@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid" xmlns:trix="urn:trix:params:xml:ns:pidf" entity="sip:emmanuel.buu@weshwesh.eu">
+<tuple id="84fc44e8-5c05-4c6c-bf20-f995935cd856">
+<status><basic>open</basic></status>
+<note>Blob bip</note>
+<timestamp>2026-10-03T21:05:23.595Z</timestamp>
+</tuple>
+<dm:person id="p-84fc44e8-5c05-4c6c-bf20-f995935cd856">
+<rpid:activities><rpid:busy/><trix:dnd/></rpid:activities>
+</dm:person>
+</presence>

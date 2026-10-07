@@ -60,6 +60,10 @@ defmodule SIP.Test.SbbBridge do
           send(appdata_get(:test_pid), {:ended, "ended without an interruption: callee"})
           scenario_success("ended without an interruption: callee")
 
+        {:bridge, :session_expired, %{leg: leg}} ->
+          send(appdata_get(:test_pid), {:session_expired, leg})
+          scenario_success("session timer expired on the #{leg}'s leg")
+
         {:bridge, outcome, _} ->
           scenario_failure("unexpected: #{outcome}")
       end
@@ -141,9 +145,22 @@ defmodule SIP.Test.SbbBridge do
     :ok
   end
 
-  setup do
+  setup context do
     {:ok, stub} = SIP.Test.B2bua.InboundDialogStub.start_link(self())
     on_exit(fn -> if Process.alive?(stub), do: GenServer.stop(stub) end)
+
+    if cfg = context[:session_timer] do
+      previous = Application.fetch_env(:elixip2, :session_timer)
+      Application.put_env(:elixip2, :session_timer, cfg)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :session_timer, v)
+          :error -> Application.delete_env(:elixip2, :session_timer)
+        end
+      end)
+    end
+
     %{stub: stub}
   end
 
@@ -179,7 +196,7 @@ defmodule SIP.Test.SbbBridge do
 
   # Establish the call: INVITE forwarded, answered, ACKed. Returns the INVITE so
   # in-dialog requests can be built from it.
-  defp establish(stub, module \\ Interruptible, tag \\ "sbb_bridge") do
+  defp establish(stub, module \\ Interruptible, tag \\ "sbb_bridge", answer \\ %{}) do
     invite = inbound_invite()
     tp = SIP.Transport.Selector.select_transport(peer_uri(tag)).tp_pid
     :ok = Mockup.set_peer(tp, Manual)
@@ -189,7 +206,7 @@ defmodule SIP.Test.SbbBridge do
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
-    Manual.simulate(tp, 200, 50)
+    Manual.simulate(tp, 200, 50, answer)
     assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
 
     send(instance, {:ACK, in_dialog(:ACK, invite), self(), stub})
@@ -220,6 +237,58 @@ defmodule SIP.Test.SbbBridge do
     assert_receive {:instance_done, :ok}, 10_000
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
     assert_receive {:ended, "ended without an interruption: callee"}, 1_000
+  end
+
+  # ── A session timer ending a leg (RFC 4028) ─────────────────────────────────
+
+  # A peer that is gone, not one that hung up: the one end of a call that says
+  # something about the peer, so it has an outcome of its own.
+  test "the caller's session expiring is reported as such, and the callee hung up",
+       %{stub: stub} do
+    %{instance: instance, ref: ref} = establish(stub, Interruptible, "sbb_bridge_se_caller")
+
+    # What the caller's dialog says when its timer ended it.
+    send(instance, {:dialog_terminated, stub, :session_expired})
+
+    assert_receive {:session_expired, :caller}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  # The real thing on the callee's leg: the callee says it refreshes, does not,
+  # and its dialog hangs it up; the caller is then hung up by the teardown.
+  @tag session_timer: [enabled: true, expires: 3, min_se: 1]
+  test "the callee's session expiring is reported as such, and the caller hung up",
+       %{stub: stub} do
+    %{instance: instance, ref: ref} =
+      establish(stub, Interruptible, "sbb_bridge_se_callee", %{
+        "Session-Expires" => "3;refresher=uas"
+      })
+
+    # 3 s interval: the leg sends its BYE 1 s before the end.
+    assert_receive {:sip_mockup, {:request_sent, :BYE, bye}}, 4_000
+    assert Map.get(bye, "Reason") =~ "Session Timer Expired"
+
+    assert_receive {:session_expired, :callee}, 5_000
+    assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  @tag session_timer: [enabled: true, expires: 3, min_se: 1]
+  test "a script keeping the caller gets the callee's expiry as the callee leaving",
+       %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite} =
+      establish(stub, Surviving, "sbb_bridge_se_keep", %{"Session-Expires" => "3;refresher=uas"})
+
+    assert_receive {:callee_left, :session_expired}, 5_000
+    refute_receive {:sent_on_inbound, %{method: :BYE}}, 500
+
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
 
   # ── Keeping the caller when the callee goes away ────────────────────────────

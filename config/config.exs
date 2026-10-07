@@ -50,6 +50,19 @@ config :elixip2,
     ~c"ECDHE-RSA-AES128-GCM-SHA256"
   ]
 
+# RFC 4028 session timers, negotiated by each call dialog with its own peer
+# (SIP.DialogImpl.SessionTimer). Off by default: no Session-Expires is stated on
+# a 2xx and no peer is held to a refresh.
+config :elixip2, :session_timer,
+  enabled: false,
+  # The interval we ask for or accept, in seconds (RFC 4028 recommends 1800).
+  expires: 1800,
+  # The smallest interval we accept; below it a request is answered 422. The RFC
+  # floor is 90.
+  min_se: 90,
+  # Who refreshes when the peer leaves us the choice: :local or :remote.
+  refresher: :local
+
 # Media server used by scenarios calling media_connect/0 (the zero-argument,
 # config-driven form). :module is :mockup, :mendooze or a module name; can be
 # overridden per scenario (config block) or per run (external JSON header).

@@ -126,6 +126,15 @@ defmodule SIP.Test.PresenceDoc do
       refute Doc.open?(doc)
     end
 
+    test "the marks are the held person's, not a publication's" do
+      dnd = [{"urn:trix:params:xml:ns:pidf", "dnd"}]
+      own = Doc.new(@bob, :open, activity: :away, marks: [{"urn:example:acme", "x"}])
+
+      doc = Doc.compose(person(activity: :busy, marks: dnd), [{"r1", own}])
+
+      assert {doc.activity, doc.marks} == {:busy, dnd}
+    end
+
     test "the composite round-trips through PIDF" do
       a = Doc.new(@bob, :open, contact: "sip:bob@10.0.0.4", id: "t1")
       b = Doc.new(@bob, :closed, id: "t1")

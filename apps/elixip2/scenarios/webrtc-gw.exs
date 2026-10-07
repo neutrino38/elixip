@@ -287,6 +287,15 @@ defmodule B2BUA.WebrtcGw do
         b2bua_reply(last_uas_req(), 200, "OK")
         goto(releasing, "media server disconnected")
 
+      # A session timer ended one leg (RFC 4028): its peer stopped refreshing,
+      # or stopped answering our refreshes — gone, not hung up. The dialog has
+      # already sent that leg its BYE; the teardown hangs up the other.
+      {:dialog_terminated, _dlg, :session_expired} ->
+        goto(releasing, "session timer expired on the inbound leg")
+
+      {:outbound, {:dialog_terminated, _dlg, :session_expired}} ->
+        goto(releasing, "session timer expired on the outbound leg")
+
       {:dialog_terminated, _dlg, reason} ->
         goto(releasing, "inbound leg ended: #{inspect(reason)}")
 

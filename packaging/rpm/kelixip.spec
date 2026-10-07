@@ -377,6 +377,25 @@ fi
   part's Content-* headers is tolerated.
 - User-Agent is now Kelixip/1.7.0.
 
+* Tue Oct 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-2
+- RFC 4028 session timers, one per call leg. A long call relayed between two
+  browsers was cut after 90 s: the caller's Session-Expires was relayed to the
+  callee, who then waited for kelixip to refresh its leg. Session-Expires,
+  Min-SE and the `timer` option tag no longer cross a B2BUA.
+- Every call leg negotiates its own timer with its own peer, refreshes it
+  (UPDATE, or re-INVITE for a peer without UPDATE) when it is the refresher,
+  and hangs up a peer that stops refreshing (Reason: 408 Session Timer
+  Expired). Scripts using bridge() receive {:bridge, :session_expired, ...}.
+- New [session_timer] section in config.toml: enabled (default true),
+  expires (1800), min_se (90), refresher (local | remote, default local).
+
+* Sat Oct 03 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-1
+- Presence: the composite person keeps the extension elements a client puts
+  in <rpid:activities> beside its activity (Trix's <trix:dnd/> and
+  <trix:auto/>). Lost until now, a Trix watching its own presence read
+  "do not disturb" back as busy and kept busy after a reload.
+- User-Agent is now Kelixip/1.6.3.
+
 * Wed Sep 30 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.2-1
 - Basic instant messaging (page mode, RFC 3428): a [[domain.chat]] block routes
   a MESSAGE to the `chat` function; a MESSAGE's content is never logged.

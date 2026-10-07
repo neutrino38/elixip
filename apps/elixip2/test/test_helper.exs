@@ -181,6 +181,17 @@ Code.require_file("support/listener_case.exs", __DIR__)
 # the kelixip suites start their application again (Kelix.Test.AppBoot).
 for app <- [:kelix_modules, :kelixip], do: Application.stop(app)
 
+# What the kelixip boot pushed into the :elixip2 env outlives the stop above. One
+# of those keys changes what every call dialog sends: `[session_timer]` is ON on a
+# kelixip node and OFF in the framework, and this suite tests the framework — a
+# test about session timers turns them on itself. So the framework's own value is
+# put back.
+Application.put_env(
+  :elixip2,
+  :session_timer,
+  Keyword.put(Application.get_env(:elixip2, :session_timer, []), :enabled, false)
+)
+
 _sip_stack_owner =
   spawn(fn ->
     :ok = SIP.Transac.start()

@@ -371,6 +371,12 @@ defmodule SBB.Call do
           "caller — %{reason}. The call is NOT over: the caller's leg is up, " <>
           "answered, and waiting for whatever the script does next. Only ever " <>
           "returned to a script that asked for it",
+      session_expired:
+        "one leg's RFC 4028 session timer ran out — %{leg: :caller | :callee}: its peer " <>
+          "stopped refreshing, or stopped answering our refreshes. That leg is already " <>
+          "hung up; the other is still up, and the teardown hangs it up when the script " <>
+          "ends. With `on_callee_hangup: :keep_caller`, the callee's is `:callee_left` " <>
+          "instead",
       interrupted: "a {:bridge_break, message} arrived; the call is untouched — %{message}",
       max_duration: "the call's own bound expired — %{}",
       media_lost:
@@ -409,8 +415,22 @@ defmodule SBB.Call do
             goto(wait_far_bye_ok, "callee hung up")
           end
 
+        # A session timer ended a leg (RFC 4028): its peer is gone, not hanging
+        # up. Named apart from a hangup because it is the one end of a call that
+        # says something about the PEER — a browser tab frozen in the background,
+        # a phone that lost its network — and a script may want to say so.
+        {:dialog_terminated, _dlg, :session_expired} ->
+          sbb_return({:bridge, :session_expired, %{leg: :caller}})
+
         {:dialog_terminated, _dlg, reason} ->
           sbb_return({:bridge, :caller_hung_up, %{reason: reason}})
+
+        {:outbound, {:dialog_terminated, _dlg, :session_expired}} ->
+          if sbb_data_get(:on_callee_hangup) == :keep_caller do
+            sbb_return({:bridge, :callee_left, %{reason: :session_expired}})
+          else
+            sbb_return({:bridge, :session_expired, %{leg: :callee}})
+          end
 
         # The callee's leg went away without a BYE. Nothing to answer, and the
         # same question about the caller's.

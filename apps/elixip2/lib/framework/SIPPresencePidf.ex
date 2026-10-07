@@ -91,6 +91,11 @@ defmodule SIP.Presence.Pidf do
 
   @activity_names Map.new(@activities, fn {name, atom} -> {atom, name} end)
 
+  # The marks a person may carry (SIP.Presence.Doc, `marks`). A client sends one
+  # or two; the bound is what keeps a stranger's document from growing the
+  # person state every watcher is sent.
+  @max_marks 8
+
   # ── Parsing ─────────────────────────────────────────────────────────────────
 
   @doc """
@@ -203,7 +208,11 @@ defmodule SIP.Presence.Pidf do
     Enum.reduce(children, doc, fn child, doc ->
       case element(child) do
         {ns, "activities", _attrs, grandchildren} when ns in [@rpid, ""] ->
-          %{doc | activity: doc.activity || read_activity(grandchildren)}
+          if is_nil(doc.activity) and doc.marks == [] do
+            %{doc | activity: read_activity(grandchildren), marks: read_marks(grandchildren)}
+          else
+            doc
+          end
 
         {ns, "note", _attrs, grandchildren} when ns in [@dm, @rpid, @pidf, ""] ->
           %{doc | note: doc.note || text_of(grandchildren)}
@@ -232,16 +241,35 @@ defmodule SIP.Presence.Pidf do
     end)
   end
 
-  # The first activity element that is not RPID's own `<note>`: v1 carries one
-  # activity, and a client publishing two has already said the first.
+  # The first RPID activity element that is not RPID's own `<note>`: v1 carries
+  # one activity, and a client publishing two has already said the first. An
+  # element of another namespace is not an activity but a mark (`read_marks/1`):
+  # read as one, `<trix:dnd/>` would come back out as `<rpid:dnd/>`.
   defp read_activity(children) do
     Enum.find_value(children, fn child ->
       case element(child) do
-        {@rpid, "note", _attrs, _grandchildren} -> nil
-        {_ns, name, _attrs, _grandchildren} -> Map.get(@activities, name, name)
-        _other -> nil
+        {@rpid, "note", _attrs, _grandchildren} ->
+          nil
+
+        {ns, name, _attrs, _grandchildren} when ns in [@rpid, ""] ->
+          Map.get(@activities, name, name)
+
+        _other ->
+          nil
       end
     end)
+  end
+
+  defp read_marks(children) do
+    children
+    |> Enum.flat_map(fn child ->
+      case element(child) do
+        {ns, name, _attrs, _grandchildren} when ns not in [@rpid, ""] -> [{ns, name}]
+        _other -> []
+      end
+    end)
+    |> Enum.uniq()
+    |> Enum.take(@max_marks)
   end
 
   defp read_priority(nil), do: nil
@@ -296,14 +324,31 @@ defmodule SIP.Presence.Pidf do
 
   defp person_namespaces(doc) do
     if has_person?(doc) do
-      [" xmlns:dm=\"", @dm, "\" xmlns:rpid=\"", @rpid, "\""]
+      [
+        " xmlns:dm=\"",
+        @dm,
+        "\" xmlns:rpid=\"",
+        @rpid,
+        "\"",
+        for({ns, prefix} <- mark_prefixes(doc), do: [" xmlns:", prefix, "=\"", escape(ns), "\""])
+      ]
     else
       []
     end
   end
 
-  defp has_person?(%Doc{activity: activity, note: note}),
-    do: not is_nil(activity) or not is_nil(note)
+  defp has_person?(%Doc{activity: activity, marks: marks, note: note}),
+    do: not is_nil(activity) or marks != [] or not is_nil(note)
+
+  # One prefix per namespace the marks use, `m1`, `m2`… in order of first use:
+  # the client's own prefix is not kept, and a watcher matches on the namespace.
+  defp mark_prefixes(%Doc{marks: marks}) do
+    marks
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.uniq()
+    |> Enum.with_index(1)
+    |> Map.new(fn {ns, n} -> {ns, "m#{n}"} end)
+  end
 
   defp write_tuple({%Tuple{} = tuple, index}) do
     [
@@ -343,7 +388,7 @@ defmodule SIP.Presence.Pidf do
     if has_person?(doc) do
       [
         "  <dm:person id=\"p1\">\n",
-        write_activity(doc.activity),
+        write_activities(doc),
         write_element("    ", "dm:note", doc.note),
         "  </dm:person>\n"
       ]
@@ -352,11 +397,22 @@ defmodule SIP.Presence.Pidf do
     end
   end
 
-  defp write_activity(nil), do: []
+  defp write_activities(%Doc{activity: nil, marks: []}), do: []
 
-  defp write_activity(activity) do
-    ["    <rpid:activities><rpid:", activity_name(activity), "/></rpid:activities>\n"]
+  defp write_activities(%Doc{activity: activity, marks: marks} = doc) do
+    prefixes = mark_prefixes(doc)
+
+    [
+      "    <rpid:activities>",
+      if(activity, do: ["<rpid:", activity_name(activity), "/>"], else: []),
+      for({ns, name} <- marks, ncname?(name), do: ["<", prefixes[ns], ":", name, "/>"]),
+      "</rpid:activities>\n"
+    ]
   end
+
+  # A mark read off the wire has a name the XML parser accepted; one a scenario
+  # built may not, and an element name is not escaped — it is left out.
+  defp ncname?(name), do: name =~ ~r/\A[A-Za-z_][A-Za-z0-9._-]*\z/
 
   defp activity_name(activity) when is_atom(activity),
     do: Map.get(@activity_names, activity, Atom.to_string(activity))
