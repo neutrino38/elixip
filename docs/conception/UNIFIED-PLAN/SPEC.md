@@ -300,7 +300,7 @@ appels et leur ordre, et la réponse SDP.
 | **E0** | Corrections préalables côté conférence : défauts 1 (port 0), 2 (listes dupliquées), 6 (retrait en renégociation). **Fait.** | rien | `mcu_call_test.exs`, « sections withdrawn and renegotiated » |
 | **E1** | Conférence, N vidéos sans BUNDLE (§4.2) : `CreateVideoStream`, `recvonly`, slot épinglé en VAD, nom, mise en page par source, `DeleteVideoStream` en renégociation. **Fait.** | lot 1 (**fait**) | `mcu_webrtc_test.exs`, « a second video section is an extra stream » ; `mcu_call_test.exs`, « a leg with two videos counts as two tiles ». Recette : Chrome en `max-compat`, caméra + écran, deux slots (scénario 5 de la SPEC serveur §7) |
 | **E2** | Conférence, BUNDLE (§4.3) : SDP, `bundle=1`, `mid`, `remote-ssrc`, extmap `sdes:mid`. **Fait**, actif dès que l'offre porte le groupe (décision du 2026-09-30). | lot 2 (**fait**) | `mcu_webrtc_test.exs`, « BUNDLE (UNIFIED-PLAN E2) ». Recette : Chrome et Firefox par défaut (scénarios 1 à 3, 7, 8) |
-| **E3** | JSR-309, N vidéos et BUNDLE (§4.4), défauts 4 et 5, relais B2BUA des flux. **Fait.** | lots 2 et 3 (**faits**) | `mendooze_conn_test.exs`, « UNIFIED-PLAN E3 » (trois groupes) ; recette : B2BUA Chrome ↔ Chrome (scénario 6), à faire |
+| **E3** | JSR-309, N vidéos et BUNDLE (§4.4), défauts 4 et 5, relais B2BUA des flux. **Fait.** | lots 2 et 3 (**faits**) | `mendooze_conn_test.exs`, « UNIFIED-PLAN E3 » (trois groupes) ; recette : B2BUA Trix ↔ Trix, partage d'écran de l'appelant relayé puis arrêté, **validé en trafic le 2026-10-07** ; le scénario 6 complet (écran de chaque côté) attend la levée de la première limite ci-dessous |
 | **E4** | BFCP pour endpoint SIP (§4.5). | lot 1b (**fait**) | tests bouchon ; recette réelle (scénarios 9 et 10) reportée faute d'endpoint |
 
 E4 peut commencer : le lot 1b du serveur est fait. Il est indépendant des
@@ -352,7 +352,9 @@ Comment E3 est tenu :
   section en port 0 ; en B2BUA, le flux relayé est supprimé avec sa source et
   sa section reste dans nos offres en port 0, ce qui dit à l'appelé que
   l'écran a disparu (trafic Trix ↔ Trix du 2026-10-07 : sans cette règle,
-  l'appelé gardait l'écran figé) ;
+  l'appelé gardait l'écran figé). Trix arrête en `a=inactive`, et sa section
+  `bundle-only` porte `c=IN IP4 0.0.0.0` : sur une section groupée, le `c=`
+  n'est pas un trou noir ;
 - une réponse à notre offre ne lit plus la seconde section vidéo par type :
   elle écrasait la première (le `StartSending` de la caméra visait le port
   de l'écran), et un écran refusé refusait toute la vidéo.
