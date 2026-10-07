@@ -1,0 +1,30 @@
+# The S0 installation, rehearsed: what web1 runs, minus TLS and cron.
+# Built from packaging/fhft/ (see compose.yaml).
+FROM almalinux:9
+
+RUN dnf install -y httpd php php-fpm php-pdo php-pgsql php-xml git patch \
+ && dnf clean all
+
+ARG FHFT_COMMIT=524ab71
+ARG FHFT_DIR=/opt/belledonne-communications/share/flexisip-http-file-transfer-server
+
+RUN git clone -q https://github.com/BelledonneCommunications/flexisip-http-file-transfer-server.git /usr/local/src/fhft \
+ && git -C /usr/local/src/fhft checkout -q ${FHFT_COMMIT} \
+ && install -d ${FHFT_DIR} \
+ && cp /usr/local/src/fhft/src/*.php ${FHFT_DIR}/
+
+COPY common-pdo.patch /tmp/common-pdo.patch
+RUN cd ${FHFT_DIR} && patch -p1 < /tmp/common-pdo.patch && php -l common.php
+
+RUN install -d -o apache -g apache -m 0750 /var/opt/belledonne-communications/flexisip-http-file-transfer-tmp \
+ && install -d -o apache -g apache /var/opt/belledonne-communications/log \
+ && install -d /etc/flexisip-http-file-transfer-server /run/php-fpm
+
+COPY user.ini ${FHFT_DIR}/.user.ini
+COPY flexisip-http-file-transfer-server.conf /etc/flexisip-http-file-transfer-server/flexisip-http-file-transfer-server.conf.in
+COPY fhft.inc /etc/httpd/conf.d/fhft.inc
+COPY rehearsal/zz-fhft-rehearsal.conf /etc/httpd/conf.d/zz-fhft-rehearsal.conf
+COPY rehearsal/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+EXPOSE 80
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

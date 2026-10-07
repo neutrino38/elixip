@@ -6,6 +6,37 @@ replaces it (docs/design/chat-media-plan.md, S0 and Part E).
 Upstream: <https://github.com/BelledonneCommunications/flexisip-http-file-transfer-server>,
 AGPL-3.0, at commit **`524ab71`**. The patch is against that commit.
 
+## What is here
+
+| File | Goes to (web1, AL9) |
+|---|---|
+| `common-pdo.patch` | applied in `/opt/belledonne-communications/share/flexisip-http-file-transfer-server/` |
+| `flexisip-http-file-transfer-server.conf` | `/etc/flexisip-http-file-transfer-server/`, `@…@` filled by hand, `root:apache 0640` |
+| `user.ini` | `.user.ini` beside the scripts: the PHP limits, which php-fpm reads there |
+| `fhft.inc` | `/etc/httpd/conf.d/fhft.inc`: aliases, CORS, the upload directory's protections |
+| `zz-fhft-vhost.conf` | `/etc/httpd/conf.d/`: the `files.weshwesh.eu` vhost, `@WILDCARD@` = the certificate's file name |
+| `rehearsal/` | the same files in containers, against PostgreSQL (below) |
+
+The purge is upstream's `cron.d/flexisip-http-file-transfer-server`, copied as
+shipped to `/etc/cron.d/`.
+
+## The rehearsal
+
+```bash
+docker compose -f packaging/fhft/rehearsal/compose.yaml up -d --build
+curl -s --digest -u alice:secret -H 'From: sip:alice@unit.test' \
+  -F 'File=@photo.jpg;type=image/jpeg' http://localhost:8089/files/hft.php
+docker compose -f packaging/fhft/rehearsal/compose.yaml down -v
+```
+
+AL9, httpd, php-fpm and the patched PHP, as on web1 but in plain HTTP on port
+8089 and without the cron job; PostgreSQL 16 with a kamailio-shaped
+`subscriber` table holding `alice` and `bob` at `unit.test`, password
+`secret`, and the read-only role. What it showed on 2026-10-07: one MD5
+challenge, realm `unit.test`; an authenticated empty POST answered **400**;
+the file served statically, byte for byte, `nosniff` and `attachment`; a
+`.php` stored as `.php.txt`.
+
 ## `common-pdo.patch`
 
 Upstream reads the subscriber base with `mysqli`, so MySQL only. The patch
