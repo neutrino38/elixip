@@ -20,7 +20,8 @@ its end-to-end check.
 **Status (2026-10-07):** S1's code is done, its scenario pair included,
 run against the store rehearsal (`packaging/fhft/rehearsal/`); S0's files
 are written and rehearsed, waiting for access to `web1`; the provisioning
-page waits for S0's captures. Part T not started. What this plan says of
+page waits for S0's captures. Part T: T0 and T1 done in Trix (`9d5975a`,
+ADR 0012), checked by tests only; T2 next. What this plan says of
 Trix was read in its code at `ff2d8c5` (0.10.8) on 2026-10-06, and its
 ADRs 0008 to 0010: CPIM, IMDN and the SHA-256 digest already exist there,
 which shrinks Part T to what is specific to files.
@@ -287,6 +288,14 @@ side.
 **Done when** the ADR is written and the facts of §2 still hold at the
 commit Part T starts from.
 
+**Done on 2026-10-07** — Trix ADR 0012, from `ff2d8c5`, whose facts held.
+Taken there: the store URL is an account setting `fileStore`, empty for
+off, that `config.json` pins with `file_transfer_server`; the field itself
+arrives with T3, since reception reads the URL from the XML. An entry
+gains an optional `file`, its `text` becoming the caption. The ADR also
+carries what the reference store asks of a sender (bare `From`, the 400
+to an authenticated empty POST, MD5 alone), for T3.
+
 ### T1 — receive an attachment, show it as a card
 
 **Delivers** reception of design §9.3 steps 1-3 and 5, in
@@ -318,6 +327,14 @@ a multipart of XML and text, each bare and in CPIM; a bare IMDN.
 **Done when** a Linphone desktop's photo and voice message, received live,
 show as cards with the right name, size and duration, a text still shows
 as text, and a Linphone without CPIM gets 200 to its receipts.
+
+**Built on 2026-10-07** (Trix `9d5975a`): `sip/fthttp.ts` reads the XML
+and finds it bare, in CPIM, beside a caption or as `external-body`;
+`sip/message.ts` files it and answers a bare IMDN 200; `ui/attachment.ts`
+draws the card, with a plain download link until T2 — only an `http(s)`
+URL becomes one, and past `until` the card says "expired". Tested on the
+store rehearsal's own XML and on Linphone's as the design records it; the
+live check with a Linphone desktop waits for S0.
 
 ### T2 — download and play
 
