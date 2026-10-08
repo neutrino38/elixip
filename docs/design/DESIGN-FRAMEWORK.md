@@ -523,7 +523,10 @@ or `inactive`: the stream is then **paused**, not withdrawn — answered
 `inactive` on its port and kept under its role — so the peer's transceiver
 stays usable and a later share on the same section resumes it as it is.
 Declining it with port 0 stops the transceiver (RFC 9429 §5.10), after which
-Trix could share no more. Through a B2BUA the relayed section follows its
+Trix could share no more. Browser to browser, with no media server between
+them, the answer to a stop is `inactive` and to the next share `recvonly`, on
+the same section — never port 0 (reference traffic of 2026-10-08, in
+`docs/conception/UNIFIED-PLAN/SPEC.md` §7). Through a B2BUA the relayed section follows its
 source: `inactive` while paused, port 0 once withdrawn; a browser mutes the
 remote track on `inactive` and drops it on port 0. Everything keyed by media type
 in the leg describes the role-0 sections, on the path every call takes; the

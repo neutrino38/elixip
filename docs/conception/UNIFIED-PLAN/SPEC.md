@@ -353,7 +353,8 @@ Comment E3 est tenu :
   gardé sous son rôle ; le transceiver du pair reste utilisable et un nouveau
   partage sur la même section reprend le même flux. La décliner en port 0
   stoppe le transceiver (RFC 9429 §5.10) : Trix ne pouvait plus repartager
-  (trafic du 2026-10-07). En B2BUA, la section relayée suit sa source :
+  (trafic du 2026-10-07). C'est aussi ce qu'un navigateur répond à un autre
+  (§7, référence du 2026-10-08). En B2BUA, la section relayée suit sa source :
   `inactive` en pause, port 0 au retrait ; le navigateur coupe la piste
   distante sur `inactive` et la retire sur port 0. Trix arrête en
   `a=inactive`, et sa section `bundle-only` porte `c=IN IP4 0.0.0.0` : sur
@@ -383,6 +384,34 @@ Chaque lot met à jour la documentation qu'il rend fausse :
 `docs/kelixip/modules/mcu_module_guide.md`.
 
 ## 7. Pièges
+
+### Référence : ce qu'un navigateur fait d'un partage d'écran
+
+Appel Trix ↔ Trix à travers kelixip **sans serveur média**
+(`direct-call-with-auth.exs`, les SDP passent tels quels), le 2026-10-08. C'est
+la référence à reproduire quand le serveur média est au milieu : ce que
+l'appelé répond ici, c'est ce que kelixip doit répondre.
+
+| Étape | Réoffre de l'appelant, section écran | Réponse de l'appelé |
+|---|---|---|
+| partage | nouvelle section `m=video 9`, `a=mid:3`, `a=sendonly`, `a=content:slides`, dans le groupe BUNDLE, `c=IN IP4 0.0.0.0` | même `mid`, `a=recvonly` |
+| arrêt | même section, même `mid`, `a=inactive`, `a=content:slides` gardé | `a=inactive` |
+| repartage | même section, même `mid`, `a=sendonly` | `a=recvonly` |
+| second arrêt | `a=inactive` | `a=inactive` |
+
+Trois choses à retenir :
+
+- **jamais de port 0**, ni dans l'offre ni dans la réponse : la section vit
+  pour toute la durée de l'appel, et le navigateur la réutilise à chaque
+  partage. Une réponse en port 0 stoppe le transceiver (RFC 9429 §5.10), et le
+  navigateur ne repartage plus (constaté avec le serveur média le 2026-10-08) ;
+- le navigateur marque l'écran `a=content:slides` (RFC 4796) ;
+- la section est groupée dès l'offre : port 9 et `c=IN IP4 0.0.0.0`, qui
+  n'est pas un trou noir.
+
+Le fichier `/var/log/kamailio.log` tronque chaque ligne à 8 132 octets : une
+réoffre à quatre sections y perd sa section écran. Le journal garde tout :
+`journalctl -u kelixip -o cat`.
 
 - **Une section `bundle-only` arrive en port 0.** Tant que le parseur la traite
   comme un retrait (chemin JSR-309) ou comme une section vivante sans groupe
