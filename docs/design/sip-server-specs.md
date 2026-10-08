@@ -2,6 +2,37 @@
 
 Je voudrais introduire la notion de serveur SIP dans kelixip qui ressemble un peu à un
 endpoint dans PJSIP https://docs.pjsip.org/en/latest/pjsua2/using/endpoint.html
+ou un peer SIP.
+
+# Prologue: letting a script trust an inbound P-Asserted-Identity
+
+A prerequisite, in the framework (`elixip2`), before the server entity itself.
+
+Today an inbound PAI can never leave the node: `prepare_forwarded_request/2` strips
+it on every forward and writes back only `sip_ctx.asserted_identity`
+(DESIGN-AUTH.md, "P-Asserted-Identity"). The pieces to re-assert it already exist
+but are not joined: `SIP.Msg.Ops.asserted_identity/1` reads the inbound PAI as a
+`%SIP.Uri{}` (display name kept), and `SIP.Context.assert_identity/2` (FSL macro
+`assert_identity/1`) records a `%SIP.Uri{}` as the identity to assert.
+
+What to add:
+
+- `SIP.Context.trust_asserted_identity(ctx, req)`: record the PAI of `req` as
+  `asserted_identity`. A request with no parsable `sip:` PAI leaves the context
+  unchanged: an identity proved earlier (a digest verdict) is not withdrawn by the
+  absence; `assert_identity(nil)` remains the explicit withdrawal.
+- The FSL macro `trust_asserted_identity(req)` next to `assert_identity/1` in
+  `SIP.Context.__using__`, so a script writes
+  `{_slug, _peer} -> trust_asserted_identity(req)` after `matches_server/1`.
+- Tests in `msg_ops_b2bua_test.exs`: PAI taken with its display name; the forward
+  then asserts it; no PAI keeps an earlier identity.
+- DESIGN-AUTH.md §4.2: replace "it arrives as `[domain] trusted_peers`" with this
+  verb. The trust decision is the script's, not configuration, and the guarantee
+  holds: the inbound header still never crosses a leg boundary, and the only PAI
+  that leaves is one recorded in the context.
+
+The framework function must not name `Kelix.Mod.SipServers`: `elixip2` knows
+nothing of kelixip.
 
 # Objectifs
 
@@ -102,11 +133,12 @@ La R-URI et le To sont remplacés
 
 # Module et fonctions
 
-Nouveau module kelixip Kelix.SipServers
+Nouveau module kelixip chargeable `Kelix.Mod.SipServers`
 
 ## Management
 
 - commandes kelictl, API
+
 - de quoi construire une interface graphique de gestion des serveurs dans kelescope
 
 ## Functions
@@ -118,19 +150,33 @@ définis dans le domaine en comparant le transport attaché à la requpete et en
 
 Retourne { server-slug, %SIP.Peer{} } ou :no_match
 
+Routing is unchanged. `Kelix.Router` still picks the domain from the R-URI host
+(else the To host), then the script; `matches_server/1` is a predicate the invoked
+script calls afterwards, not a routing step. A request from a server must therefore
+reach a declared domain first: a trunk calling `sip:+331…@<our IP>`, or with the
+operator's domain in the R-URI, only finds one if that IP or domain is listed in the
+domain's `aliases`. Otherwise the Router answers 404 before any script runs. This is
+configuration, not code.
+
+Recognising a server is not trusting it. `matches_server/1` says where a request
+comes from; the script decides what that is worth: reject it, challenge it, accept
+it, and whether the received P-Asserted-Identity is forwarded. The module grants
+nothing by itself. Keeping a received PAI goes through an explicit framework verb
+called by the script, since `prepare_forwarded_request/2` drops any inbound PAI by
+default (DESIGN-AUTH.md, "Where the assertion comes from").
+
 ### forward(req, server-name)
 
 Si server-name est omis, on utilise le domaine de la R-URI pour trouver le serveur SIP
 qui convient.
 
-Retourne { newreq, peer }
+Retourne { newreq,  %SIP.Peer{} }
 
 ### SBB.forward(req, server-name)
 
 Fait tout le boulot
 
 Appelle B2BUA
-
 Gère le challenge dans le cas d'un trunk SIP
 
 
@@ -138,5 +184,7 @@ Gère le challenge dans le cas d'un trunk SIP
 
 Ajout des AOR par commande ou API  
 
-kelictl servers aor add <servername> <aor>
+kelictl server <servename> aor add <aor>
+kelictl server <servename> aor rm <aor>
+kelictl server <servename> aor list
 
