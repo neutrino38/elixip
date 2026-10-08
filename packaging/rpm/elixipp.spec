@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.6.3
-Release:        2%{?dist}
+Version:        1.6.4
+Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,16 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Thu Oct 08 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-1
+- Released together with kelixip 1.6.4-1.
+- Several video streams and BUNDLE on a WebRTC leg; a stream the peer stops
+  sending on is paused, not withdrawn.
+- The SIP parser accepts header names in any case, the compact forms and a
+  colon without a space after it.
+- Elixip.Security.report/1: a no-op without a sink, so the tool reports
+  nothing and needs nothing.
+- User-Agent is now Elixipp-1.6.4.
+
 * Tue Oct 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-2
 - Released together with kelixip 1.6.3-2.
 - RFC 4028 session timers in the dialog layer, off by default

@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.3
+Version:        1.6.4
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        2%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -378,6 +378,23 @@ fi
 %{_datadir}/%{name}/sql/conversation
 
 %changelog
+* Thu Oct 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-1
+- Screen sharing through the B2BUA. A leg carries several video streams and
+  BUNDLE: the second m=video of a browser sharing its screen is a stream of
+  its own, relayed to the other leg under its mid; a share that stops is
+  paused (inactive), not withdrawn, so sharing again resumes it; a re-offer
+  keeps the peer's section order and the leg's ICE credentials.
+- Security incidents for fail2ban. A refused credential, an unknown domain, a
+  refused API token, a packet that is not SIP or a failed handshake is one
+  line in [security] log_file (default /var/log/kelixip/security.log) and in
+  the journal. Filters and a jail example are installed under
+  /usr/share/kelixip/fail2ban/; /etc/logrotate.d/kelixip rotates the file.
+  [security] ignore drops incident types.
+- The SIP parser accepts header names in any case, the compact forms and a
+  colon without a space after it (RFC 3261 section 7.3).
+- The reference media call script carries text too (T.140 data channel).
+- User-Agent is now Kelixip/1.6.4.
+
 * Tue Oct 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-2
 - RFC 4028 session timers, one per call leg. A long call relayed between two
   browsers was cut after 90 s: the caller's Session-Expires was relayed to the
