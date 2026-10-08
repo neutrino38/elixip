@@ -1657,12 +1657,6 @@ defmodule MediaServer.Mendooze.Conn do
          extras = extra_video_sections(answerable),
          primary = answerable -- extras,
          descs = mark_extras(descs, extras),
-         # a received stream the peer no longer sends on (removeTrack: the
-         # section stays, `a=recvonly` or `a=inactive`) is withdrawn; a stream
-         # we relay is ours to send on, whatever the far end's direction
-         {live_extras, dead_extras} =
-           Enum.split_with(extras, &(relayed?(state, &1) or peer_sends?(&1))),
-         _ = Enum.each(dead_extras, &log_dead_extra(state, &1)),
          state = Enum.reduce(withdrawn, state, &note_declined(&2, &1.type)),
          state = Enum.reduce(primary, state, &clear_declined(&2, &1.type)),
          :ok <- ensure_media_present(primary),
@@ -1684,10 +1678,9 @@ defmodule MediaServer.Mendooze.Conn do
          {:ok, state, negotiated} <- open_offered_receive_plane(state, primary),
          :ok <- ensure_negotiated(negotiated),
          {:ok, state, negotiated} <- apply_offered_medias(state, primary, negotiated),
-         {:ok, state} <- open_extra_videos(state, live_extras) do
-      # a stream whose section this offer no longer carries, or no longer
-      # sends on, leaves the server
-      state = delete_withdrawn_videos(state, live_extras)
+         {:ok, state} <- open_extra_videos(state, extras) do
+      # a stream whose section this offer no longer carries leaves the server
+      state = delete_withdrawn_videos(state, extras)
 
       # :ice_connected deferred to the first validated RTP packet (type 7);
       # see the set_remote_answer path and handle_server_event below. Every
@@ -3465,13 +3458,20 @@ defmodule MediaServer.Mendooze.Conn do
       rtpmaps: rtpmaps,
       fmtp: fmtp,
       bandwidth: bandwidth_kbps(state, :video),
-      direction: :recvonly,
+      direction: if(extra_paused?(state, desc), do: :inactive, else: :recvonly),
       crypto: local_crypto_spec(state, :actpass),
       ice: state.local_ice,
       rtcp_mux: false
     }
     |> add_offer_webrtc(state, :video, neg.rec_port, Map.get(desc, :mid))
     |> add_offer_rtp_profile(state, :video)
+  end
+
+  defp extra_paused?(state, desc) do
+    case Map.get(state.extra_videos, section_key(desc)) do
+      %{paused: true} -> true
+      _ -> false
+    end
   end
 
   defp offered_bundle(%{bundle: true}, medias),
@@ -3786,13 +3786,20 @@ defmodule MediaServer.Mendooze.Conn do
       rtpmaps: rtpmaps,
       fmtp: fmtp,
       bandwidth: Sdp.negotiate_bandwidth(desc.bandwidth, bandwidth_kbps(state, desc.type)),
-      # a stream other than the camera is received only, unless it is one we
-      # relay: nothing of ours is ever sent on a received stream
+      # a stream other than the camera is received only — `inactive` while the
+      # peer pauses it — unless it is one we relay: nothing of ours is ever
+      # sent on a received stream
       direction:
-        if(role_of(desc) == @role_main or relayed?(state, desc),
-          do: Sdp.reverse_direction(desc.direction),
-          else: :recvonly
-        ),
+        cond do
+          role_of(desc) == @role_main or relayed?(state, desc) ->
+            Sdp.reverse_direction(desc.direction)
+
+          extra_paused?(state, desc) ->
+            :inactive
+
+          true ->
+            :recvonly
+        end,
       # G3: mendooze answers DTLS as server (setup:passive) — the safe role a
       # browser/gateway expects from the answerer; an offer that already
       # committed to a role is mirrored. Or the SDES key we generated.
@@ -4420,7 +4427,26 @@ defmodule MediaServer.Mendooze.Conn do
             with :ok <- set_remote_crypto(state, m, desc),
                  state = note_watchdog(state, desc),
                  :ok <- apply_watchdog(state, watchdog_key(desc)) do
-              {:ok, put_extra_video(state, key, %{stream | neg: neg})}
+              # A received stream the peer no longer sends on — a browser that
+              # stops sharing keeps the section and turns it recvonly or
+              # inactive — is PAUSED, not withdrawn: the section is answered
+              # `inactive` and the stream kept under its role, so the peer's
+              # transceiver stays usable and a later share resumes it as is.
+              # Declining it with port 0 stops the transceiver (JSEP), and
+              # Trix could then share no more (traffic of 2026-10-07).
+              paused = not relayed?(state, desc) and not peer_sends?(desc)
+
+              if paused do
+                Logger.info(
+                  module: __MODULE__,
+                  cnx_tag: state.sess_tag,
+                  message:
+                    "video section #{key} offered #{Map.get(desc, :direction, :sendrecv)}: " <>
+                      "the peer no longer sends on it, its stream (role #{stream.role}) is paused"
+                )
+              end
+
+              {:ok, put_extra_video(state, key, Map.merge(stream, %{neg: neg, paused: paused}))}
             end
 
           {:skip, state} ->
@@ -4487,16 +4513,6 @@ defmodule MediaServer.Mendooze.Conn do
   defp mark_extras(descs, extras) do
     marked = MapSet.new(extras, & &1.index)
     Enum.map(descs, &if(&1.index in marked, do: Map.put(&1, :extra, true), else: &1))
-  end
-
-  defp log_dead_extra(state, desc) do
-    Logger.info(
-      module: __MODULE__,
-      cnx_tag: state.sess_tag,
-      message:
-        "video section #{section_key(desc)} offered #{Map.get(desc, :direction, :sendrecv)}: " <>
-          "the peer no longer sends on it, its stream is withdrawn"
-    )
   end
 
   defp delete_video_stream(state, key) do
@@ -4646,7 +4662,15 @@ defmodule MediaServer.Mendooze.Conn do
             peer_codecs: []
           }
 
-          stream = Map.merge(stream, %{relayed: true, peer_key: peer_key, mid: key, neg: neg})
+          stream =
+            Map.merge(stream, %{
+              relayed: true,
+              peer_key: peer_key,
+              mid: key,
+              neg: neg,
+              paused: src[:paused] == true
+            })
+
           {:ok, put_extra_video(%{state | local_ip: state.local_ip || ip}, key, stream)}
         end
     end
@@ -4672,12 +4696,14 @@ defmodule MediaServer.Mendooze.Conn do
   defp relayed_offer_spec(state, %{withdrawn: true, mid: mid, fmt: fmt}),
     do: %{type: :video, port: 0, protocol: offer_protocol(state), reject_fmt: fmt, mid: mid}
 
-  defp relayed_offer_spec(state, %{mid: mid, neg: neg}) do
+  defp relayed_offer_spec(state, %{mid: mid, neg: neg} = stream) do
     %{
       type: :video,
       port: neg.rec_port,
       bandwidth: bandwidth_kbps(state, :video),
-      direction: :sendonly,
+      # nothing flows while the source is paused; the section and the stream
+      # stay, so that the resume is a direction change and not a new stream
+      direction: if(stream[:paused], do: :inactive, else: :sendonly),
       crypto: local_crypto_spec(state, :actpass),
       ice: state.local_ice,
       rtcp_mux: false

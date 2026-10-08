@@ -3771,30 +3771,30 @@ defmodule Mendooze.ConnTest do
       assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 4]}
     end
 
-    test "a section the peer stops sending on withdraws its stream" do
+    test "a section the peer stops sending on pauses its stream, and a new share resumes it" do
       %{server: server} = start_media_server(&extra_video_handler/2)
       {conn, _tag} = webrtc_av_conn(server)
       assert {:ok, _} = Mendooze.set_remote_offer(conn, @two_video_offer)
       assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 4]}
-      _ = calls("EndpointStartReceiving")
 
       assert {:ok, answer} = Mendooze.set_remote_offer(conn, @stopped_screen_offer)
 
-      # the stream goes, nothing is opened for it, and the section is declined
-      # — the camera stands, with its own port
-      assert_received {:jsr309_call, "EndpointDeleteVideoStream", [3, 4, 2]}
-      refute Enum.any?(calls("EndpointStartReceiving"), &(List.last(&1) == 2))
+      # the stream stays under its role, the section is answered inactive on
+      # its port: the peer's transceiver stays usable — the camera stands
+      refute_received {:jsr309_call, "EndpointDeleteVideoStream", _}
       [_audio, camera, screen] = sections(answer)
       assert hd(camera) =~ ~r/^m=video 22002 /
       assert "a=sendrecv" in camera
-      assert hd(screen) =~ ~r/^m=video 0 /
+      assert hd(screen) =~ ~r/^m=video 22004 /
+      assert "a=inactive" in screen
       assert "a=mid:2" in screen
 
-      # the same stopped section again: nothing to delete twice, still declined
-      assert {:ok, answer} = Mendooze.set_remote_offer(conn, @stopped_screen_offer)
-      refute_received {:jsr309_call, "EndpointDeleteVideoStream", _}
+      # the peer shares again on the same section: the same stream, received again
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, @two_video_offer)
+      refute_received {:jsr309_call, "EndpointCreateVideoStream", _}
       [_audio, _camera, screen] = sections(answer)
-      assert hd(screen) =~ ~r/^m=video 0 /
+      assert hd(screen) =~ ~r/^m=video 22004 /
+      assert "a=recvonly" in screen
     end
 
     test "an FIR on the stream is forwarded to that stream" do
@@ -3907,7 +3907,7 @@ defmodule Mendooze.ConnTest do
       refute "a=bundle-only" in screen
     end
 
-    test "a bundle-only screen the browser stops sending on is declined, out of the group" do
+    test "a bundle-only screen the browser stops sending on is answered inactive, in the group" do
       stopped =
         String.replace(
           @bundled_offer,
@@ -3926,11 +3926,12 @@ defmodule Mendooze.ConnTest do
       assert_received {:jsr309_call, "EndpointCreateVideoStream", [3, 6]}
 
       assert {:ok, answer} = Mendooze.set_remote_offer(conn, stopped_without_sendrecv(stopped))
-      assert_received {:jsr309_call, "EndpointDeleteVideoStream", [3, 6, 2]}
+      refute_received {:jsr309_call, "EndpointDeleteVideoStream", _}
       [_audio, camera, screen] = sections(answer)
       assert hd(camera) =~ ~r/^m=video 22000 /
-      assert hd(screen) =~ ~r/^m=video 0 /
-      assert answer =~ "a=group:BUNDLE 0 1\r\n"
+      assert hd(screen) =~ ~r/^m=video 22000 /
+      assert "a=inactive" in screen
+      assert answer =~ "a=group:BUNDLE 0 1 2\r\n"
     end
 
     test "an RTP section left out of the group is declined" do
@@ -4151,17 +4152,50 @@ defmodule Mendooze.ConnTest do
       assert "a=mid:video-2" in screen
     end
 
-    test "a stream the caller stopped is withdrawn towards the callee" do
+    test "a stream the caller stops is paused towards the callee, and resumes with it" do
       %{server: server} = start_media_server(&relay_handler/2)
       {conn, out} = relayed_call(server)
       {:ok, offer} = Mendooze.get_local_offer(out)
       :ok = Mendooze.set_remote_answer(out, callee_answer(offer))
       {:ok, _} = Mendooze.bridge(conn, out, [])
-
       _ = calls("EndpointCreateVideoStream")
 
-      # the caller stops sharing: its stream goes on the inbound leg…
+      # the caller stops sharing: its stream is paused on the inbound leg…
       assert {:ok, _} = Mendooze.set_remote_offer(conn, @stopped_screen_offer)
+      refute_received {:jsr309_call, "EndpointDeleteVideoStream", _}
+
+      # …and the relayed section is re-offered inactive, same port, same mid:
+      # the callee's transceiver stays, its remote track is muted
+      assert {:ok, reoffer} = Mendooze.get_local_offer(out)
+      refute_received {:jsr309_call, "EndpointDeleteVideoStream", _}
+      refute_received {:jsr309_call, "EndpointCreateVideoStream", _}
+      [_audio, camera, screen] = sections(reoffer)
+      assert hd(camera) =~ ~r/^m=video 22002 /
+      assert hd(screen) =~ ~r/^m=video 22104 /
+      assert "a=inactive" in screen
+      assert "a=mid:video-2" in screen
+      assert :ok = Mendooze.set_remote_answer(out, callee_answer(reoffer))
+
+      # the caller shares again: the same streams, the relayed section sendonly again
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, @two_video_offer)
+      assert {:ok, reoffer} = Mendooze.get_local_offer(out)
+      refute_received {:jsr309_call, "EndpointCreateVideoStream", _}
+      [_audio, _camera, screen] = sections(reoffer)
+      assert hd(screen) =~ ~r/^m=video 22104 /
+      assert "a=sendonly" in screen
+    end
+
+    test "a stream the caller withdraws (port 0) is withdrawn towards the callee" do
+      %{server: server} = start_media_server(&relay_handler/2)
+      {conn, out} = relayed_call(server)
+      {:ok, offer} = Mendooze.get_local_offer(out)
+      :ok = Mendooze.set_remote_answer(out, callee_answer(offer))
+      {:ok, _} = Mendooze.bridge(conn, out, [])
+      _ = calls("EndpointCreateVideoStream")
+
+      # the caller withdraws the section itself: its stream goes on the inbound leg…
+      withdrawn = String.replace(@two_video_offer, "m=video 46095", "m=video 0")
+      assert {:ok, _} = Mendooze.set_remote_offer(conn, withdrawn)
       assert_received {:jsr309_call, "EndpointDeleteVideoStream", [3, 4, 2]}
 
       # …and the relayed one goes with it when the re-INVITE is relayed: the

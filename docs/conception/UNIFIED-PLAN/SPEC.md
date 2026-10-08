@@ -346,15 +346,18 @@ Comment E3 est tenu :
   `sendonly` avec exactement les codecs du flux reçu ; les flux de même rang
   s'attachent directement, sans transcodeur (§9) ; la réponse reconstruite
   vers l'appelant se restreint à ce que l'appelé a pris, ou décline ;
-- un flux reçu est retiré quand sa section passe en port 0 **ou** quand le
-  pair n'y émet plus (`a=recvonly`, `a=inactive`) : c'est ainsi qu'un
-  navigateur arrête un partage, la section reste. La réponse décline la
-  section en port 0 ; en B2BUA, le flux relayé est supprimé avec sa source et
-  sa section reste dans nos offres en port 0, ce qui dit à l'appelé que
-  l'écran a disparu (trafic Trix ↔ Trix du 2026-10-07 : sans cette règle,
-  l'appelé gardait l'écran figé). Trix arrête en `a=inactive`, et sa section
-  `bundle-only` porte `c=IN IP4 0.0.0.0` : sur une section groupée, le `c=`
-  n'est pas un trou noir ;
+- un flux reçu est **retiré** quand sa section passe en port 0, et **mis en
+  pause** quand le pair n'y émet plus (`a=recvonly`, `a=inactive`) : c'est
+  ainsi qu'un navigateur arrête un partage, la section reste avec son `mid`.
+  En pause, la section est répondue `a=inactive` sur son port et le flux est
+  gardé sous son rôle ; le transceiver du pair reste utilisable et un nouveau
+  partage sur la même section reprend le même flux. La décliner en port 0
+  stoppe le transceiver (RFC 9429 §5.10) : Trix ne pouvait plus repartager
+  (trafic du 2026-10-07). En B2BUA, la section relayée suit sa source :
+  `inactive` en pause, port 0 au retrait ; le navigateur coupe la piste
+  distante sur `inactive` et la retire sur port 0. Trix arrête en
+  `a=inactive`, et sa section `bundle-only` porte `c=IN IP4 0.0.0.0` : sur
+  une section groupée, le `c=` n'est pas un trou noir ;
 - une réponse à notre offre ne lit plus la seconde section vidéo par type :
   elle écrasait la première (le `StartSending` de la caméra visait le port
   de l'écran), et un écran refusé refusait toute la vidéo.
