@@ -34,6 +34,61 @@ What to add:
 The framework function must not name `Kelix.Mod.SipServers`: `elixip2` knows
 nothing of kelixip.
 
+# Prologue: letting the B2BUA skip a target known to be down
+
+The second prerequisite in `elixip2`. `%SIP.B2bua.Peer{trunk_pid:}` is documented
+"reserved, ignored in v1": a hunt tries a server the module already knows is down,
+waits for its timeout, and only then moves to the backup.
+
+What to add:
+
+- Before trying a target of a peer whose `trunk_pid` is set, the B2BUA asks that
+  process whether the target is reachable: one call, `{:reachable?, uri}`, answered
+  `true` or `false`. The question is per target, not per peer: a server's primary and
+  backup are up or down independently.
+- `false` skips the target without sending anything: the hunt records
+  `{:serial_not_reachable, uri, :down, at}` and moves to the next one, exactly as
+  after a transport error. Every target down ends the hunt like an exhausted one.
+- No answer (process dead, call timed out) counts as reachable: the hunt then
+  behaves as it does today. A missing reachability source must not make a working
+  server unreachable.
+- `trunk_pid: nil` keeps the current behaviour; nothing changes for a peer built
+  without it (registrar contacts, static lists, providers).
+- Tests in the B2BUA suite: a target answered `false` is skipped with no INVITE
+  sent; all targets down ends the hunt; a dead `trunk_pid` does not block the call.
+
+This is a one-question contract: `elixip2` does not know what answers it. In kelixip
+it is the server's process in `Kelix.Mod.SipServers`, whose state comes from OPTIONS
+(and, for a trunk, its registration).
+
+# Prologue: answering a challenge on the B2BUA's outbound leg
+
+The third prerequisite in `elixip2`. The outbound leg cannot authenticate today: a
+401/407 from the far end is an ordinary refusal to the hunt (`retry_on` defaults to
+`400..599`), so the B2BUA moves to the next target or relays the challenge to the
+caller, who cannot answer for the remote realm. Only `auth_invite/5` answers a
+challenge, and only for a plain UAC call. A script or an SBB cannot fill the hole:
+the hunt has already classified the 407 before a script sees anything.
+
+What to add:
+
+- A `credentials` field in `%SIP.B2bua.Peer{}`, `nil` by default (nothing changes).
+  When set, it is a process answering one call, `{:authorize, challenge, method,
+  uri}`, with the ready `Authorization` / `Proxy-Authorization` header value. The
+  secret never reaches the framework: the HA1, its realm and its algorithm stay with
+  whoever answers.
+- On a 401/407 on the outbound leg of a peer with credentials, the B2BUA re-sends the
+  same request once with that header: same SDP, CSeq + 1. A second challenge to the
+  same request is an ordinary failure. A 401/407 is never relayed to the caller when
+  the peer has credentials.
+- Every request of the leg is covered, not just the initial INVITE: re-INVITE, BYE,
+  MESSAGE. Some operators challenge BYE.
+- Tests in the B2BUA suite: INVITE challenged then accepted; second challenge fails
+  the target; challenged BYE; no credentials keeps today's behaviour.
+
+In kelixip only a `sip-trunk` server sets `credentials`, answered by its process in
+`Kelix.Mod.SipServers`.
+
 # Objectifs
 
 Pouvoir traiter les cas suivants :
@@ -50,6 +105,8 @@ Pouvoir traiter les cas suivants :
 - kelixip agit en tant que serveur SIP et intéragit avec un proxy / registrar extérieur.
   par exemple, c'est un ACD qui traite des appels venant du proxy et renvoie les appels vers
   ce proxy.
+  The external proxy is declared as a `sip-proxy` server: the type names what the
+  remote host is, not which side holds the users.
 
 # Nouvelles entités dans kelixip
 
@@ -58,13 +115,40 @@ L'entité centrale pour définir un serveur est : ̀ SIP.Server`
 C'est une entité en mémoire mais persistée (comme les conférences pou le module MCU). Il est
 défini par :
 
+The source of truth is a persistence file owned by `Kelix.Mod.SipServers`, fed by
+kelictl and the kelescope API, on the model of `Kelix.Mod.Mcu.Store`. Servers are
+declared neither in `config.toml` nor in `domains.toml`: a server names its domain by
+slug, and the node's configuration files never describe one.
+
 - un slug qui doit être au format hostname
 - une ou deux SIP uri (primary_uri, backup_uri)
 - use_dns_srv 
 - send_keepalive
-- max_sessions
 - ha_mode = failover | loadsharing
 - initiate_connection = true | false # Qui initie la connexion dans le cas d'un transport connecté ?
+
+`use_dns_srv` and `backup_uri` do not overlap. SRV is failover *within* one provider
+(each URI is resolved, its records become a serial list, as `%SIP.B2bua.Peer{use_srv:}`
+already does); `backup_uri` is failover *across* providers. Both can be set.
+
+`ha_mode = loadsharing` in v1 is a round-robin: `forward/2` rotates the order of
+`uris` on every call, so each call starts on the next server and still fails over to
+the others. No framework change. In v2, with the session counters below, it becomes
+*least used*: the server with the fewest active sessions comes first.
+
+`max_sessions` is out of v1 and planned for v2: managing a remote server's capacity is
+one of the reasons for declaring it. Counting sessions per server needs a start and
+an end for every leg (answered, failed, crashed). The v2 direction:
+
+- outbound: the `{:reachable?, uri}` question of the second prologue becomes
+  `{:acquire, uri, pid}`, answered `:ok`, `:down` or `:full`; the server's process
+  monitors `pid`, the B2BUA sends `{:release, uri, pid}` when the leg to that target
+  ends, and a full server is skipped like a down one;
+- inbound: `matches_server/1` recognises without accepting, so an explicit verb called
+  by the script (`occupy(server)`) counts a call from the server.
+
+Until then, an operator's channel limit answers 503, which moves the hunt to the next
+server.
 
 
 Il est typé :
@@ -72,12 +156,24 @@ Il est typé :
 - sip-proxy
 - sip-trunk
 
-On peut lui attacher un script UAC
-- register_script =
+On peut lui attacher des données d'identification
+- `auth_username`
+- `auth_realm`
+- `auth_password` — write-only: accepted by kelictl and the API, stored as `auth_ha1`
+  (one HA1 per algorithm, MD5 and SHA-256)
 
-On peut lui attacher des données d'identifications chiffrées
-- authusername
-- authpassword (stockée sous forme de ha1 MD5 / sha256)
+The password is never stored. kelictl and the API take it together with `auth_realm`
+and keep only its HA1, one per algorithm (MD5 and SHA-256, computed at entry), in the
+`{:ha1, algorithm, hex}` shape `Kelix.Mod.AuthDb` already uses; the answer to a
+challenge picks the one the challenge names (`SIP.Auth.compute_auth_response_from_ha1`).
+
+A HA1 is hashed, not encrypted, and it is password-equivalent for its realm: whoever
+reads it can authenticate there. The persistence file is protected accordingly (mode
+`0600`). What the HA1 buys is a narrower leak: one realm, never the password.
+
+The realm must therefore be known in advance. A challenge for another realm cannot be
+answered: the attempt fails and an alarm names the expected and received realms, and
+the operator enters the password again with the right one.
 
 Il a plusieurs états en mémoire
 
@@ -87,6 +183,14 @@ Il a plusieurs états en mémoire
 Il est attaché à un domaine. Ce n'est pas un objet global.
 
 ## Différences de comportements en fonction du type
+
+| | sip-application | sip-proxy | sip-trunk |
+|---|---|---|---|
+| R-URI to the remote host | rewritten (`:peer`) | kept (`:keep`) | rewritten (`:peer`) |
+| Users belong to | our domain | either side (`ext_domain`, `ext_domain_aliases` when remote) | the operator (`ext_domain` optional) |
+| Remote AORs, probing, presence | no | yes | no |
+| From rewritten | no | no | yes, to the trunk account's identity |
+| REGISTER, answers challenges | no | no | yes |
 
 ### sip-application
 
@@ -99,6 +203,9 @@ Pas de réécriture du From dans le cas d'un appel vers le sip application.
 ### sip-proxy
 
 A priori, même comportement plus
+
+The From is not rewritten on a call to a `sip-proxy`.
+
 on peut définir des AOR attachés à ce proxy et demander à ce que ces AOR soient
 sondés par des OPTIONS. Chacun des AOR se comporte alors un peu comme un AOR local.
 propriété spéciale 
@@ -106,13 +213,26 @@ propriété spéciale
 ext_domain = 
 ext_domain_aliases = 
 probe_remote_aors = true | false
-subscribe_presence = true | false
+probe_interval =
 
-pour traduire modifier les requests URI et les To correctement. Attention, on ne peut
-pas définir plus d'un peer par domain kelixip qui porte le même domaine.
+pour traduire modifier les requests URI et les To correctement.
 
-envoi du PAI si l'appelant est identifié.
-réception du PAI
+Within one kelixip domain, at most one `sip-proxy` server per `ext_domain`: kelictl and
+the API refuse a second one, as they refuse two servers sharing an IP.
+
+Probing remote AORs (`probe_remote_aors`): an OPTIONS to `sip:aor@ext_domain`, sent
+through the proxy, which relays it to the registered contact or answers itself. A 2xx
+means reachable, anything else unreachable; that state feeds presence, which is what
+makes a remote AOR behave like a local one. The load is N AORs per `probe_interval`
+towards one proxy, so the probes are spread over the interval with jitter rather than
+sent as a burst.
+
+`subscribe_presence` (subscribing to the presence of remote AORs) is out of v1 and
+planned for v2: it needs the state of every outbound subscription, and the presence
+layer only handles inbound ones today.
+
+The P-Asserted-Identity is not a property of the type: sending or keeping one is the
+script's decision for every type (see the first prologue).
 
 ### sip trunk
 
@@ -125,10 +245,19 @@ on utilise
 
 ext_domain =
 
-C'est le seul pour lequel on peut ajouter un script register (ou un comportement interne 
-est-il plus approprié ?)
-C'est le seul qui répond automatiquemment à un challenge du distant (voir SBB)
+It is the only type that registers with the remote side. Registration is an internal
+service of the module, not a script: one process per `sip-trunk` server, supervised by
+`Kelix.Mod.SipServers`, built on `SIP.Session.RegisterUAC` (challenge answered, refresh
+before expiry, retry with backoff on failure). It owns `registration_state`, which
+`matches_server/1`, `forward/2` and trunk selection read. What varies is an attribute
+of the server (`register_expires`, `register_retry`), never code.
+C'est le seul qui répond automatiquemment à un challenge du distant: its peer carries
+`credentials` (see the prologue on the outbound leg), the B2BUA answers, not an SBB.
 La R-URI et le To sont remplacés
+
+The From is rewritten to the trunk account's identity: the user part of the trunk URI,
+at `ext_domain` when it is set, else at the trunk host. The caller's identity, when the
+script asserts one, travels in the P-Asserted-Identity, not in the From.
 
 
 # Module et fonctions
@@ -143,12 +272,48 @@ Nouveau module kelixip chargeable `Kelix.Mod.SipServers`
 
 ## Functions
 
+A server is handed to the B2BUA as a `%SIP.B2bua.Peer{}` (`SIPSessionB2bua.ex`), the
+struct the outbound leg already consumes; no new peer type is introduced.
+
+| Server | `%SIP.B2bua.Peer{}` |
+|---|---|
+| `primary_uri`, `backup_uri` (`failover`) | `uris: [primary, backup]`, `fork: :serial` |
+| `use_dns_srv` | `use_srv: true` |
+| the server's process (reachability, registration) | `trunk_pid` |
+
+The R-URI the remote host receives depends on the type:
+
+- `sip-proxy`: `ruri: :keep`. The request goes to the proxy unchanged; the proxy
+  routes it on its own R-URI.
+- `sip-application` and `sip-trunk`: `ruri: :peer`. The R-URI is rewritten to what
+  the remote host expects: the user part of the request, the host, port and transport
+  of the server (for a trunk, `ext_domain` as host when it is set). `forward/2` builds
+  this target per call, so the dialled number is never lost to a server URI that has
+  no user part.
+
 ### matches_server(req)
 
 Cette fonction examine une requête entrante et détermine si elle vient d'un des serveur SIPs 
-définis dans le domaine en comparant le transport attaché à la requpete et en les comparant avec ceux attendus par les IP / port / transport résolus pour le serveur.
+définis dans le domaine.
 
-Retourne { server-slug, %SIP.Peer{} } ou :no_match
+A server is recognised by the **source IP and transport** of the request, compared with
+the addresses resolved for the server. The source port is not compared: over TCP, TLS
+and WSS it is ephemeral, and many UDP peers do not send from their listening port. The
+port of the server's URI is only used to reach it.
+
+Resolved addresses expire with their DNS TTL: when the URI names a host (or
+`use_dns_srv` is set), the module resolves it again once the TTL has elapsed, so an
+operator changing its IP is followed without a restart.
+
+Two servers of the same domain cannot share a resolved IP: kelictl and the API refuse
+to create or modify a server whose addresses overlap another's, since IP and transport
+could not tell them apart.
+
+The refusal only guards creation and modification. When a later resolution makes two
+servers of a domain share an IP, `matches_server/1` answers `:no_match` for that IP and
+raises an alarm naming both servers, rather than picking one.
+
+Retourne { server-slug, %SIP.B2bua.Peer{} } ou :no_match
 
 Routing is unchanged. `Kelix.Router` still picks the domain from the R-URI host
 (else the To host), then the script; `matches_server/1` is a predicate the invoked
@@ -165,19 +330,29 @@ nothing by itself. Keeping a received PAI goes through an explicit framework ver
 called by the script, since `prepare_forwarded_request/2` drops any inbound PAI by
 default (DESIGN-AUTH.md, "Where the assertion comes from").
 
-### forward(req, server-name)
+### forward(req, server)
 
-Si server-name est omis, on utilise le domaine de la R-URI pour trouver le serveur SIP
-qui convient.
+The server name is mandatory. The dial-plan (`[[domain.call]]`) picks the script, and
+the script names the server it forwards to.
 
-Retourne { newreq,  %SIP.Peer{} }
+### find_server(req)
+
+Finds the server a request is addressed to, from the host of its R-URI, so a script can
+name it to `forward/2` without hard-coding it. Candidates are the `sip-proxy` servers
+(their `ext_domain` and `ext_domain_aliases`) and the `sip-application` servers (the
+host of their `primary_uri` and `backup_uri`); a `sip-trunk` is never found this way.
+
+Returns the server slug or `:no_match`. A host designates at most one server of a
+kelixip domain across both types: kelictl and the API refuse a server whose domain,
+alias or URI host is already claimed, so the answer is never ambiguous.
+
+Retourne { newreq,  %SIP.B2bua.Peer{} }
 
 ### SBB.forward(req, server-name)
 
 Fait tout le boulot
 
 Appelle B2BUA
-Gère le challenge dans le cas d'un trunk SIP
 
 
 ## AOR et SIP proxy
@@ -188,3 +363,83 @@ kelictl server <servename> aor add <aor>
 kelictl server <servename> aor rm <aor>
 kelictl server <servename> aor list
 
+
+# When a server is down
+
+- Outbound: a target the server's process reports down is skipped (second prologue).
+  When every target is down, the hunt ends like an exhausted one and the script gets
+  the failure; what the caller receives (a 503, another server, a message) is the
+  script's decision.
+- Inbound: any request received from a server is proof of life, not only an OPTIONS. A
+  server marked down that sends an INVITE is marked up again.
+
+# Events and metrics (kelescope)
+
+Events, pushed to kelescope:
+
+- a server target (primary or backup) goes up or down;
+- a trunk's `registration_state` changes;
+- alarms: a challenge for an unexpected realm (expected and received realms named), a
+  resolved IP shared by two servers (both servers named);
+- a probed remote AOR changes state.
+
+Metrics, per server: inbound and outbound calls, failures by response code, OPTIONS
+response time.
+
+# Persistence entry
+
+One entry per server in the module's persistence file. Field names are snake_case
+and are the names kelictl and the API use; an absent field takes its default.
+
+| Field | Types | Meaning |
+|---|---|---|
+| `slug` | all | hostname-shaped, unique within the domain |
+| `domain` | all | slug of the kelixip domain the server belongs to |
+| `type` | all | `sip-application` \| `sip-proxy` \| `sip-trunk` |
+| `primary_uri`, `backup_uri` | all | a trunk's URIs carry the account's user part |
+| `use_dns_srv` | all | resolve each URI through SRV (default `false`) |
+| `send_keepalive` | all | OPTIONS liveness (default `true`) |
+| `initiate_connection` | all | who opens a connected transport (default `true`) |
+| `ha_mode` | all | `failover` (default) \| `loadsharing` |
+| `ext_domain`, `ext_domain_aliases` | proxy, trunk | the remote domain (aliases: proxy only) |
+| `probe_remote_aors`, `probe_interval` | proxy | AOR probing, interval in seconds |
+| `aors` | proxy | remote AORs, managed by `kelictl server … aor` |
+| `register_expires`, `register_retry` | trunk | REGISTER lifetime and retry delay, seconds |
+| `auth_username`, `auth_realm`, `auth_ha1` | trunk | credentials; `auth_ha1` is `[{algorithm, hex}]` |
+
+```json
+{ "slug": "acd", "domain": "kelix.example.com", "type": "sip-application",
+  "primary_uri": "sip:10.0.0.5:5060;transport=tcp",
+  "send_keepalive": true, "initiate_connection": true }
+```
+
+```json
+{ "slug": "partner-pbx", "domain": "kelix.example.com", "type": "sip-proxy",
+  "primary_uri": "sip:proxy.partner.net", "use_dns_srv": true,
+  "ext_domain": "partner.net", "ext_domain_aliases": ["sip.partner.net"],
+  "probe_remote_aors": true, "probe_interval": 60,
+  "aors": ["alice@partner.net", "bob@partner.net"] }
+```
+
+```json
+{ "slug": "operator", "domain": "kelix.example.com", "type": "sip-trunk",
+  "primary_uri": "sip:0123456789@sbc1.operator.net;transport=udp",
+  "backup_uri": "sip:0123456789@sbc2.operator.net;transport=udp",
+  "ext_domain": "operator.net", "ha_mode": "failover",
+  "register_expires": 600, "register_retry": 30,
+  "auth_username": "0123456789", "auth_realm": "operator.net",
+  "auth_ha1": [ {"algorithm": "MD5", "hex": "…"}, {"algorithm": "SHA-256", "hex": "…"} ] }
+```
+
+# Delivery
+
+| Lot | Content |
+|---|---|
+| L0 | the three framework prologues: trusted PAI, `{:reachable?, uri}`, `credentials` |
+| L1 | `Kelix.Mod.SipServers`, its store, the kelictl commands |
+| L2 | `matches_server/1`, `find_server/1`, `forward/2` |
+| L3 | OPTIONS liveness and up/down state |
+| L4 | trunk registration and challenge answering |
+| L5 | remote AOR probing (`sip-proxy`) |
+| L6 | kelescope API, events and metrics |
+| L7 | documentation |
