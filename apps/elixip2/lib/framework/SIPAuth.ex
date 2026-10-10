@@ -1,12 +1,30 @@
 defmodule SIP.Auth do
   @moduledoc "Utility to handle SIP authentication procedures"
 
+  @doc """
+  The canonical spelling of a digest `algorithm` token, or `nil` when it cannot be
+  computed. RFC 8760 spells SHA-256 with a dash, and that is what goes on the wire;
+  the undashed `SHA256` this module used to require is still read, in any case, so
+  a stored configuration or an older peer keeps working.
+  """
+  @spec canonical_algorithm(term()) :: String.t() | nil
+  def canonical_algorithm(algorithm) when is_binary(algorithm) do
+    case String.upcase(algorithm) do
+      "MD5" -> "MD5"
+      a when a in ["SHA-256", "SHA256"] -> "SHA-256"
+      a when a in ["SHA-1", "SHA1"] -> "SHA1"
+      _ -> nil
+    end
+  end
+
+  def canonical_algorithm(_), do: nil
+
   defp algo2atom(algorithm) do
-    case algorithm do
+    case canonical_algorithm(algorithm) do
       "MD5" -> :md5
       "SHA1" -> :sha1
-      "SHA256" -> :sha256
-      _ -> raise "Unsupported hash algorithm #{algorithm}"
+      "SHA-256" -> :sha256
+      nil -> raise "Unsupported hash algorithm #{algorithm}"
     end
   end
 

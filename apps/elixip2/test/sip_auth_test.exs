@@ -57,4 +57,24 @@ defmodule SIP.Test.Auth do
                SIP.Auth.compute_auth_response_from_ha1("MD5", @nonce, @ha1, @method, @uri)
     end
   end
+
+  describe "algorithm spelling (RFC 8760)" do
+    test "SHA-256 is read with or without the dash, in any case" do
+      for spelling <- ["SHA-256", "SHA256", "sha-256"] do
+        assert SIP.Auth.canonical_algorithm(spelling) == "SHA-256"
+      end
+
+      assert SIP.Auth.canonical_algorithm("md5") == "MD5"
+      assert SIP.Auth.canonical_algorithm("SHA-512-256") == nil
+      assert SIP.Auth.canonical_algorithm(nil) == nil
+    end
+
+    test "both spellings compute the same SHA-256 digest" do
+      ha1 = SIP.Auth.compute_ha1("SHA-256", "alice", "example.com", "secret")
+      assert ha1 == SIP.Auth.compute_ha1("SHA256", "alice", "example.com", "secret")
+
+      assert SIP.Auth.compute_auth_response_from_ha1("SHA-256", @nonce, ha1, @method, @uri) ==
+               SIP.Auth.compute_auth_response_from_ha1("SHA256", @nonce, ha1, @method, @uri)
+    end
+  end
 end

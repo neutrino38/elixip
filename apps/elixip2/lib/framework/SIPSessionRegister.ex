@@ -438,7 +438,8 @@ defmodule SIP.Session.RegisterUAC do
   defp warn_on_algorithm_mismatch(sip_ctx, authparams) do
     challenged = Map.get(authparams, "algorithm", "MD5")
 
-    if challenged != sip_ctx.algorithm do
+    if SIP.Auth.canonical_algorithm(challenged) !=
+         SIP.Auth.canonical_algorithm(sip_ctx.algorithm) do
       Logger.error(
         "REGISTER challenged with algorithm #{inspect(challenged)} but our HA1 was computed " <>
           "with #{inspect(sip_ctx.algorithm)}: the digest cannot match (expect a 403). " <>
