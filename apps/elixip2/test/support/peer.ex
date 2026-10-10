@@ -74,13 +74,17 @@ defmodule SIP.Test.Peer do
 
     * answer the stack's OPTIONS keepalives with 200 OK — unless the peer was
       created with `reply_options: false`, which simulates a dead peer and
-      exercises the missed-keepalive dialog teardown;
+      exercises the missed-keepalive dialog teardown, or with `options_code:`,
+      which answers that code instead (a `503` from a server refusing traffic);
     * answer the stack's BYE with 200 OK so the NICT terminates quickly;
     * ignore anything else.
   """
   def default_request(%{method: :OPTIONS} = req, state) do
     if Map.get(state, :reply_options, true) do
-      {[reply(req, 200, "OK")], state}
+      case Map.get(state, :options_code, 200) do
+        200 -> {[reply(req, 200, "OK")], state}
+        code -> {[reply(req, code)], state}
+      end
     else
       {[], state}
     end

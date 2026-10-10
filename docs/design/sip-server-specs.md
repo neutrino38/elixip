@@ -405,6 +405,16 @@ domain and its slug (REST: `/modules/sip_servers/servers/:domain/:slug/aors`).
 - Inbound: any request received from a server is proof of life, not only an OPTIONS. A
   server marked down that sends an INVITE is marked up again.
 
+As implemented (L3): each server has a process of its own (`SipServers.Link`), the
+`trunk_pid` of its peers. With `send_keepalive` it sends an OPTIONS to each URI every
+`keepalive_interval` seconds (`[module.sip_servers]`, default 30). Any final response
+brings the URI up except `503`; no answer, or no transport, takes it down. A URI never
+probed nor heard from is `unknown` and counts as reachable. Proof of life on the
+inbound side is a request `matches_server/2` recognised: an OPTIONS the node answers
+itself (`Kelix.Options`) reaches no script, so a server that only pings us is seen
+alive only if a `[[domain.options]]` script calls `matches_server/2`. `server.show`
+reports each URI's state under `reachability`.
+
 # Events and metrics (kelescope)
 
 Events, pushed to kelescope:

@@ -29,9 +29,16 @@ defmodule Kelix.Mod.SipServers.Route do
   rotated by it, so each call starts on the next one and still fails over to the
   others.
   """
-  @spec forward(map(), Server.t(), map(), non_neg_integer()) ::
+  @spec forward(map(), Server.t(), map(), non_neg_integer(), pid() | nil) ::
           {map(), %Peer{}} | {:error, :not_resolved}
-  def forward(req, %Server{} = server, resolved, turn \\ 0) do
+  def forward(req, %Server{} = server, resolved, turn \\ 0, link \\ nil) do
+    case shape(req, server, resolved, turn) do
+      {newreq, %Peer{} = peer} -> {newreq, %Peer{peer | trunk_pid: link}}
+      error -> error
+    end
+  end
+
+  defp shape(req, server, resolved, turn) do
     uris = rotate(uris(server), server.ha_mode, turn)
 
     case server.type do
@@ -51,10 +58,10 @@ defmodule Kelix.Mod.SipServers.Route do
   The peer a request recognised as coming from `server` is answered through — no
   request to shape, just where the server is.
   """
-  @spec peer(Server.t()) :: %Peer{}
-  def peer(%Server{} = server) do
+  @spec peer(Server.t(), pid() | nil) :: %Peer{}
+  def peer(%Server{} = server, link \\ nil) do
     ruri = if server.type == "sip-proxy", do: :keep, else: :peer
-    peer(server, uris(server), ruri, server.use_dns_srv)
+    %Peer{peer(server, uris(server), ruri, server.use_dns_srv) | trunk_pid: link}
   end
 
   defp peer(_server, targets, ruri, use_srv) do

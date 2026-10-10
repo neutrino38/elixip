@@ -34,7 +34,9 @@ defmodule Kelix.Mod.SipServers do
   @behaviour Kelix.Module
   require Logger
 
-  alias Kelix.Mod.SipServers.{Resolution, Route, Server, Store}
+  alias Kelix.Mod.SipServers.{Link, Resolution, Route, Server, Store}
+
+  @links Kelix.Mod.SipServers.Links
 
   # Read by the facades straight from the script's process: recognising where a
   # request comes from must not queue behind a kelictl command.
@@ -47,23 +49,44 @@ defmodule Kelix.Mod.SipServers do
   @max_refresh_s 3_600
   @retry_ms 60_000
 
-  @config_keys ~w(module server_file)
+  @config_keys ~w(module server_file keepalive_interval)
 
   # ── Kelix.Module behaviour ───────────────────────────────────────────────────
 
   @impl Kelix.Module
   def child_spec(_name, config) do
-    %{id: __MODULE__, start: {__MODULE__, :start_link, [config]}}
+    %{id: __MODULE__, type: :supervisor, start: {__MODULE__, :start_tree, [config]}}
+  end
+
+  @doc false
+  # The server processes first, the service after them, `:rest_for_one`: the
+  # service starts the processes, and one that outlived it would answer for a
+  # server it no longer knows.
+  def start_tree(config) do
+    Supervisor.start_link(
+      [
+        {DynamicSupervisor, name: @links, strategy: :one_for_one},
+        %{id: :service, start: {__MODULE__, :start_link, [config]}}
+      ],
+      strategy: :rest_for_one
+    )
   end
 
   @impl Kelix.Module
   def validate_config(config) when is_map(config) do
     case Map.keys(config) -- @config_keys do
       [] ->
-        case Map.get(config, "server_file") do
-          nil -> :ok
-          path when is_binary(path) and path != "" -> :ok
-          other -> {:error, "server_file must be a path, got #{inspect(other)}"}
+        with :ok <- server_file(Map.get(config, "server_file")) do
+          case Map.get(config, "keepalive_interval") do
+            nil ->
+              :ok
+
+            n when is_integer(n) and n > 0 ->
+              :ok
+
+            other ->
+              {:error, "keepalive_interval must be a positive integer, got #{inspect(other)}"}
+          end
         end
 
       unknown ->
@@ -72,6 +95,10 @@ defmodule Kelix.Mod.SipServers do
   end
 
   def validate_config(_), do: {:error, "block must be a table"}
+
+  defp server_file(nil), do: :ok
+  defp server_file(path) when is_binary(path) and path != "", do: :ok
+  defp server_file(other), do: {:error, "server_file must be a path, got #{inspect(other)}"}
 
   @impl Kelix.Module
   def describe(),
@@ -205,8 +232,10 @@ defmodule Kelix.Mod.SipServers do
     with {transport, ip, _port} <- SIP.Msg.Ops.source_flow(req),
          [{_, entries}] when is_list(entries) <- lookup(@addr_table, {domain, ip}),
          {slug, _t} <- Enum.find(entries, fn {_slug, t} -> t == transport end),
-         [{_, server}] <- lookup(@servers_table, {domain, slug}) do
-      {slug, Route.peer(server)}
+         [{_, server, link}] <- lookup(@servers_table, {domain, slug}) do
+      # Any request from the server is proof of life.
+      if is_pid(link), do: Link.seen(link, transport, ip)
+      {slug, Route.peer(server, link)}
     else
       _ -> :no_match
     end
@@ -246,7 +275,7 @@ defmodule Kelix.Mod.SipServers do
            __MODULE__,
            {:forward, domain_of(ctx_or_domain), String.downcase(slug)}
          ) do
-      {:ok, server, resolved, turn} -> Route.forward(req, server, resolved, turn)
+      {:ok, server, resolved, turn, link} -> Route.forward(req, server, resolved, turn, link)
       {:error, _} = error -> error
     end
   end
@@ -260,7 +289,7 @@ defmodule Kelix.Mod.SipServers do
   defp domain_of(_), do: nil
 
   defp servers_of(domain) do
-    for {{d, _slug}, server} <- table(@servers_table), d == domain, do: server
+    for {{d, _slug}, server, _link} <- table(@servers_table), d == domain, do: server
   end
 
   defp lookup(table, key) do
@@ -285,8 +314,16 @@ defmodule Kelix.Mod.SipServers do
     :ets.new(@addr_table, [:named_table, :protected, read_concurrency: true])
     {file, servers} = restore(Map.get(config, "server_file"))
 
+    # A service restarted under a live tree finds the processes of its previous
+    # life: they answer for state it no longer holds.
+    for {_, pid, _, _} <- DynamicSupervisor.which_children(@links),
+        is_pid(pid),
+        do: DynamicSupervisor.terminate_child(@links, pid)
+
     state = %{
       file: file,
+      interval: Map.get(config, "keepalive_interval", 30),
+      links: %{},
       servers: %{},
       resolved: %{},
       gen: %{},
@@ -317,7 +354,7 @@ defmodule Kelix.Mod.SipServers do
         turn = Map.get(state.turns, key, 0)
         resolved = state.resolved |> Map.get(key, %{}) |> Map.get(:targets, %{})
 
-        {:reply, {:ok, server, resolved, turn},
+        {:reply, {:ok, server, resolved, turn, Map.get(state.links, key)},
          %{state | turns: Map.put(state.turns, key, turn + 1)}}
 
       nil ->
@@ -360,7 +397,9 @@ defmodule Kelix.Mod.SipServers do
   end
 
   defp control("server.show", args, state) do
-    with {:ok, server} <- fetch(state, args), do: {:ok, Server.public(server)}
+    with {:ok, server} <- fetch(state, args) do
+      {:ok, Map.put(Server.public(server), :reachability, reachability(state, server))}
+    end
   end
 
   defp control("server.update", args, state) do
@@ -502,14 +541,21 @@ defmodule Kelix.Mod.SipServers do
     changed = for {k, s} <- new.servers, Map.get(old.servers, k) != s, do: k
 
     Enum.each(gone, &:ets.delete(@servers_table, &1))
-    Enum.each(changed, &:ets.insert(@servers_table, {&1, Map.fetch!(new.servers, &1)}))
+
+    for key <- gone,
+        pid = Map.get(new.links, key),
+        is_pid(pid),
+        do: DynamicSupervisor.terminate_child(@links, pid)
 
     new = %{
       new
       | resolved: Map.drop(new.resolved, gone),
         gen: Map.drop(new.gen, gone),
-        turns: Map.drop(new.turns, gone)
+        turns: Map.drop(new.turns, gone),
+        links: Map.drop(new.links, gone)
     }
+
+    new = Enum.reduce(changed, new, &link/2)
 
     changed |> Enum.reduce(new, &resolve(&2, &1)) |> rebuild_index()
   end
@@ -533,7 +579,12 @@ defmodule Kelix.Mod.SipServers do
       Process.send_after(self(), {:refresh, key, gen}, delay * 1000)
     end
 
-    %{state | resolved: Map.put(state.resolved, key, %{targets: targets})}
+    state = %{state | resolved: Map.put(state.resolved, key, %{targets: targets})}
+
+    if pid = Map.get(state.links, key),
+      do: Link.update(pid, Map.fetch!(state.servers, key), targets)
+
+    state
   end
 
   # A failed resolution keeps the last answer — an address that worked is a better
@@ -546,6 +597,46 @@ defmodule Kelix.Mod.SipServers do
 
     Process.send_after(self(), {:refresh, key, gen}, @retry_ms)
     state
+  end
+
+  # The server's process: started with the server, told of every change to it, and
+  # what the table row hands to the facades.
+  defp link(key, state) do
+    server = Map.fetch!(state.servers, key)
+    targets = state.resolved |> Map.get(key, %{}) |> Map.get(:targets, %{})
+
+    pid =
+      case Map.get(state.links, key) do
+        pid when is_pid(pid) ->
+          Link.update(pid, server, targets)
+          pid
+
+        nil ->
+          opts = [server: server, resolved: targets, interval: state.interval]
+          spec = Supervisor.child_spec({Link, opts}, restart: :temporary)
+
+          case DynamicSupervisor.start_child(@links, spec) do
+            {:ok, pid} -> pid
+            _ -> nil
+          end
+      end
+
+    :ets.insert(@servers_table, {key, server, pid})
+    %{state | links: Map.put(state.links, key, pid)}
+  end
+
+  defp reachability(state, server) do
+    case Map.get(state.links, {server.domain, server.slug}) do
+      pid when is_pid(pid) ->
+        try do
+          Map.new(Link.states(pid), fn {uri, st} -> {uri, Atom.to_string(st)} end)
+        catch
+          :exit, _ -> %{}
+        end
+
+      _ ->
+        %{}
+    end
   end
 
   # `{domain, ip} => [{slug, transport}]`, or `:ambiguous` when two servers of a
