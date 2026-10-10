@@ -272,6 +272,8 @@ defmodule SIP.Test.SIP.Msg.Ops do
     assert siprsp.response == 407
     assert siprsp.proxyauthenticate["realm"] == "elioz.net"
     assert Map.has_key?(siprsp.proxyauthenticate, "nonce")
+    # Asked as "SHA256", advertised the RFC 8760 way
+    assert siprsp.proxyauthenticate["algorithm"] == "SHA-256"
 
     auth_req =
       SIP.Msg.Ops.add_authorization_to_req(

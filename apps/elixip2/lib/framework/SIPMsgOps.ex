@@ -2489,9 +2489,10 @@ defmodule SIP.Msg.Ops do
     }
 
     authparams =
-      if algorithm in ["MD5", "SHA1", "SHA256"],
-        do: Map.put(authparams, "algorithm", algorithm),
-        else: algorithm
+      case SIP.Auth.canonical_algorithm(algorithm) do
+        nil -> algorithm
+        canonical -> Map.put(authparams, "algorithm", canonical)
+      end
 
     Map.put(rsp, challenge_header(resp_code), authparams)
   end
