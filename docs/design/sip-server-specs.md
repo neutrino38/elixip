@@ -243,6 +243,18 @@ makes a remote AOR behave like a local one. The load is N AORs per `probe_interv
 towards one proxy, so the probes are spread over the interval with jitter rather than
 sent as a burst.
 
+As implemented (L5): the probing is done by the server's process (`SipServers.Link`).
+Each OPTIONS has the AOR as its Request-URI and To, and is sent to the first proxy URI
+not known to be down, as a `ruri: :keep` peer is. One AOR per tick, a tick every
+`probe_interval / N` seconds ±10 %. A 2xx is `open`; any other answer, none, or no proxy
+to send it through is `closed`. The state is reported to `Kelix.Mod.Presence`
+(`report/4`, source `sip_servers`) for the AOR's user part on the server's kelixip
+domain: `alice@partner.net` attached to a proxy of `example.com` is the presence of
+`alice` at `example.com`, the AOR a local user calls and watches. Only changes are
+reported; an AOR removed, or probing turned off, has its state withdrawn, and a presence
+module that restarts is told again on the next probe. `aor.list` shows each AOR's
+`state` (`unknown`, `open`, `closed`, `none` when not probed).
+
 `subscribe_presence` (subscribing to the presence of remote AORs) is out of v1 and
 planned for v2: it needs the state of every outbound subscription, and the presence
 layer only handles inbound ones today.
@@ -430,7 +442,10 @@ As implemented (L3): each server has a process of its own (`SipServers.Link`), t
 `trunk_pid` of its peers. With `send_keepalive` it sends an OPTIONS to each URI every
 `keepalive_interval` seconds (`[module.sip_servers]`, default 30). Any final response
 brings the URI up except `503`; no answer, or no transport, takes it down. A URI never
-probed nor heard from is `unknown` and counts as reachable. Proof of life on the
+probed nor heard from is `unknown` and counts as reachable. The process never resolves
+a name itself: every OPTIONS and REGISTER it sends carries the destination the service's
+resolution found, and waits for it when there is none yet, so a slow DNS never holds up
+the `{:reachable?, uri}` a B2BUA asks it. Proof of life on the
 inbound side is a request `matches_server/2` recognised, and nothing else: the
 script owns the keepalives. An OPTIONS from a server reaches a script through a
 `[[domain.options]]` rule, and that script recognises it with `matches_server/2` and

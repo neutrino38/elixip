@@ -18,12 +18,28 @@ defmodule Kelix.Mod.SipServersRegistrationTest do
 
   @domain "example.com"
 
+  # Every server of this suite lives at a 10.0.2.x address of its own.
+  defmodule FakeDns do
+    def resolve(server) do
+      targets =
+        for uri <- [server.primary_uri, server.backup_uri], uri != nil, into: %{} do
+          {:ok, parsed} = SIP.Uri.parse(uri)
+          n = :erlang.phash2(parsed.domain, 250) + 1
+          {uri, [{"UDP", {10, 0, 2, n}, 5060}]}
+        end
+
+      {:ok, targets, 300}
+    end
+  end
+
   setup_all do
     toml = Path.join(System.tmp_dir!(), "sip_servers_registration_domains.toml")
     File.write!(toml, ~s([[domain]]\nname = "example.com"\n))
     :ok = Kelix.Domains.reload(toml)
+    Application.put_env(:kelix_modules, :sip_servers_resolver, FakeDns)
 
     on_exit(fn ->
+      Application.delete_env(:kelix_modules, :sip_servers_resolver)
       empty = Path.join(System.tmp_dir!(), "sip_servers_registration_empty.toml")
       File.write!(empty, "")
       _ = Kelix.Domains.reload(empty)

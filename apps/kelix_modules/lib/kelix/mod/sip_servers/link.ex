@@ -32,6 +32,15 @@ defmodule Kelix.Mod.SipServers.Link do
       lifetime ends, a retry every `register_retry` seconds, doubled after each
       consecutive failure up to an hour, and an un-REGISTER when the server is
       deleted or the node stops.
+
+  For a `sip-proxy` with `probe_remote_aors` it probes the remote AORs attached
+  to it (lot L5): one OPTIONS per AOR and `probe_interval`, the Request-URI the AOR
+  itself, sent to the proxy (as a `ruri: :keep` peer is) — so the proxy relays it
+  to the registered contact or answers for it. The probes are spread over the
+  interval, not sent as a burst. A 2xx is `:open`, any other answer or none is
+  `:closed`, and the state is reported to `Kelix.Mod.Presence` for the user part of
+  the AOR on the server's domain (source `:sip_servers`): a remote AOR then has a
+  presence as a local one does. An AOR no longer probed has its state withdrawn.
   """
   use GenServer
   require Logger
@@ -59,6 +68,9 @@ defmodule Kelix.Mod.SipServers.Link do
   @doc "`%{uri => :unknown | :up | :down}`."
   def states(pid), do: GenServer.call(pid, :states)
 
+  @doc "`%{aor => :unknown | :open | :closed}` of a proxy's probed remote AORs."
+  def aor_states(pid), do: GenServer.call(pid, :aor_states)
+
   @doc "A trunk's registration, as `server.show` reports it; `nil` for another type."
   def registration(pid), do: GenServer.call(pid, :registration)
 
@@ -77,10 +89,18 @@ defmodule Kelix.Mod.SipServers.Link do
       states: initial_states(server, %{}),
       probes: %{},
       timer: nil,
-      reg: new_registration(server)
+      reg: new_registration(server),
+      aors: %{
+        states: aor_states_for(server, %{}),
+        probes: %{},
+        timer: nil,
+        next: 0,
+        reported: %{},
+        presence: nil
+      }
     }
 
-    {:ok, state |> schedule(0) |> register_soon(0)}
+    {:ok, state |> schedule(0) |> register_soon(0) |> schedule_aor()}
   end
 
   @impl GenServer
@@ -102,6 +122,8 @@ defmodule Kelix.Mod.SipServers.Link do
 
   def handle_call(:states, _from, state), do: {:reply, state.states, state}
 
+  def handle_call(:aor_states, _from, state), do: {:reply, state.aors.states, state}
+
   def handle_call(:registration, _from, %{reg: nil} = state), do: {:reply, nil, state}
 
   def handle_call(:registration, _from, %{reg: reg} = state) do
@@ -116,6 +138,7 @@ defmodule Kelix.Mod.SipServers.Link do
   @impl GenServer
   def handle_cast({:update, server, resolved}, state) do
     restart = server != state.server
+    newly_resolved = resolved != state.resolved
 
     # The binding made under the old definition is dropped first: it would
     # otherwise outlive a trunk told to stop registering, or to use another account.
@@ -135,7 +158,13 @@ defmodule Kelix.Mod.SipServers.Link do
         do: %{schedule(state, 0) | reg: new_registration(server)} |> register_soon(0),
         else: state
 
-    {:noreply, state}
+    # Whatever waited for an address goes now.
+    state =
+      if newly_resolved and not restart,
+        do: state |> schedule(0) |> register_if_waiting(),
+        else: state
+
+    {:noreply, if(restart, do: update_aors(state), else: state)}
   end
 
   def handle_cast({:seen, transport, ip}, state) do
@@ -173,6 +202,29 @@ defmodule Kelix.Mod.SipServers.Link do
 
   def handle_info({:transaction_timeout, _timer, tid, _req, _module}, %{reg: %{tid: tid}} = state) do
     {:noreply, register_failed(state, "REGISTER not answered")}
+  end
+
+  def handle_info(:probe_aor, state) do
+    state = put_in(state.aors.timer, nil)
+    {:noreply, state |> probe_next_aor() |> schedule_aor()}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{aors: %{presence: ref}} = state) do
+    # What we reported went with it: report again on the next probe.
+    {:noreply, %{state | aors: %{state.aors | presence: nil, reported: %{}}}}
+  end
+
+  def handle_info({:response, %{response: code}, tid}, state)
+      when is_integer(code) and code >= 200 and is_map_key(state.aors.probes, tid) do
+    {aor, probes} = Map.pop(state.aors.probes, tid)
+    status = if code in 200..299, do: :open, else: :closed
+    {:noreply, aor_result(put_in(state.aors.probes, probes), aor, status)}
+  end
+
+  def handle_info({:transaction_timeout, _timer, tid, _req, _module}, state)
+      when is_map_key(state.aors.probes, tid) do
+    {aor, probes} = Map.pop(state.aors.probes, tid)
+    {:noreply, aor_result(put_in(state.aors.probes, probes), aor, :closed)}
   end
 
   def handle_info({:response, %{response: code}, tid}, state)
@@ -245,7 +297,8 @@ defmodule Kelix.Mod.SipServers.Link do
       auth_tried: false,
       failures: 0,
       timer: nil,
-      error: nil
+      error: nil,
+      waiting: false
     }
   end
 
@@ -258,6 +311,9 @@ defmodule Kelix.Mod.SipServers.Link do
 
   defp unregister(state), do: state
 
+  defp register_if_waiting(%{reg: %{waiting: true}} = state), do: register_soon(state, 0)
+  defp register_if_waiting(state), do: state
+
   defp register_soon(%{reg: nil} = state, _ms), do: state
 
   defp register_soon(%{reg: reg} = state, ms) do
@@ -267,7 +323,16 @@ defmodule Kelix.Mod.SipServers.Link do
 
   defp send_register(state, expires, auth \\ nil) do
     reg = %{state.reg | cseq: state.reg.cseq + 1, expires: expires}
-    msg = register_msg(state.server, reg, state.resolved, expires, auth)
+
+    case register_msg(state, reg, expires, auth) do
+      # not resolved yet: registered when it is (register_if_waiting/1)
+      nil -> %{state | reg: %{state.reg | waiting: true}}
+      msg -> start_register(state, reg, msg, auth)
+    end
+  end
+
+  defp start_register(state, reg, msg, auth) do
+    reg = %{reg | waiting: false}
 
     case SIP.Transac.start_uac_transaction(msg, @register_timeout_s) do
       {:ok, tid, sent} ->
@@ -363,29 +428,24 @@ defmodule Kelix.Mod.SipServers.Link do
   # REGISTER sip:<registrar> with the account as From and To. With an
   # `ext_domain`, the registrar is named by it and reached where the trunk's URI
   # resolved, as a call is (`Kelix.Mod.SipServers.Route`).
-  defp register_msg(server, reg, resolved, expires, auth) do
+  defp register_msg(state, reg, expires, auth) do
+    server = state.server
     uri = Enum.at(uris(server), reg.target) || server.primary_uri
     {:ok, parsed} = SIP.Uri.parse(uri)
+
+    case server.ext_domain do
+      nil -> stamp_resolved(state, uri, %SIP.Uri{parsed | userpart: nil})
+      ext -> stamp_resolved(state, uri, %SIP.Uri{scheme: parsed.scheme, domain: ext})
+    end
+    |> case do
+      nil -> nil
+      ruri -> register_msg(server, parsed, ruri, reg, expires, auth)
+    end
+  end
+
+  defp register_msg(server, parsed, ruri, reg, expires, auth) do
     account = parsed.userpart
     host = server.ext_domain || parsed.domain
-
-    ruri =
-      case {server.ext_domain, Map.get(resolved, uri, [])} do
-        {nil, _} ->
-          %SIP.Uri{parsed | userpart: nil}
-
-        {ext, [{transport, ip, port} | _]} ->
-          %SIP.Uri{
-            scheme: parsed.scheme,
-            domain: ext,
-            destip: ip,
-            destport: port,
-            destproto: transport
-          }
-
-        {ext, []} ->
-          %SIP.Uri{parsed | userpart: nil, domain: ext}
-      end
 
     aor = %SIP.Uri{scheme: "sip:", userpart: account, domain: host}
 
@@ -418,33 +478,57 @@ defmodule Kelix.Mod.SipServers.Link do
   # ── probing ─────────────────────────────────────────────────────────────────
 
   defp probe(state, uri) do
-    case SIP.Transac.start_uac_transaction(options(state.server, uri), @options_timeout_s) do
-      {:ok, tid, _sent} ->
-        %{state | probes: Map.put(state.probes, tid, uri)}
+    {:ok, target} = SIP.Uri.parse(uri)
+    target = %SIP.Uri{target | userpart: nil}
 
-      other ->
-        set(state, uri, :down, "OPTIONS could not be sent (#{inspect(other)})")
+    case stamp_resolved(state, uri, target) do
+      # not resolved yet: probed when it is
+      nil ->
+        state
+
+      ruri ->
+        case SIP.Transac.start_uac_transaction(
+               options_msg(state.server, ruri, target),
+               @options_timeout_s
+             ) do
+          {:ok, tid, _sent} ->
+            %{state | probes: Map.put(state.probes, tid, uri)}
+
+          other ->
+            set(state, uri, :down, "OPTIONS could not be sent (#{inspect(other)})")
+        end
+    end
+  end
+
+  # Where `uri` resolved, stamped on `target`. This process never resolves a name
+  # itself: a DNS lookup here would hold up every `{:reachable?, _}` the B2BUA
+  # asks meanwhile, and every `server.show`. `nil` until the service's resolution
+  # has landed (`update/3`).
+  defp stamp_resolved(state, uri, %SIP.Uri{} = target) do
+    case Map.get(state.resolved, uri, []) do
+      [{transport, ip, port} | _] ->
+        %SIP.Uri{target | destip: ip, destport: port, destproto: transport}
+
+      [] ->
+        nil
     end
   end
 
   # An out-of-dialog OPTIONS (RFC 3261 §11): its own Call-ID and From tag, nothing
   # that would open a dialog.
-  defp options(server, uri) do
-    {:ok, target} = SIP.Uri.parse(uri)
-    target = %SIP.Uri{target | userpart: nil}
-
+  defp options_msg(server, ruri, to) do
     %{
       "Max-Forwards" => "70",
       "Accept" => "application/sdp",
       method: :OPTIONS,
-      ruri: target,
+      ruri: ruri,
       from: %SIP.Uri{
         scheme: "sip:",
         userpart: "kelixip",
         domain: server.domain,
         hparams: %{"tag" => SIP.Msg.Ops.generate_from_or_to_tag()}
       },
-      to: target,
+      to: to,
       callid: SIP.Msg.Ops.generate_branch_value(),
       cseq: [1, :OPTIONS],
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
@@ -456,6 +540,167 @@ defmodule Kelix.Mod.SipServers.Link do
     if state.timer, do: Process.cancel_timer(state.timer)
     %{state | timer: Process.send_after(self(), :probe, ms)}
   end
+
+  # ── remote AORs (sip-proxy) ─────────────────────────────────────────────────
+
+  defp probes_aors?(%Server{type: "sip-proxy", probe_remote_aors: true, aors: [_ | _]}),
+    do: true
+
+  defp probes_aors?(_server), do: false
+
+  # An AOR kept keeps its state; a new one starts unknown.
+  defp aor_states_for(server, old) do
+    if probes_aors?(server),
+      do: Map.new(server.aors, fn aor -> {aor, Map.get(old, aor, :unknown)} end),
+      else: %{}
+  end
+
+  # The AORs changed, or the probing did: what is no longer probed is withdrawn
+  # from presence, and the round starts over.
+  defp update_aors(state) do
+    aors = state.aors
+    states = aor_states_for(state.server, aors.states)
+
+    state =
+      Enum.reduce(Map.keys(aors.reported), state, fn aor, state ->
+        if Map.has_key?(states, aor), do: state, else: report_aor(state, aor, nil)
+      end)
+
+    %{state | aors: %{state.aors | states: states, next: 0}} |> schedule_aor()
+  end
+
+  # One AOR per tick, a tick every `probe_interval / N` (±10 %): N AORs make N
+  # OPTIONS per interval towards the proxy, spread instead of a burst.
+  defp schedule_aor(state) do
+    aors = state.aors
+    if aors.timer, do: Process.cancel_timer(aors.timer)
+
+    timer =
+      case map_size(aors.states) do
+        0 ->
+          nil
+
+        n ->
+          tick = div(state.server.probe_interval * 1000, n)
+          jitter = div(tick, 10)
+          delay = max(tick - jitter + :rand.uniform(2 * jitter + 1) - 1, 50)
+          Process.send_after(self(), :probe_aor, delay)
+      end
+
+    %{state | aors: %{aors | timer: timer}}
+  end
+
+  defp probe_next_aor(state) do
+    aors = state.server.aors |> Enum.filter(&Map.has_key?(state.aors.states, &1))
+
+    case aors do
+      [] ->
+        state
+
+      list ->
+        aor = Enum.at(list, rem(state.aors.next, length(list)))
+        state = put_in(state.aors.next, state.aors.next + 1)
+        probe_aor(state, aor)
+    end
+  end
+
+  defp probe_aor(state, aor) do
+    {:ok, target} = SIP.Uri.parse("sip:" <> aor)
+
+    case proxy_hop(state) do
+      # the proxy is down: nothing reaches the AOR either
+      :down ->
+        aor_result(state, aor, :closed)
+
+      # not resolved yet: probed on a later round
+      nil ->
+        state
+
+      via ->
+        ruri = SIP.Session.B2bua.stamp_destination(target, via)
+
+        case SIP.Transac.start_uac_transaction(
+               options_msg(state.server, ruri, target),
+               @options_timeout_s
+             ) do
+          {:ok, tid, _sent} -> put_in(state.aors.probes[tid], aor)
+          _ -> aor_result(state, aor, :closed)
+        end
+    end
+  end
+
+  # The proxy URI to go through: the first one not known to be down, where it
+  # resolved. `:down` when every one is, `nil` while none is resolved yet.
+  defp proxy_hop(state) do
+    case Enum.reject(uris(state.server), &(Map.get(state.states, &1) == :down)) do
+      [] ->
+        :down
+
+      up ->
+        Enum.find_value(up, fn uri ->
+          {:ok, parsed} = SIP.Uri.parse(uri)
+
+          with %SIP.Uri{} = stamped <- stamp_resolved(state, uri, parsed),
+               %SIP.Uri{} = hop <- SIP.Transport.Selector.select_transport(stamped) do
+            hop
+          else
+            _ -> nil
+          end
+        end)
+    end
+  end
+
+  defp aor_result(state, aor, status) do
+    case Map.fetch(state.aors.states, aor) do
+      {:ok, old} ->
+        if old != status do
+          Logger.info(
+            module: __MODULE__,
+            message: "sip server #{name(state)}: remote AOR #{aor} #{old} -> #{status}"
+          )
+        end
+
+        state = put_in(state.aors.states[aor], status)
+
+        if Map.get(state.aors.reported, aor) == status,
+          do: state,
+          else: report_aor(state, aor, status)
+
+      # removed while its probe was in flight
+      :error ->
+        state
+    end
+  end
+
+  # The presence of `user` on the server's domain, on our own authority. A
+  # presence module that is not there is not an error: the state is reported
+  # again on the next probe, once it is.
+  defp report_aor(state, aor, status) do
+    [user | _] = String.split(aor, "@")
+    doc = if status, do: SIP.Presence.Doc.new("sip:#{user}@#{state.server.domain}", status)
+
+    case Kelix.Mod.Presence.report(state.server.domain, user, :sip_servers, doc) do
+      :ok ->
+        reported =
+          if status,
+            do: Map.put(state.aors.reported, aor, status),
+            else: Map.delete(state.aors.reported, aor)
+
+        %{state | aors: %{state.aors | reported: reported}} |> watch_presence()
+
+      {:error, _} ->
+        state
+    end
+  end
+
+  defp watch_presence(%{aors: %{presence: nil}} = state) do
+    case Process.whereis(Kelix.Mod.Presence) do
+      nil -> state
+      pid -> put_in(state.aors.presence, Process.monitor(pid))
+    end
+  end
+
+  defp watch_presence(state), do: state
 
   # ── states ──────────────────────────────────────────────────────────────────
 

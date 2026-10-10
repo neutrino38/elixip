@@ -188,8 +188,10 @@ defmodule Kelix.Mod.SipServers do
         errors: %{not_found: 404},
         rw: :r,
         args: key_args,
-        render: %{kind: :table, columns: ~w(aor)},
-        help: "The remote AORs attached to a sip-proxy server"
+        render: %{kind: :table, columns: ~w(aor state)},
+        help:
+          "The remote AORs attached to a sip-proxy server, and their probed state " <>
+            "(none when not probed)"
       }
     ]
   end
@@ -428,7 +430,8 @@ defmodule Kelix.Mod.SipServers do
   defp control("aor.list", args, state) do
     with {:ok, server} <- fetch(state, args),
          :ok <- proxy(server) do
-      {:ok, Enum.map(server.aors, &%{aor: &1})}
+      states = aor_states(state, server)
+      {:ok, Enum.map(server.aors, &%{aor: &1, state: to_string(Map.get(states, &1, :none))})}
     end
   end
 
@@ -628,6 +631,20 @@ defmodule Kelix.Mod.SipServers do
 
     :ets.insert(@servers_table, {key, server, pid})
     %{state | links: Map.put(state.links, key, pid)}
+  end
+
+  defp aor_states(state, server) do
+    case Map.get(state.links, {server.domain, server.slug}) do
+      pid when is_pid(pid) ->
+        try do
+          Link.aor_states(pid)
+        catch
+          :exit, _ -> %{}
+        end
+
+      _ ->
+        %{}
+    end
   end
 
   defp registration(state, server) do
