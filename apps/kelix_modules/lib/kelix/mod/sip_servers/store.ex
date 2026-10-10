@@ -76,6 +76,7 @@ defmodule Kelix.Mod.SipServers.Store do
       "probe_remote_aors" => s.probe_remote_aors,
       "probe_interval" => s.probe_interval,
       "aors" => s.aors,
+      "register" => s.register,
       "register_expires" => s.register_expires,
       "register_retry" => s.register_retry,
       "auth_username" => s.auth_username,

@@ -130,6 +130,38 @@ defmodule Kelix.Mod.SipServersRegistrationTest do
     assert expires(bye) == {:ok, "0"}
   end
 
+  test "register = false: no REGISTER, but its calls still answer challenges" do
+    _tp = registrar!("reg5")
+    :ok = trunk("reg5", %{"register" => "false"})
+
+    refute_receive {:sip_mockup, {:request_sent, :REGISTER, _}}, 300
+    assert registration("reg5") == nil
+
+    {_req, %SIP.B2bua.Peer{credentials: link}} =
+      SipServers.forward(@domain, %{method: :INVITE, ruri: %SIP.Uri{userpart: "3000"}}, "reg5")
+
+    assert is_pid(link)
+  end
+
+  test "turning register off un-registers a registered trunk" do
+    tp = registrar!("reg6")
+    :ok = trunk("reg6", %{})
+    _ = next_register!()
+    :ok = Manual.simulate(tp, 200, 0)
+    until!(fn -> registration("reg6").state == "registered" end)
+
+    {:ok, _} =
+      SipServers.handle_control("server.update", %{
+        "domain" => @domain,
+        "slug" => "reg6",
+        "register" => "false"
+      })
+
+    assert expires(next_register!()) == {:ok, "0"}
+    refute_receive {:sip_mockup, {:request_sent, :REGISTER, _}}, 300
+    assert registration("reg6") == nil
+  end
+
   test "credentials refused twice: failed, and said" do
     tp = registrar!("reg3")
     :ok = trunk("reg3", %{})

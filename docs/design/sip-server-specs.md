@@ -289,7 +289,12 @@ failure up to an hour, on the next URI. Deleting the server, or stopping the nod
 sends an un-REGISTER. The process is also the peers' `credentials` when the trunk has a
 password, so a challenged INVITE or BYE is answered the same way. `server.show`
 reports `registration` (`state`: `unregistered`, `registering`, `registered`,
-`failed`, and the last `error`). Every trunk registers.
+`failed`, and the last `error`).
+
+`register = false` is a trunk that does not register but answers the challenges of
+the requests it sends (an INVITE challenged by the operator); its `registration` is
+`null`. A remote host that authenticates us by our address alone, with no account,
+is declared as a `sip-application`, not as a trunk.
 
 
 # Module et fonctions
@@ -465,6 +470,7 @@ and are the names kelictl and the API use; an absent field takes its default.
 | `ext_domain`, `ext_domain_aliases` | proxy, trunk | the remote domain (aliases: proxy only) |
 | `probe_remote_aors`, `probe_interval` | proxy | AOR probing, interval in seconds |
 | `aors` | proxy | remote AORs, managed by `kelictl server … aor` |
+| `register` | trunk | register the account (default `true`); `false` only answers challenges |
 | `register_expires`, `register_retry` | trunk | REGISTER lifetime and retry delay, seconds |
 | `auth_username`, `auth_realm`, `auth_ha1` | trunk | credentials; `auth_ha1` is `[{algorithm, hex}]` |
 
@@ -487,7 +493,7 @@ and are the names kelictl and the API use; an absent field takes its default.
   "primary_uri": "sip:0123456789@sbc1.operator.net;transport=udp",
   "backup_uri": "sip:0123456789@sbc2.operator.net;transport=udp",
   "ext_domain": "operator.net", "ha_mode": "failover",
-  "register_expires": 600, "register_retry": 30,
+  "register": true, "register_expires": 600, "register_retry": 30,
   "auth_username": "0123456789", "auth_realm": "operator.net",
   "auth_ha1": [ {"algorithm": "MD5", "hex": "…"}, {"algorithm": "SHA-256", "hex": "…"} ] }
 ```

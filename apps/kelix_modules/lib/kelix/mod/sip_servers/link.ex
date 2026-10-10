@@ -26,7 +26,8 @@ defmodule Kelix.Mod.SipServers.Link do
       challenge, method, digest_uri}` from the stored HA1
       (`Kelix.Mod.SipServers.Credentials`) — a challenge for a realm other than
       `auth_realm` is refused and raises an alarm naming both;
-    * the **registration** of the account: a REGISTER to the primary URI (the
+    * the **registration** of the account, unless `register` is false (a trunk that
+      only answers the challenges of its calls): a REGISTER to the primary URI (the
       backup after a failure), answered challenges, a refresh before the granted
       lifetime ends, a retry every `register_retry` seconds, doubled after each
       consecutive failure up to an hour, and an un-REGISTER when the server is
@@ -84,7 +85,7 @@ defmodule Kelix.Mod.SipServers.Link do
 
   @impl GenServer
   def terminate(_reason, state) do
-    if state.reg && state.reg.state == :registered, do: send_register(state, 0)
+    _ = unregister(state)
     :ok
   end
 
@@ -115,6 +116,10 @@ defmodule Kelix.Mod.SipServers.Link do
   @impl GenServer
   def handle_cast({:update, server, resolved}, state) do
     restart = server != state.server
+
+    # The binding made under the old definition is dropped first: it would
+    # otherwise outlive a trunk told to stop registering, or to use another account.
+    state = if restart, do: unregister(state), else: state
 
     state = %{
       state
@@ -227,7 +232,7 @@ defmodule Kelix.Mod.SipServers.Link do
 
   # ── registration (sip-trunk) ────────────────────────────────────────────────
 
-  defp new_registration(%Server{type: "sip-trunk"}) do
+  defp new_registration(%Server{type: "sip-trunk", register: true}) do
     %{
       state: :unregistered,
       callid: SIP.Msg.Ops.generate_branch_value(),
@@ -245,6 +250,13 @@ defmodule Kelix.Mod.SipServers.Link do
   end
 
   defp new_registration(_server), do: nil
+
+  defp unregister(%{reg: %{state: :registered, timer: timer}} = state) do
+    if timer, do: Process.cancel_timer(timer)
+    send_register(state, 0)
+  end
+
+  defp unregister(state), do: state
 
   defp register_soon(%{reg: nil} = state, _ms), do: state
 

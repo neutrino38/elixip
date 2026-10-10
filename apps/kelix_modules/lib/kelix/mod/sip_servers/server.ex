@@ -24,13 +24,13 @@ defmodule Kelix.Mod.SipServers.Server do
   # Which fields belong to which type. A field set on a type that does not use it
   # is refused rather than ignored: it is a misunderstanding worth saying.
   @proxy_only ~w(ext_domain_aliases probe_remote_aors probe_interval aors)
-  @trunk_only ~w(register_expires register_retry auth_username auth_realm auth_password)
+  @trunk_only ~w(register register_expires register_retry auth_username auth_realm auth_password)
   @ext_domain_types ~w(sip-proxy sip-trunk)
 
   @fields ~w(domain slug type primary_uri backup_uri use_dns_srv send_keepalive
              initiate_connection ha_mode ext_domain ext_domain_aliases probe_remote_aors
-             probe_interval aors register_expires register_retry auth_username auth_realm
-             auth_password)
+             probe_interval aors register register_expires register_retry auth_username
+             auth_realm auth_password)
 
   @type t :: %__MODULE__{}
 
@@ -48,6 +48,7 @@ defmodule Kelix.Mod.SipServers.Server do
             probe_remote_aors: false,
             probe_interval: 60,
             aors: [],
+            register: true,
             register_expires: 600,
             register_retry: 30,
             auth_username: nil,
@@ -92,6 +93,7 @@ defmodule Kelix.Mod.SipServers.Server do
          {:ok, s} <- put_bool(s, args, "probe_remote_aors"),
          {:ok, s} <- put_pos_int(s, args, "probe_interval"),
          {:ok, s} <- put_list(s, args, "aors", &String.downcase/1),
+         {:ok, s} <- put_bool(s, args, "register"),
          {:ok, s} <- put_pos_int(s, args, "register_expires"),
          {:ok, s} <- put_pos_int(s, args, "register_retry"),
          {:ok, s} <- put_string(s, args, "auth_username", & &1),

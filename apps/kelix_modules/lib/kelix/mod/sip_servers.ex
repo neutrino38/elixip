@@ -145,8 +145,8 @@ defmodule Kelix.Mod.SipServers do
           kind: :detail,
           fields: ~w(domain slug type primary_uri backup_uri use_dns_srv send_keepalive
                initiate_connection ha_mode ext_domain ext_domain_aliases probe_remote_aors
-               probe_interval aors register_expires register_retry auth_username auth_realm auth
-               reachability registration)
+               probe_interval aors register register_expires register_retry auth_username auth_realm
+               auth reachability registration)
         },
         help: "Show one SIP server (never its credentials)"
       },
