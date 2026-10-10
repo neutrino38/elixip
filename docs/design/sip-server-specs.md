@@ -288,6 +288,13 @@ Nouveau module kelixip chargeable `Kelix.Mod.SipServers`
 
 ## Functions
 
+Every facade takes the script's context (or a domain name) first, as the other
+modules' do: a server belongs to one domain, and `sip_ctx.domain` is the domain the
+Router picked. So the functions below are, as implemented,
+`matches_server(sip_ctx, req)`, `find_server(sip_ctx, req)` and
+`forward(sip_ctx, req, slug)`; the latter returns `{newreq, peer}` or `{:error,
+:not_found | :not_resolved}`.
+
 A server is handed to the B2BUA as a `%SIP.B2bua.Peer{}` (`SIPSessionB2bua.ex`), the
 struct the outbound leg already consumes; no new peer type is introduced.
 

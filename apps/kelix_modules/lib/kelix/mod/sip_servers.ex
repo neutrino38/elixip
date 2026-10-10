@@ -34,7 +34,18 @@ defmodule Kelix.Mod.SipServers do
   @behaviour Kelix.Module
   require Logger
 
-  alias Kelix.Mod.SipServers.{Server, Store}
+  alias Kelix.Mod.SipServers.{Resolution, Route, Server, Store}
+
+  # Read by the facades straight from the script's process: recognising where a
+  # request comes from must not queue behind a kelictl command.
+  @servers_table :kelix_sip_servers
+  @addr_table :kelix_sip_servers_addr
+
+  # How often a resolution is redone: its TTL, within these bounds; and how soon
+  # after a failure.
+  @min_refresh_s 30
+  @max_refresh_s 3_600
+  @retry_ms 60_000
 
   @config_keys ~w(module server_file)
 
@@ -63,7 +74,8 @@ defmodule Kelix.Mod.SipServers do
   def validate_config(_), do: {:error, "block must be a table"}
 
   @impl Kelix.Module
-  def describe(), do: %{version: "1.0", exports: []}
+  def describe(),
+    do: %{version: "1.0", exports: [matches_server: 2, find_server: 2, forward: 3]}
 
   @server_path "/servers/:domain/:slug"
 
@@ -168,9 +180,100 @@ defmodule Kelix.Mod.SipServers do
 
   # ── facades ──────────────────────────────────────────────────────────────────
 
+  @doc """
+  Which of the domain's servers `req` comes from: `{slug, %SIP.B2bua.Peer{}}`, the
+  peer being where that server is answered, or `:no_match`.
+
+  A server is recognised by the source address and transport of the request,
+  compared with what its URIs resolved to — never by the source port, which a
+  connected transport picks at random. An address two servers of the domain have
+  come to share answers `:no_match`.
+
+  Recognising is not trusting: what the request is worth (reject it, challenge
+  it, accept it, keep its P-Asserted-Identity) is the script's decision.
+
+      case Kelix.Mod.SipServers.matches_server(sip_ctx, req) do
+        {_slug, _peer} -> trust_asserted_identity(req)
+        :no_match -> ...
+      end
+  """
+  @spec matches_server(%SIP.Context{} | String.t(), map()) ::
+          {String.t(), %SIP.B2bua.Peer{}} | :no_match
+  def matches_server(ctx_or_domain, req) when is_map(req) do
+    domain = domain_of(ctx_or_domain)
+
+    with {transport, ip, _port} <- SIP.Msg.Ops.source_flow(req),
+         [{_, entries}] when is_list(entries) <- lookup(@addr_table, {domain, ip}),
+         {slug, _t} <- Enum.find(entries, fn {_slug, t} -> t == transport end),
+         [{_, server}] <- lookup(@servers_table, {domain, slug}) do
+      {slug, Route.peer(server)}
+    else
+      _ -> :no_match
+    end
+  end
+
+  @doc """
+  The server a request is addressed to, from the host of its Request-URI: a
+  `sip-proxy` by its `ext_domain` and aliases, a `sip-application` by the host of
+  its URIs. The slug to hand to `forward/3`, or `:no_match`; a trunk is never
+  found this way.
+  """
+  @spec find_server(%SIP.Context{} | String.t(), map()) :: String.t() | :no_match
+  def find_server(ctx_or_domain, req) when is_map(req) do
+    domain = domain_of(ctx_or_domain)
+
+    with %SIP.Uri{domain: host} when is_binary(host) <- Map.get(req, :ruri),
+         host = String.downcase(host),
+         %Server{slug: slug} <-
+           Enum.find(servers_of(domain), &(&1.type != "sip-trunk" and host in Server.claims(&1))) do
+      slug
+    else
+      _ -> :no_match
+    end
+  end
+
+  @doc """
+  `{newreq, %SIP.B2bua.Peer{}}` to forward `req` to the server `slug` of the
+  domain — the request as that server expects it, and the peer to hand to
+  `b2bua_forward`. `{:error, :not_found}` for an unknown server, `{:error,
+  :not_resolved}` for a trunk whose addresses are not known yet (see
+  `Kelix.Mod.SipServers.Route`).
+  """
+  @spec forward(%SIP.Context{} | String.t(), map(), String.t()) ::
+          {map(), %SIP.B2bua.Peer{}} | {:error, term}
+  def forward(ctx_or_domain, req, slug) when is_map(req) and is_binary(slug) do
+    case Kelix.Module.safe_call(
+           __MODULE__,
+           {:forward, domain_of(ctx_or_domain), String.downcase(slug)}
+         ) do
+      {:ok, server, resolved, turn} -> Route.forward(req, server, resolved, turn)
+      {:error, _} = error -> error
+    end
+  end
+
   @doc "The servers of `domain`, or every server when `domain` is nil."
   @spec servers(String.t() | nil) :: [Server.t()] | {:error, :down | :timeout}
   def servers(domain \\ nil), do: Kelix.Module.safe_call(__MODULE__, {:servers, domain})
+
+  defp domain_of(%SIP.Context{domain: domain}), do: domain_of(domain)
+  defp domain_of(domain) when is_binary(domain), do: String.downcase(domain)
+  defp domain_of(_), do: nil
+
+  defp servers_of(domain) do
+    for {{d, _slug}, server} <- table(@servers_table), d == domain, do: server
+  end
+
+  defp lookup(table, key) do
+    :ets.lookup(table, key)
+  rescue
+    ArgumentError -> []
+  end
+
+  defp table(table) do
+    :ets.tab2list(table)
+  rescue
+    ArgumentError -> []
+  end
 
   # ── service ──────────────────────────────────────────────────────────────────
 
@@ -178,8 +281,20 @@ defmodule Kelix.Mod.SipServers do
 
   @impl GenServer
   def init(config) do
+    :ets.new(@servers_table, [:named_table, :protected, read_concurrency: true])
+    :ets.new(@addr_table, [:named_table, :protected, read_concurrency: true])
     {file, servers} = restore(Map.get(config, "server_file"))
-    {:ok, %{file: file, servers: servers}}
+
+    state = %{
+      file: file,
+      servers: %{},
+      resolved: %{},
+      gen: %{},
+      turns: %{},
+      conflicts: MapSet.new()
+    }
+
+    {:ok, sync(state, %{state | servers: servers})}
   end
 
   @impl GenServer
@@ -189,11 +304,43 @@ defmodule Kelix.Mod.SipServers do
 
   def handle_call({:control, command, args}, _from, state) do
     case control(command, args, state) do
-      {:ok, result, state} -> {:reply, {:ok, result}, persist(state)}
+      {:ok, result, new_state} -> {:reply, {:ok, result}, state |> sync(new_state) |> persist()}
       {:ok, result} -> {:reply, {:ok, result}, state}
       {:error, _} = error -> {:reply, error, state}
     end
   end
+
+  def handle_call({:forward, domain, slug}, _from, state) do
+    case Map.get(state.servers, {domain, slug}) do
+      %Server{} = server ->
+        key = {domain, slug}
+        turn = Map.get(state.turns, key, 0)
+        resolved = state.resolved |> Map.get(key, %{}) |> Map.get(:targets, %{})
+
+        {:reply, {:ok, server, resolved, turn},
+         %{state | turns: Map.put(state.turns, key, turn + 1)}}
+
+      nil ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl GenServer
+  def handle_info({:resolved, key, gen, result}, state) do
+    if Map.get(state.gen, key) == gen and Map.has_key?(state.servers, key) do
+      {:noreply, state |> apply_resolution(key, gen, result) |> rebuild_index()}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:refresh, key, gen}, state) do
+    if Map.get(state.gen, key) == gen and Map.has_key?(state.servers, key),
+      do: {:noreply, resolve(state, key)},
+      else: {:noreply, state}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
 
   # ── commands ─────────────────────────────────────────────────────────────────
 
@@ -344,6 +491,101 @@ defmodule Kelix.Mod.SipServers do
       module: __MODULE__,
       message: "sip server #{server.slug}@#{server.domain} (#{server.type}) #{what}"
     )
+  end
+
+  # ── tables and resolution ────────────────────────────────────────────────────
+
+  # Bring the tables in line with a new set of servers: a server added or changed
+  # is written and resolved again, a server gone is dropped with its addresses.
+  defp sync(old, new) do
+    gone = Map.keys(old.servers) -- Map.keys(new.servers)
+    changed = for {k, s} <- new.servers, Map.get(old.servers, k) != s, do: k
+
+    Enum.each(gone, &:ets.delete(@servers_table, &1))
+    Enum.each(changed, &:ets.insert(@servers_table, {&1, Map.fetch!(new.servers, &1)}))
+
+    new = %{
+      new
+      | resolved: Map.drop(new.resolved, gone),
+        gen: Map.drop(new.gen, gone),
+        turns: Map.drop(new.turns, gone)
+    }
+
+    changed |> Enum.reduce(new, &resolve(&2, &1)) |> rebuild_index()
+  end
+
+  # Off the service's process: a DNS answer can take seconds, and kelictl must not
+  # wait for it. The generation discards an answer overtaken by a newer question.
+  defp resolve(state, key) do
+    gen = make_ref()
+    server = Map.fetch!(state.servers, key)
+    owner = self()
+    resolver = resolver()
+    Task.start(fn -> send(owner, {:resolved, key, gen, resolver.resolve(server)}) end)
+    %{state | gen: Map.put(state.gen, key, gen)}
+  end
+
+  defp resolver(), do: Application.get_env(:kelix_modules, :sip_servers_resolver, Resolution)
+
+  defp apply_resolution(state, key, gen, {:ok, targets, ttl}) do
+    unless ttl == :infinity do
+      delay = ttl |> max(@min_refresh_s) |> min(@max_refresh_s)
+      Process.send_after(self(), {:refresh, key, gen}, delay * 1000)
+    end
+
+    %{state | resolved: Map.put(state.resolved, key, %{targets: targets})}
+  end
+
+  # A failed resolution keeps the last answer — an address that worked is a better
+  # guess than none — and asks again soon.
+  defp apply_resolution(state, {domain, slug} = key, gen, {:error, reason}) do
+    Logger.warning(
+      module: __MODULE__,
+      message: "sip server #{slug}@#{domain}: resolution failed (#{inspect(reason)}), retrying"
+    )
+
+    Process.send_after(self(), {:refresh, key, gen}, @retry_ms)
+    state
+  end
+
+  # `{domain, ip} => [{slug, transport}]`, or `:ambiguous` when two servers of a
+  # domain resolved to one address: matches_server/2 then recognises neither, and
+  # the alarm names both — once, when the overlap appears.
+  defp rebuild_index(state) do
+    pairs =
+      for {{domain, slug}, %{targets: targets}} <- state.resolved,
+          {_uri, addrs} <- targets,
+          {transport, ip, _port} <- addrs,
+          uniq: true,
+          do: {{domain, ip}, {slug, transport}}
+
+    index = Enum.group_by(pairs, &elem(&1, 0), &elem(&1, 1))
+
+    conflicts =
+      for {{domain, ip}, entries} <- index,
+          slugs = entries |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.sort(),
+          length(slugs) > 1,
+          into: MapSet.new(),
+          do: {domain, ip, slugs}
+
+    for {domain, ip, slugs} <- MapSet.difference(conflicts, state.conflicts) do
+      Logger.error(
+        module: __MODULE__,
+        message:
+          "sip servers #{Enum.join(slugs, ", ")} of #{domain} resolve to the same address " <>
+            "#{:inet.ntoa(ip)}: requests from it are recognised as neither"
+      )
+    end
+
+    ambiguous = MapSet.new(conflicts, fn {domain, ip, _} -> {domain, ip} end)
+
+    :ets.delete_all_objects(@addr_table)
+
+    for {addr, entries} <- index do
+      :ets.insert(@addr_table, {addr, if(addr in ambiguous, do: :ambiguous, else: entries)})
+    end
+
+    %{state | conflicts: conflicts}
   end
 
   # ── persistence ──────────────────────────────────────────────────────────────
