@@ -376,11 +376,22 @@ The drop and the re-add are **in the same function**, and that is the guarantee:
 the only PAI that can leave this node is one that function wrote. Nothing to
 compare, nothing to trust at the call site.
 
-The cost is that a deployment putting kelixip behind a trusted proxy — where RFC
-3325 §5 would let an inbound assertion through — cannot say so. That is a
-trust-domain policy needing configuration to be stated safely, and the safe
-default is the one that does not launder. When a cascaded deployment needs it, it
-arrives as `[domain] trusted_peers`, not as a hole in the denylist.
+A deployment behind a trusted peer — where RFC 3325 §5 lets an inbound assertion
+through — says so in its script, not in configuration:
+
+```elixir
+case Kelix.Mod.SipServers.matches_server(req) do
+  {_slug, _peer} -> trust_asserted_identity(req)
+  :no_match -> ...
+end
+```
+
+`SIP.Context.trust_asserted_identity/2` records the inbound PAI in the context,
+display name kept; the forward then asserts it like any other. The guarantee holds:
+the inbound header still never crosses a leg, and the only PAI that leaves is one
+recorded in the context. Recognising a peer and trusting it are two steps, and the
+second is always the script's. A request with no `sip:` PAI leaves the context
+unchanged; `assert_identity(nil)` remains the explicit withdrawal.
 
 ### 4.3 Where the assertion comes from
 
