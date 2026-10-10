@@ -275,6 +275,22 @@ The From is rewritten to the trunk account's identity: the user part of the trun
 at `ext_domain` when it is set, else at the trunk host. The caller's identity, when the
 script asserts one, travels in the P-Asserted-Identity, not in the From.
 
+As implemented (L4): registration lives in the server's process (`SipServers.Link`),
+the same one that tracks reachability, written over `SIP.Transac` directly rather than
+`SIP.Session.RegisterUAC`, which drives a dialog for a scenario. The REGISTER goes to
+the primary URI without its user part (to `ext_domain`, sent where the URI resolved,
+when it is set), From and To are the account, the Contact asks for `register_expires`.
+A 2xx registers for the lifetime granted to our Contact (`SIP.Msg.Ops.granted_expires/3`),
+refreshed at three quarters of it. A 401/407 is answered once from the HA1
+(`SipServers.Credentials`); a second one, a challenge for a realm other than
+`auth_realm` (logged as an error naming both), any other final response or no answer
+is a failure: retry after `register_retry` seconds, doubled after each consecutive
+failure up to an hour, on the next URI. Deleting the server, or stopping the node,
+sends an un-REGISTER. The process is also the peers' `credentials` when the trunk has a
+password, so a challenged INVITE or BYE is answered the same way. `server.show`
+reports `registration` (`state`: `unregistered`, `registering`, `registered`,
+`failed`, and the last `error`). Every trunk registers.
+
 
 # Module et fonctions
 
@@ -410,10 +426,13 @@ As implemented (L3): each server has a process of its own (`SipServers.Link`), t
 `keepalive_interval` seconds (`[module.sip_servers]`, default 30). Any final response
 brings the URI up except `503`; no answer, or no transport, takes it down. A URI never
 probed nor heard from is `unknown` and counts as reachable. Proof of life on the
-inbound side is a request `matches_server/2` recognised: an OPTIONS the node answers
-itself (`Kelix.Options`) reaches no script, so a server that only pings us is seen
-alive only if a `[[domain.options]]` script calls `matches_server/2`. `server.show`
-reports each URI's state under `reachability`.
+inbound side is a request `matches_server/2` recognised, and nothing else: the
+script owns the keepalives. An OPTIONS from a server reaches a script through a
+`[[domain.options]]` rule, and that script recognises it with `matches_server/2` and
+answers it; without such a rule the node answers it (`Kelix.Options`) and the server is
+not told anything. No core hook feeds the module behind the script's back: a server is
+a declaration about the remote host, not about the node. `server.show` reports each
+URI's state under `reachability`.
 
 # Events and metrics (kelescope)
 

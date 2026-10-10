@@ -33,8 +33,11 @@ defmodule Kelix.Mod.SipServers.Route do
           {map(), %Peer{}} | {:error, :not_resolved}
   def forward(req, %Server{} = server, resolved, turn \\ 0, link \\ nil) do
     case shape(req, server, resolved, turn) do
-      {newreq, %Peer{} = peer} -> {newreq, %Peer{peer | trunk_pid: link}}
-      error -> error
+      {newreq, %Peer{} = peer} ->
+        {newreq, %Peer{peer | trunk_pid: link, credentials: credentials(server, link)}}
+
+      error ->
+        error
     end
   end
 
@@ -61,8 +64,19 @@ defmodule Kelix.Mod.SipServers.Route do
   @spec peer(Server.t(), pid() | nil) :: %Peer{}
   def peer(%Server{} = server, link \\ nil) do
     ruri = if server.type == "sip-proxy", do: :keep, else: :peer
-    %Peer{peer(server, uris(server), ruri, server.use_dns_srv) | trunk_pid: link}
+
+    %Peer{
+      peer(server, uris(server), ruri, server.use_dns_srv)
+      | trunk_pid: link,
+        credentials: credentials(server, link)
+    }
   end
+
+  # Only a trunk answers a challenge, and only with a password entered for it.
+  defp credentials(%Server{type: "sip-trunk", auth_ha1: [_ | _]}, link) when is_pid(link),
+    do: link
+
+  defp credentials(_server, _link), do: nil
 
   defp peer(_server, targets, ruri, use_srv) do
     %Peer{uris: targets, fork: :serial, ruri: ruri, use_srv: use_srv}

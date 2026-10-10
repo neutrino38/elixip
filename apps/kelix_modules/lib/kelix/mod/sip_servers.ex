@@ -145,7 +145,8 @@ defmodule Kelix.Mod.SipServers do
           kind: :detail,
           fields: ~w(domain slug type primary_uri backup_uri use_dns_srv send_keepalive
                initiate_connection ha_mode ext_domain ext_domain_aliases probe_remote_aors
-               probe_interval aors register_expires register_retry auth_username auth_realm auth)
+               probe_interval aors register_expires register_retry auth_username auth_realm auth
+               reachability registration)
         },
         help: "Show one SIP server (never its credentials)"
       },
@@ -398,7 +399,11 @@ defmodule Kelix.Mod.SipServers do
 
   defp control("server.show", args, state) do
     with {:ok, server} <- fetch(state, args) do
-      {:ok, Map.put(Server.public(server), :reachability, reachability(state, server))}
+      {:ok,
+       server
+       |> Server.public()
+       |> Map.put(:reachability, reachability(state, server))
+       |> Map.put(:registration, registration(state, server))}
     end
   end
 
@@ -623,6 +628,20 @@ defmodule Kelix.Mod.SipServers do
 
     :ets.insert(@servers_table, {key, server, pid})
     %{state | links: Map.put(state.links, key, pid)}
+  end
+
+  defp registration(state, server) do
+    case Map.get(state.links, {server.domain, server.slug}) do
+      pid when is_pid(pid) ->
+        try do
+          Link.registration(pid)
+        catch
+          :exit, _ -> nil
+        end
+
+      _ ->
+        nil
+    end
   end
 
   defp reachability(state, server) do

@@ -146,6 +146,42 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The lifetime a registrar granted `contact` in its 2xx to a REGISTER (RFC 3261
+  §10.2.4): the `expires` of the Contact it lists back that is ours, else its
+  `Expires` header, else `requested` — what we asked for, as a registrar that says
+  nothing grants it.
+
+  A 2xx lists every binding of the AOR, other devices' included, so ours is picked
+  by address (user, host and port), never by position.
+  """
+  @spec granted_expires(map(), %SIP.Uri{}, non_neg_integer()) :: non_neg_integer()
+  def granted_expires(resp, %SIP.Uri{} = contact, requested) when is_map(resp) do
+    header = expires_header(resp)
+
+    ours =
+      resp
+      |> Map.get(:contact)
+      |> List.wrap()
+      |> Enum.find(&same_binding?(&1, contact))
+
+    case ours do
+      %SIP.Uri{} -> contact_expires(ours, header, requested)
+      nil -> header || requested
+    end
+  end
+
+  defp same_binding?(%SIP.Uri{} = a, %SIP.Uri{} = b) do
+    a.userpart == b.userpart and host_key(a.domain) == host_key(b.domain) and
+      SIP.Uri.target_port(a) == SIP.Uri.target_port(b)
+  end
+
+  defp same_binding?(_a, _b), do: false
+
+  defp host_key(host) when is_binary(host), do: String.downcase(host)
+  defp host_key(host) when is_tuple(host), do: host |> :inet.ntoa() |> to_string()
+  defp host_key(other), do: other
+
+  @doc """
   True when the request drops every binding it mentions — i.e. its longest-lived
   binding is 0. A request that drops one contact and refreshes another is *not* an
   un-registration.

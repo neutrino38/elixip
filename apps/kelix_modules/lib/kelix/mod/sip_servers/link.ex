@@ -19,16 +19,30 @@ defmodule Kelix.Mod.SipServers.Link do
 
   A URI never probed and never heard from is `:unknown`, and counts as reachable:
   a missing liveness source must not make a working server unreachable.
+
+  For a `sip-trunk` it is also (lot L4):
+
+    * the **`credentials`** of its peers, answering the B2BUA's `{:authorize, code,
+      challenge, method, digest_uri}` from the stored HA1
+      (`Kelix.Mod.SipServers.Credentials`) — a challenge for a realm other than
+      `auth_realm` is refused and raises an alarm naming both;
+    * the **registration** of the account: a REGISTER to the primary URI (the
+      backup after a failure), answered challenges, a refresh before the granted
+      lifetime ends, a retry every `register_retry` seconds, doubled after each
+      consecutive failure up to an hour, and an un-REGISTER when the server is
+      deleted or the node stops.
   """
   use GenServer
   require Logger
 
-  alias Kelix.Mod.SipServers.Server
+  alias Kelix.Mod.SipServers.{Credentials, Server}
 
   @type state_name :: :unknown | :up | :down
 
   @default_interval_s 30
   @options_timeout_s 32
+  @register_timeout_s 32
+  @max_retry_s 3_600
 
   # ── API ─────────────────────────────────────────────────────────────────────
 
@@ -44,10 +58,15 @@ defmodule Kelix.Mod.SipServers.Link do
   @doc "`%{uri => :unknown | :up | :down}`."
   def states(pid), do: GenServer.call(pid, :states)
 
+  @doc "A trunk's registration, as `server.show` reports it; `nil` for another type."
+  def registration(pid), do: GenServer.call(pid, :registration)
+
   # ── GenServer ───────────────────────────────────────────────────────────────
 
   @impl GenServer
   def init(opts) do
+    # So a trunk can say goodbye (an un-REGISTER) when it is stopped.
+    Process.flag(:trap_exit, true)
     server = Keyword.fetch!(opts, :server)
 
     state = %{
@@ -56,10 +75,17 @@ defmodule Kelix.Mod.SipServers.Link do
       interval_ms: Keyword.get(opts, :interval, @default_interval_s) * 1000,
       states: initial_states(server, %{}),
       probes: %{},
-      timer: nil
+      timer: nil,
+      reg: new_registration(server)
     }
 
-    {:ok, schedule(state, 0)}
+    {:ok, state |> schedule(0) |> register_soon(0)}
+  end
+
+  @impl GenServer
+  def terminate(_reason, state) do
+    if state.reg && state.reg.state == :registered, do: send_register(state, 0)
+    :ok
   end
 
   @impl GenServer
@@ -75,6 +101,17 @@ defmodule Kelix.Mod.SipServers.Link do
 
   def handle_call(:states, _from, state), do: {:reply, state.states, state}
 
+  def handle_call(:registration, _from, %{reg: nil} = state), do: {:reply, nil, state}
+
+  def handle_call(:registration, _from, %{reg: reg} = state) do
+    {:reply, %{state: Atom.to_string(reg.state), error: reg.error}, state}
+  end
+
+  def handle_call({:authorize, code, challenge, method, digest_uri}, _from, state)
+      when code in [401, 407] do
+    {:reply, authorize(state, challenge, method, digest_uri), state}
+  end
+
   @impl GenServer
   def handle_cast({:update, server, resolved}, state) do
     restart = server != state.server
@@ -86,7 +123,14 @@ defmodule Kelix.Mod.SipServers.Link do
         states: initial_states(server, state.states)
     }
 
-    {:noreply, if(restart, do: schedule(state, 0), else: state)}
+    # A changed definition is registered again from scratch: the account, the
+    # realm or the registrar may be what changed.
+    state =
+      if restart,
+        do: %{schedule(state, 0) | reg: new_registration(server)} |> register_soon(0),
+        else: state
+
+    {:noreply, state}
   end
 
   def handle_cast({:seen, transport, ip}, state) do
@@ -108,6 +152,22 @@ defmodule Kelix.Mod.SipServers.Link do
         else: state
 
     {:noreply, schedule(state, state.interval_ms)}
+  end
+
+  def handle_info(:register, %{reg: nil} = state), do: {:noreply, state}
+
+  def handle_info(:register, state) do
+    state = %{state | reg: %{state.reg | timer: nil}}
+    {:noreply, send_register(state, state.server.register_expires)}
+  end
+
+  def handle_info({:response, %{response: code} = resp, tid}, %{reg: %{tid: tid}} = state)
+      when is_integer(code) and code >= 200 do
+    {:noreply, registered(state, resp)}
+  end
+
+  def handle_info({:transaction_timeout, _timer, tid, _req, _module}, %{reg: %{tid: tid}} = state) do
+    {:noreply, register_failed(state, "REGISTER not answered")}
   end
 
   def handle_info({:response, %{response: code}, tid}, state)
@@ -136,6 +196,212 @@ defmodule Kelix.Mod.SipServers.Link do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # ── credentials ─────────────────────────────────────────────────────────────
+
+  defp authorize(state, challenge, method, digest_uri) do
+    case Credentials.authorize(state.server, challenge, method, digest_uri) do
+      {:ok, _params} = ok ->
+        ok
+
+      {:error, {:realm_mismatch, expected, received}} = error ->
+        Logger.error(
+          module: __MODULE__,
+          message:
+            "sip server #{name(state)}: challenged for realm #{inspect(received)}, but its " <>
+              "credentials were entered for #{inspect(expected)} — enter the password " <>
+              "again with auth_realm=#{received}"
+        )
+
+        error
+
+      error ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "sip server #{name(state)}: cannot answer the challenge (#{inspect(error)})"
+        )
+
+        error
+    end
+  end
+
+  # ── registration (sip-trunk) ────────────────────────────────────────────────
+
+  defp new_registration(%Server{type: "sip-trunk"}) do
+    %{
+      state: :unregistered,
+      callid: SIP.Msg.Ops.generate_branch_value(),
+      tag: SIP.Msg.Ops.generate_from_or_to_tag(),
+      cseq: 0,
+      target: 0,
+      tid: nil,
+      sent: nil,
+      expires: nil,
+      auth_tried: false,
+      failures: 0,
+      timer: nil,
+      error: nil
+    }
+  end
+
+  defp new_registration(_server), do: nil
+
+  defp register_soon(%{reg: nil} = state, _ms), do: state
+
+  defp register_soon(%{reg: reg} = state, ms) do
+    if reg.timer, do: Process.cancel_timer(reg.timer)
+    %{state | reg: %{reg | timer: Process.send_after(self(), :register, ms)}}
+  end
+
+  defp send_register(state, expires, auth \\ nil) do
+    reg = %{state.reg | cseq: state.reg.cseq + 1, expires: expires}
+    msg = register_msg(state.server, reg, state.resolved, expires, auth)
+
+    case SIP.Transac.start_uac_transaction(msg, @register_timeout_s) do
+      {:ok, tid, sent} ->
+        reg = %{reg | tid: tid, sent: sent, auth_tried: auth != nil}
+        reg = if reg.state == :registered, do: reg, else: %{reg | state: :registering}
+        %{state | reg: reg}
+
+      other ->
+        register_failed(%{state | reg: reg}, "REGISTER could not be sent (#{inspect(other)})")
+    end
+  end
+
+  defp registered(state, %{response: code} = resp) when code in 200..299 do
+    reg = state.reg
+    granted = SIP.Msg.Ops.granted_expires(resp, reg.sent.contact, reg.expires)
+
+    if reg.state != :registered and reg.expires > 0 do
+      Logger.info(
+        module: __MODULE__,
+        message: "sip server #{name(state)}: registered for #{granted} s"
+      )
+    end
+
+    reg = %{reg | tid: nil, auth_tried: false, failures: 0, error: nil}
+
+    if reg.expires == 0 do
+      %{state | reg: %{reg | state: :unregistered}}
+    else
+      # Refreshed ahead of the end, as RFC 3261 §10.2.4 leaves it to the client.
+      refresh = max(div(granted * 3, 4), 1)
+      register_soon(%{state | reg: %{reg | state: :registered}}, refresh * 1000)
+    end
+  end
+
+  defp registered(state, %{response: code} = resp) when code in [401, 407] do
+    challenge =
+      if code == 401,
+        do: Map.get(resp, :wwwauthenticate),
+        else: Map.get(resp, :proxyauthenticate)
+
+    cond do
+      state.reg.auth_tried ->
+        register_failed(state, "credentials refused (#{code} again)")
+
+      not is_map(challenge) ->
+        register_failed(state, "#{code} without a challenge")
+
+      true ->
+        {:ok, digest_uri} = SIP.Uri.serialize_ruri(state.reg.sent.ruri)
+
+        case authorize(state, challenge, :REGISTER, digest_uri) do
+          {:ok, params} ->
+            header = if code == 401, do: :authorization, else: :proxyauthorization
+            send_register(state, state.reg.expires, {header, params})
+
+          {:error, reason} ->
+            register_failed(state, "cannot answer the challenge (#{inspect(reason)})")
+        end
+    end
+  end
+
+  defp registered(state, %{response: code}),
+    do: register_failed(state, "REGISTER answered #{code}")
+
+  # Retry later, on the next URI, waiting twice as long after each consecutive
+  # failure — a registrar refusing us is not helped by being asked every second.
+  defp register_failed(state, why) do
+    reg = state.reg
+    uris = uris(state.server)
+
+    if reg.state != :failed or reg.error != why do
+      Logger.warning(
+        module: __MODULE__,
+        message: "sip server #{name(state)}: registration failed (#{why})"
+      )
+    end
+
+    delay = min(state.server.register_retry * Integer.pow(2, min(reg.failures, 12)), @max_retry_s)
+
+    reg = %{
+      reg
+      | state: :failed,
+        tid: nil,
+        auth_tried: false,
+        failures: reg.failures + 1,
+        target: rem(reg.target + 1, max(length(uris), 1)),
+        error: why
+    }
+
+    register_soon(%{state | reg: reg}, delay * 1000)
+  end
+
+  # REGISTER sip:<registrar> with the account as From and To. With an
+  # `ext_domain`, the registrar is named by it and reached where the trunk's URI
+  # resolved, as a call is (`Kelix.Mod.SipServers.Route`).
+  defp register_msg(server, reg, resolved, expires, auth) do
+    uri = Enum.at(uris(server), reg.target) || server.primary_uri
+    {:ok, parsed} = SIP.Uri.parse(uri)
+    account = parsed.userpart
+    host = server.ext_domain || parsed.domain
+
+    ruri =
+      case {server.ext_domain, Map.get(resolved, uri, [])} do
+        {nil, _} ->
+          %SIP.Uri{parsed | userpart: nil}
+
+        {ext, [{transport, ip, port} | _]} ->
+          %SIP.Uri{
+            scheme: parsed.scheme,
+            domain: ext,
+            destip: ip,
+            destport: port,
+            destproto: transport
+          }
+
+        {ext, []} ->
+          %SIP.Uri{parsed | userpart: nil, domain: ext}
+      end
+
+    aor = %SIP.Uri{scheme: "sip:", userpart: account, domain: host}
+
+    msg = %{
+      "Max-Forwards" => "70",
+      method: :REGISTER,
+      ruri: ruri,
+      from: %SIP.Uri{aor | hparams: %{"tag" => reg.tag}},
+      to: aor,
+      contact: %SIP.Uri{
+        scheme: "sip:",
+        userpart: account,
+        domain: "0.0.0.0",
+        hparams: %{"expires" => Integer.to_string(expires)}
+      },
+      callid: reg.callid,
+      cseq: [reg.cseq, :REGISTER],
+      useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
+      contentlength: 0
+    }
+
+    case auth do
+      {header, params} -> Map.put(msg, header, params)
+      nil -> msg
+    end
+  end
+
+  defp name(state), do: "#{state.server.slug}@#{state.server.domain}"
 
   # ── probing ─────────────────────────────────────────────────────────────────
 
@@ -198,8 +464,7 @@ defmodule Kelix.Mod.SipServers.Link do
 
         Logger.log(level,
           module: __MODULE__,
-          message:
-            "sip server #{state.server.slug}@#{state.server.domain}: #{uri} #{old} -> #{new} (#{why})"
+          message: "sip server #{name(state)}: #{uri} #{old} -> #{new} (#{why})"
         )
 
         %{state | states: Map.put(state.states, uri, new)}
