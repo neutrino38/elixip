@@ -49,9 +49,13 @@ What to add:
 - `false` skips the target without sending anything: the hunt records
   `{:serial_not_reachable, uri, :down, at}` and moves to the next one, exactly as
   after a transport error. Every target down ends the hunt like an exhausted one.
-- No answer (process dead, call timed out) counts as reachable: the hunt then
-  behaves as it does today. A missing reachability source must not make a working
-  server unreachable.
+- No answer (process dead, or no reply within 500 ms) counts as reachable: the
+  hunt then behaves as it does today. A missing reachability source must not make
+  a working server unreachable.
+- Every target down before anything was sent fails the forward with `lasterr`
+  `{:b2bua, :no_reachable_target}`; the script reads it like any failed forward.
+- Targets handed out by a `provider` are not asked: the provider already chose
+  them.
 - `trunk_pid: nil` keeps the current behaviour; nothing changes for a peer built
   without it (registrar contacts, static lists, providers).
 - Tests in the B2BUA suite: a target answered `false` is skipped with no INVITE

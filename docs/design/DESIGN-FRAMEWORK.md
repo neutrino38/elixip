@@ -210,6 +210,7 @@ happens *below* the leg, inside its dialog (§5.5). Generalizing to N legs
 | `retry_on` | which final codes advance the hunt (408 included — a dead branch is reported as a synthetic 408) |
 | `outbound_proxy`, `use_srv` | next hop and SRV expansion / failover |
 | `profile`, `fallback_on` | the offer ladder (§5.8) |
+| `trunk_pid` | a process asked `{:reachable?, uri}` before each static target; `false` skips the target unsent |
 
 ### 5.5 Forking — the kamailio TM model
 

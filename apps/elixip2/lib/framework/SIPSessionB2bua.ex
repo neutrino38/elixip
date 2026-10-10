@@ -48,8 +48,12 @@ defmodule SIP.B2bua.Peer do
       bookkeeping it might relay.
     * `outbound_proxy` — per-peer next hop; `nil` falls back to the global
       `:proxyuri` application env. (P2b-3 — the global one is honoured today.)
-    * `trunk_pid` — reserved for the future trunk process holding reachability
-      state. Ignored in v1.
+    * `trunk_pid` — the process holding the reachability of these targets (a
+      kelixip SIP server, typically). Before a static target is tried it is asked
+      `{:reachable?, uri}`; `false` skips the target without sending anything,
+      as `{:serial_not_reachable, uri, :down, at}`. No answer counts as
+      reachable, and `nil` (the default) asks nothing. Targets handed out by a
+      `provider` are not asked: the provider already chose them.
     * `aor` — the served AOR (`%SIP.Uri{}`) whose registered contacts `uris`
       are, set by the module that grouped them (`Kelix.Mod.Registrar.targets/2`)
       and `nil` for every other peer. The outbound leg is stamped with it at
@@ -1376,15 +1380,34 @@ defmodule SIP.Session.B2bua do
 
         # The first RUNG is dialled now; the rest are kept on the leg for the
         # hunt to walk (§3.1). `fork: :none` keeps them unused.
-        [[target | siblings] | rest] = expand_targets(peer)
-        untried = if peer.fork in [:serial, :parallel], do: rest, else: []
+        rungs = expand_targets(peer)
+        rungs = if peer.fork in [:serial, :parallel], do: rungs, else: Enum.take(rungs, 1)
 
-        case apply_target(fwd, target, peer) do
-          {:error, reason} ->
-            fail(sip_ctx, {:b2bua, reason})
+        case reachable_rungs(peer, rungs) do
+          [] ->
+            # Every target is known to be down: nothing was sent, and the hunt
+            # ends as an exhausted one would.
+            notify_progress(peer, {:serial_exhausted, now()})
+            fail(sip_ctx, {:b2bua, :no_reachable_target})
 
-          {:ok, fwd} ->
-            start_outbound_dialog(sip_ctx, req, fwd, peer, target, siblings, untried, media, opts)
+          [[target | siblings] | untried] ->
+            case apply_target(fwd, target, peer) do
+              {:error, reason} ->
+                fail(sip_ctx, {:b2bua, reason})
+
+              {:ok, fwd} ->
+                start_outbound_dialog(
+                  sip_ctx,
+                  req,
+                  fwd,
+                  peer,
+                  target,
+                  siblings,
+                  untried,
+                  media,
+                  opts
+                )
+            end
         end
     end
   end
@@ -2620,6 +2643,23 @@ defmodule SIP.Session.B2bua do
 
   defp try_next_rung(sip_ctx, resp, %Pending{} = pending, tid) do
     leg = outbound_leg(sip_ctx)
+
+    # Asked again here, not only when the leg was created: a server can go down
+    # while the hunt is ringing the one before it.
+    case reachable_rungs(leg.peer, leg.untried) do
+      [] ->
+        notify_progress(leg.peer, {:serial_exhausted, now()})
+
+        sip_ctx
+        |> put_leg(@outbound_tag, %Leg{leg | untried: []})
+        |> relay_reply(resp, pending, tid)
+
+      untried ->
+        dial_next_rung(sip_ctx, resp, pending, tid, %Leg{leg | untried: untried})
+    end
+  end
+
+  defp dial_next_rung(sip_ctx, resp, %Pending{} = pending, tid, %Leg{} = leg) do
     [rung | rest] = leg.untried
     uris = Enum.map(rung, &branch_uri(%{ruri: leg.fwd_ruri}, &1, leg.peer))
 
@@ -3058,6 +3098,47 @@ defmodule SIP.Session.B2bua do
   # Ordering against the traffic of the next branch is not guaranteed: these come
   # from us, those from the dialog. What is exact is the timestamp, which is what
   # a record of the hunt is built from.
+  # ── Reachability (`trunk_pid`) ───────────────────────────────────────────────
+
+  # How long a reachability question may hold up a call. The answer is a lookup in
+  # the asked process's state; a process that cannot give it this fast is treated
+  # as having no opinion.
+  @reachable_timeout 500
+
+  # The rungs left once every target known to be down is removed, an emptied rung
+  # with it. A skipped target is reported as one the hunt could not reach.
+  defp reachable_rungs(%Peer{trunk_pid: pid} = peer, rungs) when is_pid(pid) do
+    rungs
+    |> Enum.map(fn rung ->
+      Enum.filter(rung, fn target ->
+        up = reachable?(pid, target)
+        unless up, do: notify_progress(peer, {:serial_not_reachable, target, :down, now()})
+        up
+      end)
+    end)
+    |> Enum.reject(&(&1 == []))
+  end
+
+  defp reachable_rungs(_peer, rungs), do: rungs
+
+  # A missing reachability source must not make a working server unreachable: no
+  # answer — the process is gone, or slow — counts as reachable.
+  defp reachable?(pid, target) do
+    case GenServer.call(pid, {:reachable?, target}, @reachable_timeout) do
+      false -> false
+      _ -> true
+    end
+  catch
+    :exit, _ -> true
+  end
+
+  defp notify_progress(%Peer{notify_progress: true}, event) do
+    send(self(), {@outbound_tag, event})
+    :ok
+  end
+
+  defp notify_progress(_peer, _event), do: :ok
+
   defp note_progress(sip_ctx, event) do
     # From the leg, or from the hunt when there is not one yet — a provider can
     # park a caller on {:wait, ms} before anything has been dialled.
