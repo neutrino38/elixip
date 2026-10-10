@@ -325,6 +325,10 @@ Two servers of the same domain cannot share a resolved IP: kelictl and the API r
 to create or modify a server whose addresses overlap another's, since IP and transport
 could not tell them apart.
 
+L1 refuses a host or literal address claimed twice (the hosts of the URIs, a proxy's
+`ext_domain` and aliases); the overlap of *resolved* addresses is checked once
+resolution exists, with L3.
+
 The refusal only guards creation and modification. When a later resolution makes two
 servers of a domain share an IP, `matches_server/1` answers `:no_match` for that IP and
 raises an alarm naming both servers, rather than picking one.
@@ -375,9 +379,14 @@ Appelle B2BUA
 
 Ajout des AOR par commande ou API  
 
-kelictl server <servename> aor add <aor>
-kelictl server <servename> aor rm <aor>
-kelictl server <servename> aor list
+```
+kelictl sip_servers aor.add <domain> <slug> <aor>
+kelictl sip_servers aor.rm <domain> <slug> <aor>
+kelictl sip_servers aor.list <domain> <slug>
+```
+
+A module's commands are `kelictl <module> <command>`, and a server is named by its
+domain and its slug (REST: `/modules/sip_servers/servers/:domain/:slug/aors`).
 
 
 # When a server is down
