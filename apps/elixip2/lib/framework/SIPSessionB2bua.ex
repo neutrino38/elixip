@@ -54,6 +54,12 @@ defmodule SIP.B2bua.Peer do
       as `{:serial_not_reachable, uri, :down, at}`. No answer counts as
       reachable, and `nil` (the default) asks nothing. Targets handed out by a
       `provider` are not asked: the provider already chose them.
+    * `credentials` — the process answering a 401/407 the far end of this leg
+      sends. Asked `{:authorize, code, challenge, method, digest_uri}`, it
+      answers `{:ok, params}` — the `Authorization` / `Proxy-Authorization`
+      parameters, ready — and the request is re-sent once with them. The secret
+      never reaches the framework. `nil` (the default) relays the challenge as
+      before.
     * `aor` — the served AOR (`%SIP.Uri{}`) whose registered contacts `uris`
       are, set by the module that grouped them (`Kelix.Mod.Registrar.targets/2`)
       and `nil` for every other peer. The outbound leg is stamped with it at
@@ -71,6 +77,7 @@ defmodule SIP.B2bua.Peer do
             notify_progress: false,
             outbound_proxy: nil,
             trunk_pid: nil,
+            credentials: nil,
             aor: nil,
             # The rungs this peer's `uris` expand to, each target already carrying
             # its address and its `net_side` — what `b2bua_resolve/1` produced.
@@ -163,7 +170,16 @@ defmodule SIP.B2bua.Pending do
   back until the far end answers — the same choreography as the initial INVITE
   (§7.2), one exchange later.
   """
-  defstruct orig_req: nil, orig_leg: :inbound, method: nil, held_answer: nil
+  #
+  # `sent` is the request as it went onto the outbound leg, kept for a relayed
+  # in-dialog request so a 401/407 to it can be answered by re-sending it;
+  # `auth_tried` says that already happened, and a second challenge is a failure.
+  defstruct orig_req: nil,
+            orig_leg: :inbound,
+            method: nil,
+            held_answer: nil,
+            sent: nil,
+            auth_tried: false
 end
 
 defmodule SIP.B2bua.MediaPlan do
@@ -1952,6 +1968,7 @@ defmodule SIP.Session.B2bua do
 
         sip_ctx
         |> add_pending(trans_pid, req, from_leg, req.method, held_answer)
+        |> update_pending(trans_pid, &%Pending{&1 | sent: fwd})
         |> put_last_invite(other_leg(from_leg), req.method, trans_pid)
         |> SIP.Context.set(:lasterr, :ok)
 
@@ -2080,27 +2097,9 @@ defmodule SIP.Session.B2bua do
 
     case Map.get(state.pending, tid) do
       %Pending{} = pending ->
-        # With a media server the response is not relayed as it stands: its SDP
-        # is the callee's, and what the caller must receive is ours.
-        case media_step(sip_ctx, resp, tid) do
-          # The media step abandoned the attempt and CANCELled it. Nothing is
-          # relayed: the final response that CANCEL brings back comes through
-          # here like any other, and it is that one the caller gets.
-          {sip_ctx, :drop} ->
-            SIP.Context.set(sip_ctx, :lasterr, :ok)
-
-          # A refusal from one target of a serial hunt is not the answer to the
-          # call — it is the answer of one device. Try the next one instead of
-          # telling the caller the call failed.
-          # Before the hunt: a refusal of the OFFER is not a refusal by the device,
-          # and the same targets get another profile before the next ones get
-          # anything (§7.5).
-          {sip_ctx, resp} ->
-            if fallback?(sip_ctx, resp, tid) do
-              fall_back_one_rung(sip_ctx, resp, pending, tid)
-            else
-              hunt_or_relay(sip_ctx, resp, pending, tid)
-            end
+        case answer_challenge(sip_ctx, resp, pending, tid) do
+          {:answered, sip_ctx} -> SIP.Context.set(sip_ctx, :lasterr, :ok)
+          :not_ours -> relay_pending_reply(sip_ctx, resp, pending, tid)
         end
 
       nil ->
@@ -2114,6 +2113,161 @@ defmodule SIP.Session.B2bua do
         )
 
         SIP.Context.set(sip_ctx, :lasterr, :ok)
+    end
+  end
+
+  defp relay_pending_reply(sip_ctx, resp, %Pending{} = pending, tid) do
+    # With a media server the response is not relayed as it stands: its SDP
+    # is the callee's, and what the caller must receive is ours.
+    case media_step(sip_ctx, resp, tid) do
+      # The media step abandoned the attempt and CANCELled it. Nothing is
+      # relayed: the final response that CANCEL brings back comes through
+      # here like any other, and it is that one the caller gets.
+      {sip_ctx, :drop} ->
+        SIP.Context.set(sip_ctx, :lasterr, :ok)
+
+      # A refusal from one target of a serial hunt is not the answer to the
+      # call — it is the answer of one device. Try the next one instead of
+      # telling the caller the call failed.
+      # Before the hunt: a refusal of the OFFER is not a refusal by the device,
+      # and the same targets get another profile before the next ones get
+      # anything (§7.5).
+      {sip_ctx, resp} ->
+        if fallback?(sip_ctx, resp, tid) do
+          fall_back_one_rung(sip_ctx, resp, pending, tid)
+        else
+          hunt_or_relay(sip_ctx, resp, pending, tid)
+        end
+    end
+  end
+
+  # ── Challenges on the outbound leg (`credentials`) ──────────────────────────
+
+  @authorize_timeout 1_000
+
+  # A 401/407 from the far end of the outbound leg, to a request we sent there,
+  # with a peer that carries credentials: re-send that request once,
+  # authenticated, and relay nothing. The caller never sees a challenge meant
+  # for us — it could not answer it for a realm that is not its own.
+  #
+  # The initial request is re-sent as a branch of the same dialog (CSeq + 1, the
+  # Authorization on that branch only); an in-dialog one as a new request of the
+  # dialog. A parallel rung is left alone: the dialog surfaces one response for
+  # the whole rung, and which branch it came from is no longer known.
+  defp answer_challenge(sip_ctx, %{response: code} = resp, %Pending{} = pending, tid)
+       when code in [401, 407] do
+    leg = outbound_leg(sip_ctx)
+
+    with %Pending{orig_leg: :inbound, auth_tried: false} <- pending,
+         %Leg{peer: %Peer{credentials: creds}} when is_pid(creds) <- leg,
+         challenge when is_map(challenge) <- challenge_params(resp),
+         {:ok, request} <- challenged_request(leg, pending, tid),
+         {:ok, digest_uri} <- digest_uri(leg, tid, request),
+         {:ok, params} <- authorize(creds, code, challenge, request.method, digest_uri) do
+      resend_authenticated(
+        sip_ctx,
+        leg,
+        pending,
+        tid,
+        request,
+        {authorization_header(code), params}
+      )
+    else
+      _ -> :not_ours
+    end
+  end
+
+  defp answer_challenge(_sip_ctx, _resp, _pending, _tid), do: :not_ours
+
+  defp challenge_params(%{response: 401} = resp), do: Map.get(resp, :wwwauthenticate)
+  defp challenge_params(%{response: 407} = resp), do: Map.get(resp, :proxyauthenticate)
+
+  defp authorization_header(401), do: :authorization
+  defp authorization_header(407), do: :proxyauthorization
+
+  # The request the challenge answers, as it went out.
+  defp challenged_request(
+         %Leg{initial_trans: tid, branches: [{tid, target}]} = leg,
+         _pending,
+         tid
+       ) do
+    {:ok, %{ruri: branch_uri(%{ruri: leg.fwd_ruri}, target, leg.peer), method: leg.method}}
+  end
+
+  defp challenged_request(%Leg{initial_trans: tid}, _pending, tid), do: :parallel_rung
+  defp challenged_request(_leg, %Pending{sent: %{} = sent}, _tid), do: {:ok, sent}
+  defp challenged_request(_leg, _pending, _tid), do: :unknown_request
+
+  # The digest is computed over the Request-URI as it goes on the wire. The
+  # initial request's is the branch's own; an in-dialog one is re-addressed by
+  # the dialog to the remote target, so the dialog is asked.
+  defp digest_uri(%Leg{initial_trans: tid}, tid, request), do: wire_uri(request.ruri)
+
+  defp digest_uri(%Leg{dialogpid: dlg}, _tid, request) do
+    case call_leg(fn -> SIP.Dialog.in_dialog_ruri(dlg, request) end) do
+      :leg_dead -> {:error, :leg_dead}
+      uri -> wire_uri(uri)
+    end
+  end
+
+  defp wire_uri(%SIP.Uri{} = uri), do: SIP.Uri.serialize_ruri(uri)
+
+  defp wire_uri(uri) when is_binary(uri) do
+    case SIP.Uri.parse(uri) do
+      {:ok, parsed} -> SIP.Uri.serialize_ruri(parsed)
+      other -> {:error, {:bad_ruri, other}}
+    end
+  end
+
+  defp wire_uri(other), do: {:error, {:bad_ruri, other}}
+
+  defp authorize(creds, code, challenge, method, digest_uri) do
+    case GenServer.call(
+           creds,
+           {:authorize, code, challenge, method, digest_uri},
+           @authorize_timeout
+         ) do
+      {:ok, params} when is_map(params) -> {:ok, params}
+      other -> {:no_credentials, other}
+    end
+  catch
+    :exit, reason -> {:no_credentials, reason}
+  end
+
+  defp resend_authenticated(sip_ctx, %Leg{initial_trans: tid} = leg, pending, tid, request, auth) do
+    case call_leg(fn ->
+           SIP.Dialog.fork_branch(leg.dialogpid, request.ruri, authorization: auth)
+         end) do
+      {:ok, new_tid} ->
+        {:answered,
+         sip_ctx
+         |> drop_pending(tid)
+         |> put_pending(new_tid, %Pending{pending | auth_tried: true})
+         |> put_leg(@outbound_tag, %Leg{
+           leg
+           | initial_trans: new_tid,
+             branches: [{new_tid, leg.target}]
+         })
+         |> put_last_invite(@outbound_tag, leg.method, new_tid)}
+
+      _error ->
+        :not_ours
+    end
+  end
+
+  defp resend_authenticated(sip_ctx, leg, pending, tid, request, {header, params}) do
+    req = SIP.Msg.Ops.update_sip_msg(request, %{header => params})
+
+    case call_leg(fn -> SIP.Dialog.new_request(leg.dialogpid, req) end) do
+      {:ok, new_tid} ->
+        {:answered,
+         sip_ctx
+         |> drop_pending(tid)
+         |> put_pending(new_tid, %Pending{pending | auth_tried: true})
+         |> put_last_invite(@outbound_tag, request.method, new_tid)}
+
+      _error ->
+        :not_ours
     end
   end
 
@@ -3589,6 +3743,23 @@ defmodule SIP.Session.B2bua do
     state = state(sip_ctx)
     entry = %Pending{orig_req: req, orig_leg: leg, method: method, held_answer: held_answer}
     put_state(sip_ctx, %State{state | pending: Map.put(state.pending, trans_pid, entry)})
+  end
+
+  defp put_pending(sip_ctx, trans_pid, %Pending{} = entry) do
+    state = state(sip_ctx)
+    put_state(sip_ctx, %State{state | pending: Map.put(state.pending, trans_pid, entry)})
+  end
+
+  defp update_pending(sip_ctx, trans_pid, fun) do
+    state = state(sip_ctx)
+
+    case Map.get(state.pending, trans_pid) do
+      %Pending{} = entry ->
+        put_state(sip_ctx, %State{state | pending: Map.put(state.pending, trans_pid, fun.(entry))})
+
+      nil ->
+        sip_ctx
+    end
   end
 
   @doc false

@@ -143,6 +143,16 @@ defmodule SIP.Test.Peers.Manual do
     end
   end
 
+  # `challenge_bye: true`: the far end that challenges a BYE (some operators do),
+  # until one comes back authenticated.
+  def on_request(%{method: :BYE} = req, %{challenge_bye: true} = state) do
+    if Map.get(req, :proxyauthorization) do
+      default_request(req, state)
+    else
+      {[answer(req, 407, state.totag, 50)], state}
+    end
+  end
+
   def on_request(req, state), do: default_request(req, state)
 
   @impl true

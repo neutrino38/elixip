@@ -448,8 +448,9 @@ defmodule SIP.DialogImpl do
   # `fork_best` is cleared here: arming a branch opens a new rung, and the finals
   # withheld while the previous one was running have been surfaced already (the
   # rung ended, which is what let the application ask for this one).
-  defp arm_branch(state = %SIP.DialogImpl{}, target) do
+  defp arm_branch(state = %SIP.DialogImpl{}, target, headers \\ %{}) do
     req = %{state.msg | ruri: target}
+    req = if headers == %{}, do: req, else: SIP.Msg.Ops.update_sip_msg(req, headers)
 
     case SIP.Transac.start_uac_transaction(req, state.dialogtimeout) do
       {:ok, trans_pid, modmsg} ->
@@ -478,6 +479,19 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # Headers carried by THIS branch only, never written back into `state.msg`: an
+  # answer to one target's challenge means nothing to the next target, which
+  # has its own realm and its own nonce.
+  defp branch_headers(opts) do
+    case Keyword.get(opts, :authorization) do
+      {header, params} when header in [:authorization, :proxyauthorization] ->
+        %{header => params}
+
+      nil ->
+        %{}
+    end
+  end
+
   # A branch set asked with a REPLACEMENT BODY (the offer-profile fallback of
   # DESIGN-FRAMEWORK.md): re-stamp the stored initial request, which is the
   # template `arm_branch/2` composes every branch from, and move the CSeq on.
@@ -491,20 +505,24 @@ defmodule SIP.DialogImpl do
   # `state.msg` is also what the BYE and the transport-failure paths read, so
   # re-stamping it — rather than passing a body down to arm_branch/2 — is what
   # keeps the dialog's idea of its own request true.
+  #
+  # An authenticated resubmission (`:authorization`) moves the CSeq on too, and for
+  # the same reason: RFC 3261 §22.2 makes it a new request, not a retransmission.
   defp restamp_initial_request(state, opts) do
-    case Keyword.get(opts, :body) do
-      nil ->
-        state
+    body = Keyword.get(opts, :body)
 
-      body ->
-        [_seqno, method] = state.msg.cseq
+    if is_nil(body) and is_nil(Keyword.get(opts, :authorization)) do
+      state
+    else
+      [_seqno, method] = state.msg.cseq
+      msg = Map.put(state.msg, :cseq, [state.cseq, method])
 
-        msg =
-          state.msg
-          |> Map.put(:cseq, [state.cseq, method])
-          |> SIP.Msg.Ops.update_sip_msg({:body, normalize_body(body)})
+      msg =
+        if is_nil(body),
+          do: msg,
+          else: SIP.Msg.Ops.update_sip_msg(msg, {:body, normalize_body(body)})
 
-        %SIP.DialogImpl{state | msg: msg, cseq: state.cseq + 1}
+      %SIP.DialogImpl{state | msg: msg, cseq: state.cseq + 1}
     end
   end
 
@@ -515,10 +533,11 @@ defmodule SIP.DialogImpl do
 
   defp normalize_body(body) when is_list(body), do: body
 
-  defp arm_rung(state, target) do
+  defp arm_rung(state, target, headers) do
     cond do
       is_list(target) ->
-        {results, state} = Enum.map_reduce(target, state, fn t, st -> arm_branch(st, t) end)
+        {results, state} =
+          Enum.map_reduce(target, state, fn t, st -> arm_branch(st, t, headers) end)
 
         case Enum.split_with(results, &match?({:ok, _}, &1)) do
           {[], [{:error, reason} | _]} -> {:reply, {:error, reason}, state}
@@ -526,7 +545,7 @@ defmodule SIP.DialogImpl do
         end
 
       true ->
-        {ret, state} = arm_branch(state, target)
+        {ret, state} = arm_branch(state, target, headers)
         {:reply, ret, state}
     end
   end
@@ -1758,8 +1777,12 @@ defmodule SIP.DialogImpl do
         {:reply, {:error, :no_initial_request}, state}
 
       true ->
-        arm_rung(restamp_initial_request(state, opts), target)
+        arm_rung(restamp_initial_request(state, opts), target, branch_headers(opts))
     end
+  end
+
+  def handle_call({:in_dialog_ruri, req}, _from, state) do
+    {:reply, address_in_dialog(req, state).ruri, state}
   end
 
   @doc "Handle call to send out a new in-dialog request"
@@ -2700,6 +2723,12 @@ defmodule SIP.DialogImpl do
         )
 
         %{state | state: :terminated} |> SIP.Dialog.Events.ended(:local_bye)
+
+      # A challenged BYE has not closed anything: the far end wants it again,
+      # authenticated. Still "closing", the dialog would refuse that second BYE as
+      # a duplicate hangup, so the call could never be ended.
+      transact_pid == state.closing_transaction ->
+        %{state | closing_transaction: nil}
 
       rsp.response == 481 ->
         # RFC 3261 §12.2.1.2: whatever the request was, the far end has just said

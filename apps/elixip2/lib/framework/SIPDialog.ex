@@ -438,12 +438,31 @@ defmodule SIP.Dialog do
   has just been ACKed, so the callee's server transaction is still alive (timer I
   on UDP), which is precisely the window §8.2.2.2 covers.
 
-  Without `body:` nothing is re-stamped and a branch is exactly what it was.
+  ## `authorization:` — the same request, authenticated
+
+  `fork_branch(pid, target, authorization: {:proxyauthorization, params})` re-sends
+  the initial request to `target` with that header, after a 401/407 from it. The
+  CSeq moves on (RFC 3261 §22.2: an authenticated resubmission is a new request),
+  but the header goes on **this branch only**: the next target has its own realm
+  and its own nonce, and an answer meant for another one is noise to it.
+
+  Without `body:` or `authorization:` nothing is re-stamped and a branch is
+  exactly what it was.
   """
   @spec fork_branch(pid(), SIP.Uri.t() | [SIP.Uri.t()], keyword()) ::
           {:ok, pid()} | {:ok, [pid()]} | {:error, any()}
   def fork_branch(dialog_pid, target, opts \\ []) when is_pid(dialog_pid) and is_list(opts) do
     GenServer.call(dialog_pid, {:fork_branch, target, opts})
+  end
+
+  @doc """
+  The Request-URI `req` will carry once this dialog sends it in-dialog: the remote
+  target learnt from the far end's Contact, or the request's own before there is
+  one. What a digest answering a challenge to that request is computed over.
+  """
+  @spec in_dialog_ruri(pid(), map()) :: term()
+  def in_dialog_ruri(dialog_pid, req) when is_pid(dialog_pid) and is_req(req) do
+    GenServer.call(dialog_pid, {:in_dialog_ruri, req})
   end
 
   @spec challenge(pid(), map(), 401 | 407, any()) :: any()

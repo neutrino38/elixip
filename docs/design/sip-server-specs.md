@@ -77,18 +77,30 @@ the hunt has already classified the 407 before a script sees anything.
 What to add:
 
 - A `credentials` field in `%SIP.B2bua.Peer{}`, `nil` by default (nothing changes).
-  When set, it is a process answering one call, `{:authorize, challenge, method,
-  uri}`, with the ready `Authorization` / `Proxy-Authorization` header value. The
+  When set, it is a process answering one call, `{:authorize, code, challenge,
+  method, digest_uri}`, with `{:ok, params}`: the ready `Authorization` /
+  `Proxy-Authorization` parameters (the shape `SIP.Auth.build_auth_response/8`
+  returns). The
   secret never reaches the framework: the HA1, its realm and its algorithm stay with
   whoever answers.
 - On a 401/407 on the outbound leg of a peer with credentials, the B2BUA re-sends the
   same request once with that header: same SDP, CSeq + 1. A second challenge to the
   same request is an ordinary failure. A 401/407 is never relayed to the caller when
   the peer has credentials.
-- Every request of the leg is covered, not just the initial INVITE: re-INVITE, BYE,
-  MESSAGE. Some operators challenge BYE.
-- Tests in the B2BUA suite: INVITE challenged then accepted; second challenge fails
-  the target; challenged BYE; no credentials keeps today's behaviour.
+- Every request relayed onto the leg is covered, not just the initial INVITE:
+  re-INVITE, UPDATE, BYE, MESSAGE. Some operators challenge BYE. The initial
+  request is re-sent as a branch of the same dialog (`SIP.Dialog.fork_branch/3`,
+  option `authorization:`, on that branch only); an in-dialog one as a new request,
+  its digest computed over the Request-URI the dialog addresses it to
+  (`SIP.Dialog.in_dialog_ruri/2`). A challenged BYE no longer leaves the dialog
+  "closing", or the authenticated BYE would be refused as a second hangup.
+- Not covered: a parallel rung (the dialog surfaces one response for the whole
+  rung, and which branch it answers is lost), and requests the B2BUA originates
+  itself rather than relays (the teardown BYE).
+- Tests (`b2bua_outbound_auth_test.exs`): INVITE challenged then accepted; second
+  challenge relayed as a failure; no credentials keeps today's behaviour; challenged
+  UPDATE re-sent with the digest over the remote target; challenged BYE re-sent and
+  the dialog ends.
 
 In kelixip only a `sip-trunk` server sets `credentials`, answered by its process in
 `Kelix.Mod.SipServers`.
