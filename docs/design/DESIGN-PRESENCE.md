@@ -131,15 +131,22 @@ end
 
 
 The SBB places the call in the queue (held by a process of its own?). The next
-available agent — one who subscribed to the queue, is not handling a call, is
-registered and has declared themselves available — is selected according to the
+available agent — one who subscribed to the queue, one that is not handling a call, 
+one that is registered and has declared themselves available — is selected according to the
 queue's policy, and the B2BUA module is used to connect them to the caller. If
 the agent answers, done. Otherwise the next agent is tried, possibly changing the
 agent's presence state along the way (the `autopause` option).
 
 The B2BUA's hunt function is obviously what is used here.
 
-`ACD.SBB.queue()` will have to end up as easy to use as asterisk's `app_queue()`.
+
+Later we should develop an SBB `ACD.SBB.queue()` 
+that will encapsulate the behavior will have to end up as easy to use as asterisk's `app_queue()`.
+
+The module will maintain for each call the following information:
+- date / time of 
+
+The module will also provide a optional 
 
 ## Configuration in domains.toml
 
