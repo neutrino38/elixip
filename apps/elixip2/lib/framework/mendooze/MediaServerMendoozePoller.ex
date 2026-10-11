@@ -208,7 +208,8 @@ defmodule MediaServer.Mendooze.EventPoller do
   contract shared with the server (`JSR309Event.h`), never renumbered:
   1 PlayerEndOfFile, 2 ExternalFIRRequested, 3 PlayerStarted,
   4 RecorderStarted, 5 RecorderStopped(reason), 6 EndpointDisconnected.
-  The video `role` field of events 2 and 6 is not used and dropped.
+  Events 2, 6 and 7 name the stream they concern by `(media, role)`: 0 is the
+  camera, 2 and above the streams `EndpointCreateVideoStream` created.
   """
   @spec decode_event(binary()) :: {:ok, event()} | {:error, term()}
   def decode_event(frame) do
@@ -224,8 +225,8 @@ defmodule MediaServer.Mendooze.EventPoller do
     {:ok, {:player_end_of_file, sess, player}}
   end
 
-  defp translate_event([2, sess, endpoint_id, media, _role]),
-    do: {:ok, {:external_fir, sess, endpoint_id, media_atom(media)}}
+  defp translate_event([2, sess, endpoint_id, media, role]),
+    do: {:ok, {:external_fir, sess, endpoint_id, media_atom(media), role}}
 
   defp translate_event([3, sess, player]) do
     Logger.info(module: __MODULE__, session: sess, event: :player_started)
@@ -248,11 +249,11 @@ defmodule MediaServer.Mendooze.EventPoller do
     {:ok, {:recorder_stopped, sess, recorder, reason_atom(reason)}}
   end
 
-  defp translate_event([6, sess, endpoint_id, media, _role]),
-    do: {:ok, {:endpoint_disconnected, sess, endpoint_id, media_atom(media)}}
+  defp translate_event([6, sess, endpoint_id, media, role]),
+    do: {:ok, {:endpoint_disconnected, sess, endpoint_id, media_atom(media), role}}
 
-  defp translate_event([7, sess, endpoint_id, media, _role]),
-    do: {:ok, {:endpoint_connected, sess, endpoint_id, media_atom(media)}}
+  defp translate_event([7, sess, endpoint_id, media, role]),
+    do: {:ok, {:endpoint_connected, sess, endpoint_id, media_atom(media), role}}
 
   defp translate_event(other) do
     Logger.warning("Mendooze.EventPoller: unknown event tuple: #{inspect(other)}")

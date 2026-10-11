@@ -85,7 +85,56 @@ defmodule SIPMsg do
       "sip-if-match" -> :sipifmatch
       "sip-etag" -> :sipetag
       "allow-events" -> :allowevents
-      _ -> name
+      # The compact forms of RFC 3261 §7.3.3 (and the ones RFC 3515, 3841, 3892,
+      # 4028 and 6665 register), expanded here so the rest of the stack sees one
+      # name per header, long or compact, and serialises it long.
+      "v" -> :via
+      "f" -> :from
+      "t" -> :to
+      "i" -> :callid
+      "m" -> :contact
+      "l" -> :contentlength
+      "c" -> :contenttype
+      "k" -> :supported
+      "o" -> :event
+      "u" -> :allowevents
+      "e" -> "Content-Encoding"
+      "s" -> "Subject"
+      "r" -> "Refer-To"
+      "b" -> "Referred-By"
+      "a" -> "Accept-Contact"
+      "x" -> "Session-Expires"
+      lower -> canonical_header_name(lower)
+    end
+  end
+
+  # The spellings RFC 3261 and its extensions register that are not one capital
+  # per dash-separated word. Everything else is.
+  @irregular_header_names %{
+    "min-se" => "Min-SE",
+    "content-id" => "Content-ID",
+    "conversation-id" => "Conversation-ID",
+    "contribution-id" => "Contribution-ID",
+    "rseq" => "RSeq",
+    "rack" => "RAck",
+    "session-id" => "Session-ID",
+    "mime-version" => "MIME-Version",
+    "remote-party-id" => "Remote-Party-ID"
+  }
+
+  # An unknown header is keyed by its canonical spelling, not by the one the
+  # sender used: `allow:` and `Allow:` are the same header (§7.3.1), and every
+  # reader of a string key in the tree asks for `"Max-Forwards"`, `"Require"`,
+  # `"P-Asserted-Identity"` — this form.
+  defp canonical_header_name(lower) do
+    case @irregular_header_names[lower] do
+      nil ->
+        lower
+        |> String.split("-")
+        |> Enum.map_join("-", &String.capitalize/1)
+
+      canonical ->
+        canonical
     end
   end
 
@@ -390,9 +439,14 @@ defmodule SIPMsg do
 
   # Parse one header line
   defp parse_header(line, line_number, dest_map, parse_error_callback) do
-    case String.split(line, ": ", parts: 2) do
+    # HCOLON (RFC 3261 §7.3.1): optional whitespace on both sides of the colon,
+    # not necessarily one space after it. `Via:SIP/2.0/UDP …` is legal.
+    case String.split(line, ":", parts: 2) do
       [name, content] ->
-        if String.match?(name, ~r/^[A-Z][0-9 a-zA-Z\-]+$/) do
+        name = String.trim_trailing(name)
+        content = String.trim_leading(content)
+
+        if String.match?(name, ~r/^[a-zA-Z][0-9a-zA-Z\-]*$/) do
           key = headername_to_atomkey(name)
           # Now parse the header content
           case parse_header_content(key, content) do

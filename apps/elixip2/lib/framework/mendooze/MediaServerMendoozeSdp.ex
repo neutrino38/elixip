@@ -382,7 +382,8 @@ defmodule MediaServer.Mendooze.Sdp do
   @spec build(%{
           required(:ip) => String.t() | :inet.ip_address(),
           required(:medias) => [media_spec()],
-          optional(:ice_lite) => boolean()
+          optional(:ice_lite) => boolean(),
+          optional(:bundle) => [String.t()]
         }) ::
           String.t()
   def build(%{ip: ip, medias: medias} = spec) do
@@ -411,6 +412,7 @@ defmodule MediaServer.Mendooze.Sdp do
       # Glassfish gateway) reject the whole offer with a 488.
       |> Map.put(:timing, %ExSDP.Timing{start_time: 0, stop_time: 0})
       |> add_ice_lite(Map.get(spec, :ice_lite, false))
+      |> add_bundle_group(Map.get(spec, :bundle, []))
 
     medias
     |> Enum.reduce(sdp, fn mspec, acc -> ExSDP.add_media(acc, build_media(mspec)) end)
@@ -456,11 +458,8 @@ defmodule MediaServer.Mendooze.Sdp do
   # channel. `a=dcmap` is echoed only when the peer declared its channels that way
   # (RFC 8864); a peer that opens them in band with DCEP gets none back.
   #
-  # NO `a=group:BUNDLE` either, here or anywhere else in this module: the media
-  # server gives each leg its own 5-tuple. A browser left at its default
-  # `bundlePolicy` ("balanced") gathers candidates per `m=` section and is served
-  # by such an answer; one forced to `max-bundle` is not, and that is a known
-  # limitation of the media server, not of this section.
+  # `a=group:BUNDLE` is a session attribute (`build/1`, `:bundle`), never a
+  # section one: in a bundled answer this section shares the port of the others.
   defp build_media(%{data_channel: dc, port: port, protocol: protocol} = mspec) do
     %ExSDP.Media{
       type: :application,
@@ -638,6 +637,11 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp add_acfg(m, %{config: config, tcap: tcap}),
     do: ExSDP.add_attribute(m, {"acfg", "#{config} t=#{tcap}"})
+
+  defp add_bundle_group(sdp, []), do: sdp
+
+  defp add_bundle_group(sdp, mids),
+    do: ExSDP.add_attribute(sdp, %ExSDP.Attribute.Group{semantics: "BUNDLE", mids: mids})
 
   defp add_ice_lite(sdp, false), do: sdp
   # As the "ice-lite" string, not the :ice_lite atom: both serialize to
@@ -840,11 +844,16 @@ defmodule MediaServer.Mendooze.Sdp do
         # the raw a=fmtp strings, per m= section in order (see raw_fmtp_sections/1)
         raw = raw_fmtp_sections(sdp_str)
 
+        # RFC 8843: the sections the offerer bundles on one transport
+        group = bundle_group(session_attrs)
+
         medias =
           sdp.media
           |> Enum.with_index()
           |> Enum.map(fn {m, i} ->
-            parse_media_section(m, session_ip, session_attrs, Enum.at(raw, i, %{}))
+            m
+            |> parse_media_section(session_ip, session_attrs, Enum.at(raw, i, %{}))
+            |> put_bundle_fields(m, group)
           end)
 
         {:ok, medias}
@@ -1152,6 +1161,41 @@ defmodule MediaServer.Mendooze.Sdp do
         into: %{},
         do: {Integer.to_string(pt), fmtp}
   end
+
+  defp bundle_group(session_attrs) do
+    Enum.find_value(session_attrs, [], fn
+      %ExSDP.Attribute.Group{semantics: "BUNDLE", mids: mids} -> mids
+      _ -> nil
+    end)
+  end
+
+  # `bundled`: the section's mid is in the offered group. `bundle_only`: it is
+  # offered on port 0 and exists ONLY inside the group (RFC 8843 §6). `remote_ssrc`:
+  # the first a=ssrc of the section, which the media server routes by when a packet
+  # carries no MID.
+  defp put_bundle_fields(desc, m, group) do
+    desc
+    |> Map.put(:bundled, desc[:mid] != nil and desc[:mid] in group)
+    |> Map.put(:bundle_only, "bundle-only" in m.attributes)
+    |> Map.put(
+      :remote_ssrc,
+      Enum.find_value(m.attributes, fn
+        %ExSDP.Attribute.SSRC{id: id} -> id
+        _ -> nil
+      end)
+    )
+  end
+
+  @sdes_mid_uri "urn:ietf:params:rtp-hdrext:sdes:mid"
+
+  @doc """
+  The offered `urn:ietf:params:rtp-hdrext:sdes:mid` extension of a section, or `nil`.
+  RFC 8843 §9.1: a bundled answer confirms it with the offer's own id.
+  """
+  def mid_extmap(desc),
+    do: Enum.find(Map.get(desc, :extmaps, []), &(&1.uri == @sdes_mid_uri))
+
+  def sdes_mid_uri, do: @sdes_mid_uri
 
   defp find_mid(attrs) do
     Enum.find_value(attrs, fn

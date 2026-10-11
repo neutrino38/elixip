@@ -232,6 +232,10 @@ defmodule SIP.Transport.WSSListener do
   defp accept_loop(listen_socket, listener_pid) do
     case Socket.SSL.transport_accept(listen_socket) do
       {:ok, tls_transport_socket} ->
+        # Read before the handshake: a socket whose handshake failed has no peer
+        # to give any more, and the peer is the whole point of the report.
+        {peer_ip, peer_port} = SIP.Transport.ImplHelpers.peer_of(tls_transport_socket)
+
         case Socket.SSL.handshake(tls_transport_socket, timeout: @handshake_timeout) do
           {:ok, ssl_socket} ->
             case do_ws_upgrade(ssl_socket) do
@@ -251,7 +255,17 @@ defmodule SIP.Transport.WSSListener do
               {:error, reason} ->
                 Logger.warning(
                   module: __MODULE__,
-                  message: "WSS WebSocket upgrade failed: #{inspect(reason)}"
+                  message:
+                    "WSS WebSocket upgrade failed with #{inspect(peer_ip)}:#{peer_port}: " <>
+                      inspect(reason)
+                )
+
+                SIP.Transport.ImplHelpers.report_incident(
+                  :transport_error,
+                  "WSS",
+                  peer_ip,
+                  peer_port,
+                  :ws_upgrade
                 )
 
                 Socket.close(ssl_socket)
@@ -260,7 +274,17 @@ defmodule SIP.Transport.WSSListener do
           {:error, reason} ->
             Logger.warning(
               module: __MODULE__,
-              message: "WSS TLS handshake failed: #{inspect(reason)}"
+              message:
+                "WSS TLS handshake failed with #{inspect(peer_ip)}:#{peer_port}: " <>
+                  inspect(reason)
+            )
+
+            SIP.Transport.ImplHelpers.report_incident(
+              :transport_error,
+              "WSS",
+              peer_ip,
+              peer_port,
+              :tls_handshake
             )
         end
 

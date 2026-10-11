@@ -35,6 +35,7 @@ The user-facing counterparts live at the repository root —
 | [kelixip-b2bua.md](kelixip-b2bua.md) | `queue()` above the B2BUA primitives (`call()` shipped in 1.5.0) |
 | [sbb_evolutions.md](sbb_evolutions.md) | service building blocks: the catalogue, the published view, the TypeScript side |
 | [integration-fail2ban.md](integration-fail2ban.md) | making kelixip trivially protectable |
+| [fail2ban-plan.md](fail2ban-plan.md) | the build order of the above: the incident struct and its one reporting function, the security log, the shipped filters and jails, what each phase proves |
 | [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
 | [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |

@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.3
+Version:        1.6.4
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        2%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -223,6 +223,17 @@ install -D -m 0644 systemd/kelixip.service %{buildroot}%{_unitdir}/%{name}.servi
 install -D -m 0644 completion/kelictl \
     %{buildroot}%{_datadir}/bash-completion/completions/kelictl
 
+# The fail2ban filters and the jail example, as data: the operator links them into
+# /etc/fail2ban (doc/running.md, "fail2ban"). Not required: fail2ban is optional.
+install -d -m 0755 %{buildroot}%{_datadir}/%{name}/fail2ban/filter.d
+install -d -m 0755 %{buildroot}%{_datadir}/%{name}/fail2ban/jail.d
+install -m 0644 fail2ban/filter.d/*.conf %{buildroot}%{_datadir}/%{name}/fail2ban/filter.d/
+install -m 0644 fail2ban/jail.d/*.conf %{buildroot}%{_datadir}/%{name}/fail2ban/jail.d/
+
+# Rotation of the security log ([security] log_file). Inert while the file does
+# not exist (missingok).
+install -D -m 0644 logrotate/kelixip %{buildroot}%{_sysconfdir}/logrotate.d/%{name}
+
 # Mutable state (future usrloc persistence, operator-installed scripts) and the log
 # directory used when stdout is redirected. The unit also declares them, so a
 # tmpfs-only deployment still gets them.
@@ -283,6 +294,7 @@ fi
 %config(noreplace) %attr(0640,root,kelixip) %{_sysconfdir}/%{name}/config.toml
 %config(noreplace) %attr(0640,root,kelixip) %{_sysconfdir}/%{name}/domains.toml
 %config(noreplace) %attr(0644,root,root) %{_sysconfdir}/sysconfig/%{name}
+%config(noreplace) %attr(0644,root,root) %{_sysconfdir}/logrotate.d/%{name}
 %{_unitdir}/%{name}.service
 %{_sbindir}/kelictl
 %{_sbindir}/kelixip
@@ -301,6 +313,7 @@ fi
 %exclude %{_datadir}/%{name}/registrar-presence.exs
 %exclude %{_datadir}/%{name}/*-chat.exs
 %dir %{_datadir}/%{name}/sql
+%{_datadir}/%{name}/fail2ban
 %dir %attr(0755,root,root) %{kelixdir}
 %{kelixdir}/bin
 %{kelixdir}/erts-*
@@ -365,6 +378,23 @@ fi
 %{_datadir}/%{name}/sql/conversation
 
 %changelog
+* Thu Oct 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-1
+- Screen sharing through the B2BUA. A leg carries several video streams and
+  BUNDLE: the second m=video of a browser sharing its screen is a stream of
+  its own, relayed to the other leg under its mid; a share that stops is
+  paused (inactive), not withdrawn, so sharing again resumes it; a re-offer
+  keeps the peer's section order and the leg's ICE credentials.
+- Security incidents for fail2ban. A refused credential, an unknown domain, a
+  refused API token, a packet that is not SIP or a failed handshake is one
+  line in [security] log_file (default /var/log/kelixip/security.log) and in
+  the journal. Filters and a jail example are installed under
+  /usr/share/kelixip/fail2ban/; /etc/logrotate.d/kelixip rotates the file.
+  [security] ignore drops incident types.
+- The SIP parser accepts header names in any case, the compact forms and a
+  colon without a space after it (RFC 3261 section 7.3).
+- The reference media call script carries text too (T.140 data channel).
+- User-Agent is now Kelixip/1.6.4.
+
 * Tue Oct 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-2
 - RFC 4028 session timers, one per call leg. A long call relayed between two
   browsers was cut after 90 s: the caller's Session-Expires was relayed to the

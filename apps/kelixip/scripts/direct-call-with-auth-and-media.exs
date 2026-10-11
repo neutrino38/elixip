@@ -73,9 +73,15 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
   # Video could not afford this until the media server learnt to bridge video the
   # way it bridges audio (mediaserver 8f80fed) — before that, a transcoder on the
   # path meant a decode, a scale and a re-encode on every single call.
+  #
+  # `:tc` — audio, video and text — on both legs. Text is never transcoded: the
+  # media server relays it as it is, on whatever carries it on each leg — a
+  # WebRTC data channel for a browser, T.140 over RTP for a SIP endpoint. Left
+  # out, a browser's data channel is declined with port 0 and the client reports
+  # a failed text channel on every call.
   @media {:mediaserver,
-          inbound: [webrtc: :if_offered, media: :audio_video],
-          outbound: [media: :audio_video],
+          inbound: [webrtc: :if_offered, media: :tc],
+          outbound: [media: :tc],
           transcode: [audio: :avoid, video: :avoid]}
 
   # What the registered device is offered, and what to offer it next when it

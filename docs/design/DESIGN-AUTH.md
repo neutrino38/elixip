@@ -291,11 +291,15 @@ whatever it sends next. That is already what the 32 s timer produced;
 writing down, because it is what someone will rediscover in a capture and mistake
 for a regression. `max_attempts: :infinity` restores the earlier behaviour.
 
-Brute-force *visibility* is deliberately not here: it is a core observer, for
-every script and every backend
-([integration-fail2ban.md](integration-fail2ban.md) §4). `:refused` bounds the
-work one unauthenticated dialog can extract — a scanner fits dozens of attempts
-into 32 s, each one a query against the subscriber table — and raises no alarm.
+Brute-force *visibility* is deliberately not here either. The backend reports it:
+every 403 `Kelix.Mod.AuthDb` answers goes through one `reject/5`, which names the
+cause (`bad_password`, `unknown_user`, `bad_realm`) and the request's source in an
+`Elixip.Security.Incident` handed to `Elixip.Security.report/1` — the line
+fail2ban reads ([fail2ban-plan.md](fail2ban-plan.md) §3). What is counted there is
+exactly what is counted here: the 403s, never the first challenge, `stale`, or a
+500. `:refused` bounds the work one unauthenticated dialog can extract — a scanner
+fits dozens of attempts into 32 s, each one a query against the subscriber table —
+and raises no alarm of its own.
 
 ### 3.4 The verbs it answers with
 

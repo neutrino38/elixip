@@ -39,6 +39,10 @@ defmodule Kelix.Application do
       # Infra config (config.toml): parsed once, pushes infra keys into the
       # :elixip2 app env. Started right after (§3.1).
       {Kelix.Config, path: config_path},
+      # The security incident sink (`[security]`): the stack reports through
+      # Elixip.Security.report/1 and this writes the line fail2ban reads. Right
+      # after Config, which it reads, and before anything that can see a peer.
+      Kelix.Security.IncidentReporter,
       # SIP stack registries — today started ad-hoc by bootstrap_stack/0, here
       # supervised as first-class children (design §2.1).
       {Registry, keys: :unique, name: Registry.SIP.Transac},

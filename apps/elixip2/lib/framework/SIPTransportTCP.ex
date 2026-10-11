@@ -117,6 +117,17 @@ defmodule SIP.Transport.TCP do
           :ping ->
             nil
 
+          # Not SIP at all: a scanner, another protocol on our port. Nothing to
+          # answer, but somebody to name.
+          :garbage ->
+            SIP.Transport.ImplHelpers.report_incident(
+              :invalid_packet,
+              "TCP",
+              state.destip,
+              state.destport,
+              :garbage
+            )
+
           :msg ->
             SIP.Transport.ImplHelpers.process_incoming_message(
               state,
