@@ -959,7 +959,8 @@ defmodule Kelix.Mod.PresenceTest do
                event: "presence",
                source: "registrar",
                status: "open",
-               etag: nil
+               etag: nil,
+               received_time: nil
              } = row
     end
 
@@ -999,8 +1000,14 @@ defmodule Kelix.Mod.PresenceTest do
       assert {:ok, %{status: "open", activity: nil, calls: nil, states: states}} =
                Presence.handle_control("show", %{"domain" => "weshwesh.eu", "aor" => "magali.buu"})
 
-      assert [%{source: "publish", status: "closed"}, %{source: "registrar", status: "open"}] =
-               Enum.sort_by(states, & &1.source)
+      assert [
+               %{source: "publish", status: "closed", received_time: received},
+               %{source: "registrar", status: "open", received_time: nil}
+             ] = Enum.sort_by(states, & &1.source)
+
+      # when the PUBLISH was accepted, epoch seconds like kamailio's column
+      assert is_integer(received) and
+               received in (SIP.Publication.now() - 5)..SIP.Publication.now()
     end
 
     test "a live publication wins over the registration" do

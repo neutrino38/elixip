@@ -1215,7 +1215,10 @@ defmodule Kelix.Control do
       transport: transport_string(Map.get(binding, :flow_module)),
       instance: Map.get(binding, :instance),
       reg_id: Map.get(binding, :reg_id),
-      methods: Map.get(binding, :methods)
+      methods: Map.get(binding, :methods),
+      user_agent: Map.get(binding, :user_agent),
+      callid: Map.get(binding, :callid),
+      cseq: Map.get(binding, :cseq)
     }
   end
 

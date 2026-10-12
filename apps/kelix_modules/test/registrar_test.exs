@@ -263,6 +263,21 @@ defmodule Kelix.Mod.RegistrarTest do
       assert binding.methods =~ "INVITE"
     end
 
+    test "the REGISTER's User-Agent, Call-ID and CSeq are stored with the binding", ctx do
+      assert {:registered, _} = Registrar.save(ctx.req, @rebind_domain)
+      assert [binding] = Registrar.bindings(@rebind_domain, "50815019")
+
+      assert binding.user_agent == "calls sofia-sip/1.13.17"
+      assert binding.callid == "1dae1ac7-0503-1240-45af-60189533c4e1"
+      assert binding.cseq == 118_060_286
+    end
+
+    test "a REGISTER without User-Agent stores none", ctx do
+      req = Map.delete(ctx.req, :useragent)
+      assert {:registered, _} = Registrar.save(req, @rebind_domain)
+      assert [%Contact{user_agent: nil}] = Registrar.bindings(@rebind_domain, "50815019")
+    end
+
     # RFC 5626: the instance names the DEVICE, so the same phone reaching us from a
     # new address replaces its binding. Keying on the URI alone is why the handset
     # has to drop its old contact by hand on every network change.

@@ -44,7 +44,10 @@ defmodule Kelix.Control.CLITest do
               flow_module: SIP.Transport.UDP,
               instance: "<urn:uuid:f81d4fae>",
               reg_id: "1",
-              methods: nil
+              methods: nil,
+              user_agent: "Linphone/6.2.0 (Windows)",
+              callid: "1dae1ac7-0503-1240-45af-60189533c4e1",
+              cseq: 118_060_286
             }
           ]
         }
@@ -88,14 +91,17 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "aor:          bob@cli.reg.example.com"
       assert out =~ "contacts:     1"
       assert out =~ "1. sip:bob@10.0.0.9:5062"
-      assert out =~ ~r/expires:   in 5m\d+s \(20/
+      assert out =~ ~r/expires:    in 5m\d+s \(20/
       # where the REGISTER came from, which behind a NAT the contact URI does not say
-      assert out =~ "source:    udp 192.168.1.4:45112"
-      assert out =~ "transport: udp"
-      assert out =~ "instance:  <urn:uuid:f81d4fae>"
-      assert out =~ "reg-id:    1"
+      assert out =~ "source:     udp 192.168.1.4:45112"
+      assert out =~ "transport:  udp"
+      assert out =~ "instance:   <urn:uuid:f81d4fae>"
+      assert out =~ "reg-id:     1"
       # the handset sent no `methods` param: no line rather than a dash
       refute out =~ "methods:"
+      assert out =~ "user-agent: Linphone/6.2.0 (Windows)"
+      assert out =~ "call-id:    1dae1ac7-0503-1240-45af-60189533c4e1"
+      assert out =~ "cseq:       118060286"
     end
 
     test "registration show on an unregistered AOR → exit 1" do

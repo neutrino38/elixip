@@ -1321,10 +1321,13 @@ defmodule Kelix.Control.CLI do
             {"transport", c.transport},
             {"instance", c.instance},
             {"reg-id", c.reg_id},
-            {"methods", c.methods}
+            {"methods", c.methods},
+            {"user-agent", c.user_agent},
+            {"call-id", c.callid},
+            {"cseq", c.cseq}
           ],
           value not in [nil, ""],
-          do: "     " <> String.pad_trailing(label <> ":", 11) <> to_string(value)
+          do: "     " <> String.pad_trailing(label <> ":", 12) <> to_string(value)
   end
 
   # "in 5m40s (2026-08-02T12:34:56Z)": the remaining time is the operator question,
