@@ -1,3 +1,13 @@
+kelixip (1.6.4-4) stable; urgency=low
+
+  * sip_servers: a third URI (tertiary_uri), tried after the backup, and
+    source_networks, CIDR ranges a server's requests are recognised from on
+    the transports its URIs name. Microsoft Teams Direct Routing needs both.
+  * kelictl: server.list shows the first URI and counts the others,
+    server.show lays the URIs out as a table with their role and state.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 18:10:00 +0200
+
 kelixip (1.6.4-3) stable; urgency=low
 
   * A registration binding keeps the REGISTER's User-Agent, Call-ID and CSeq:

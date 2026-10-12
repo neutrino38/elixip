@@ -22,7 +22,7 @@ defmodule Kelix.Mod.SipServersLivenessTest do
   defmodule FakeDns do
     def resolve(server) do
       targets =
-        for uri <- [server.primary_uri, server.backup_uri], uri != nil, into: %{} do
+        for uri <- SipServers.Server.uris(server), into: %{} do
           {:ok, parsed} = SIP.Uri.parse(uri)
           n = :erlang.phash2(parsed.domain, 250) + 1
           {uri, [{"UDP", {10, 0, 1, n}, 5060}]}

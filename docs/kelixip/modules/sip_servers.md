@@ -104,7 +104,18 @@ $ kelictl sip_servers server.create domain=example.com slug=partner-pbx \
     type=sip-proxy primary_uri=sip:pbx.partner.net ext_domain=partner.net \
     probe_remote_aors=true
 $ kelictl sip_servers aor.add example.com partner-pbx alice@partner.net
+$ kelictl sip_servers server.create domain=example.com slug=teams \
+    type=sip-application \
+    'primary_uri=sip:sip.pstnhub.microsoft.com:5061;transport=tls' \
+    'backup_uri=sip:sip2.pstnhub.microsoft.com:5061;transport=tls' \
+    'tertiary_uri=sip:sip3.pstnhub.microsoft.com:5061;transport=tls' \
+    source_networks=52.112.0.0/14,52.120.0.0/14
 ```
+
+A URI with a `;transport=` parameter is quoted: the shell reads `;` as the end of
+the command. The last server is Microsoft Teams Direct Routing: three names tried
+in order, each resolving to one datacenter, and requests arriving from anywhere in
+the two ranges Microsoft publishes.
 
 ### Checking
 
@@ -134,6 +145,8 @@ value clears an optional one (`backup_uri=` drops the backup).
 | `type` | all | **required** | `sip-application`, `sip-proxy` or `sip-trunk` |
 | `primary_uri` | all | **required** | `sip:` or `sips:` URI. A trunk's carries the account's user part; the others' have none |
 | `backup_uri` | all | — | Tried when the primary fails or is down |
+| `tertiary_uri` | all | — | Tried when the backup fails or is down too |
+| `source_networks` | all | `[]` | CIDR networks (`52.112.0.0/14`), comma-separated. A request from one of them, over a transport the URIs name, comes from this server |
 | `use_dns_srv` | all | `false` | Resolve each URI through SRV records |
 | `send_keepalive` | all | `true` | Send the OPTIONS liveness probe |
 | `initiate_connection` | all | `true` | Over TCP or TLS, the node opens the connection |
@@ -149,9 +162,10 @@ value clears an optional one (`backup_uri=` drops the backup).
 | `auth_realm` | trunk | — | The realm its challenges are expected for |
 | `auth_password` | trunk | — | Write-only. Needs `auth_username` and `auth_realm`; only its MD5 and SHA-256 HA1 are kept |
 
-Within a domain, two servers never claim the same host, address or remote domain:
-the hosts of their URIs, a proxy's `ext_domain` and aliases, and the addresses
-these resolve to. A creation or an update that would is refused.
+Within a domain, two servers never claim the same host, address, source network or
+remote domain: the hosts of their URIs, a proxy's `ext_domain` and aliases, the
+addresses these resolve to, and two `source_networks` that overlap. A creation or
+an update that would is refused.
 
 Changing `auth_username` or `auth_realm` of a trunk that has a password needs
 `auth_password` again.
@@ -175,8 +189,11 @@ Kelix.Mod.SipServers.matches_server(sip_ctx, req) ::
 ```
 
 The server of the domain `req` comes from, recognised by its source address and
-transport. The source port is not compared. An address two servers of the domain
-have come to share answers `:no_match` (alarm `shared_address`).
+transport. The source port is not compared. An address a URI resolved to names its
+server; an address no URI resolved to names the server whose `source_networks`
+hold it, provided the transport is one its URIs name. An address two servers of
+the domain have come to share answers `:no_match` (alarm `shared_address`), and no
+network claims it either.
 
 A request recognised is proof of life: the server is marked up.
 
@@ -188,7 +205,7 @@ Kelix.Mod.SipServers.find_server(sip_ctx, req) :: slug | :no_match
 
 The server `req` is addressed to, from the host of its Request-URI: a `sip-proxy` by
 its `ext_domain` and aliases, a `sip-application` by the hosts of its URIs. A trunk
-is never found this way.
+is never found this way, and `source_networks` play no part.
 
 ### `forward/3`
 
@@ -219,8 +236,8 @@ fails: `call/1` ends with `{:call, :failed, %{reason: :forward_failed, cause:
 | Command | REST | Description |
 |---|---|---|
 | `kelictl sip_servers server.create …` | `POST /modules/sip_servers/servers` | Declares a server (`201`). `409` when its name, host, address or remote domain is taken; `400` for a domain the node does not serve |
-| `kelictl sip_servers server.list [domain]` | `GET /modules/sip_servers/servers` | The servers, optionally of one domain |
-| `kelictl sip_servers server.show <server>` | `GET /modules/sip_servers/servers/<server>` | One server: its fields (never the password; `auth` says `set` or `none`), `reachability`, `registration`, `aor_states`, `metrics`, `alarms` |
+| `kelictl sip_servers server.list [domain]` | `GET /modules/sip_servers/servers` | The servers, optionally of one domain. kelictl shows the first URI and counts the others (`sip:a (+2)`) |
+| `kelictl sip_servers server.show <server>` | `GET /modules/sip_servers/servers/<server>` | One server: its fields (never the password; `auth` says `set` or `none`), `uris`, `reachability`, `registration`, `aor_states`, `metrics`, `alarms`. kelictl lays the URIs out as a table, role, URI and state |
 | `kelictl sip_servers server.update <server> …` | `PUT` or `PATCH /modules/sip_servers/servers/<server>` | Changes the fields given |
 | `kelictl sip_servers server.delete <server>` | `DELETE /modules/sip_servers/servers/<server>` | Deletes it; a registered trunk is un-registered |
 | `kelictl sip_servers aor.add <server> <aor>` | `POST /modules/sip_servers/servers/<server>/aors` | Attaches a remote AOR (`user@domain`) to a proxy |
@@ -231,6 +248,7 @@ In `server.show`:
 
 | Key | Content |
 |---|---|
+| `uris` | The URIs in the order they are tried, each with its `role` (`primary`, `backup`, `tertiary`), `uri` and `state` |
 | `reachability` | Each URI and its state: `up`, `down`, `unknown` |
 | `registration` | A registering trunk's `state` (`unregistered`, `registering`, `registered`, `failed`) and last `error`; `null` otherwise |
 | `aor_states` | A proxy's remote AORs and their probed state |

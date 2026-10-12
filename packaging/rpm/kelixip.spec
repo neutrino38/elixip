@@ -32,7 +32,7 @@ Version:        1.6.4
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,14 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-4
+- sip_servers: a third URI (tertiary_uri), tried after the backup, and
+  source_networks, CIDR ranges a server's requests are recognised from on the
+  transports its URIs name. Microsoft Teams Direct Routing needs both: three
+  names each resolving to one datacenter, traffic from two /14 ranges.
+- kelictl: server.list shows the first URI and counts the others, server.show
+  lays the URIs out as a table with their role and state.
+
 * Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-3
 - A registration binding keeps the REGISTER's User-Agent, Call-ID and CSeq:
   kelictl registration show, the REST API and kelescope's live registrations

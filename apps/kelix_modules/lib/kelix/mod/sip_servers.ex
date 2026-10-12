@@ -142,7 +142,11 @@ defmodule Kelix.Mod.SipServers do
         rest: {:get, "/servers"},
         rw: :r,
         args: [%{name: "domain", required: false}],
-        render: %{kind: :table, columns: ~w(domain slug type primary_uri backup_uri ha_mode)},
+        render: %{
+          kind: :table,
+          columns: ~w(domain slug type uris ha_mode),
+          first: %{"uris" => "uri"}
+        },
         help: "List the SIP servers, optionally of one domain"
       },
       %{
@@ -153,10 +157,12 @@ defmodule Kelix.Mod.SipServers do
         args: key_args,
         render: %{
           kind: :detail,
-          fields: ~w(domain slug type primary_uri backup_uri use_dns_srv send_keepalive
+          fields: ~w(domain slug type uris source_networks use_dns_srv send_keepalive
                initiate_connection ha_mode ext_domain ext_domain_aliases probe_remote_aors
                probe_interval aors register register_expires register_retry auth_username auth_realm
-               auth reachability registration aor_states metrics alarms)
+               auth registration aor_states metrics alarms),
+          nested: %{"uris" => %{columns: ~w(role uri state)}},
+          hide: ~w(primary_uri backup_uri tertiary_uri reachability)
         },
         help: "Show one SIP server (never its credentials)"
       },
@@ -225,9 +231,9 @@ defmodule Kelix.Mod.SipServers do
   peer being where that server is answered, or `:no_match`.
 
   A server is recognised by the source address and transport of the request,
-  compared with what its URIs resolved to — never by the source port, which a
-  connected transport picks at random. An address two servers of the domain have
-  come to share answers `:no_match`.
+  compared with what its URIs resolved to, else with its `source_networks` — never
+  by the source port, which a connected transport picks at random. An address two
+  servers of the domain have come to share answers `:no_match`.
 
   Recognising is not trusting: what the request is worth (reject it, challenge
   it, accept it, keep its P-Asserted-Identity) is the script's decision.
@@ -247,8 +253,7 @@ defmodule Kelix.Mod.SipServers do
     domain = domain_of(ctx_or_domain)
 
     with {transport, ip, _port} <- SIP.Msg.Ops.source_flow(req),
-         [{_, entries}] when is_list(entries) <- lookup(@addr_table, {domain, ip}),
-         {slug, _t} <- Enum.find(entries, fn {_slug, t} -> t == transport end),
+         {:ok, slug} <- slug_at(domain, transport, ip),
          [{_, server, link}] <- lookup(@servers_table, {domain, slug}) do
       # Any request from the server is proof of life.
       if is_pid(link) do
@@ -259,6 +264,28 @@ defmodule Kelix.Mod.SipServers do
       {slug, Route.peer(server, link)}
     else
       _ -> :no_match
+    end
+  end
+
+  # A resolved address first: it names one server exactly, or two, in which case
+  # neither is recognised and no network may claim it either. A source network
+  # answers only for an address no URI resolved to.
+  defp slug_at(domain, transport, ip) do
+    case lookup(@addr_table, {domain, ip}) do
+      [{_, entries}] when is_list(entries) ->
+        case Enum.find(entries, fn {_slug, t} -> t == transport end) do
+          {slug, _t} -> {:ok, slug}
+          nil -> :no_match
+        end
+
+      [{_, :ambiguous}] ->
+        :no_match
+
+      [] ->
+        case Enum.find(servers_of(domain), &Server.from_network?(&1, transport, ip)) do
+          %Server{slug: slug} -> {:ok, slug}
+          nil -> :no_match
+        end
     end
   end
 
@@ -486,10 +513,16 @@ defmodule Kelix.Mod.SipServers do
   defp row(state, server) do
     status = Map.get(state.status, key(server), %{})
 
-    server
-    |> Server.public()
+    reachability = Map.get(status, :reachability, %{})
+    public = Server.public(server)
+
+    public
+    |> Map.put(
+      :uris,
+      for(u <- public.uris, do: Map.put(u, :state, Map.get(reachability, u.uri, "unknown")))
+    )
     |> Map.merge(%{
-      reachability: Map.get(status, :reachability, %{}),
+      reachability: reachability,
       registration: Map.get(status, :registration),
       aor_states: Map.get(status, :aor_states, %{}),
       metrics: Map.get(status, :metrics),
@@ -595,9 +628,9 @@ defmodule Kelix.Mod.SipServers do
     if Map.has_key?(state.servers, key(server)), do: {:error, :exists}, else: :ok
   end
 
-  # Within a domain: at most one sip-proxy per remote domain, and no host or
-  # address claimed by two servers — or matches_server/1 and find_server/1 could
-  # not tell them apart.
+  # Within a domain: at most one sip-proxy per remote domain, and no host, address
+  # or source network claimed by two servers — or matches_server/1 and
+  # find_server/1 could not tell them apart.
   defp no_conflict(state, server) do
     others =
       for {k, s} <- state.servers, k != key(server), s.domain == server.domain, do: s
@@ -607,7 +640,7 @@ defmodule Kelix.Mod.SipServers do
           Enum.any?(others, &(&1.type == "sip-proxy" and &1.ext_domain == server.ext_domain)) ->
         {:error, :ext_domain_in_use}
 
-      Enum.any?(others, &overlaps?(&1, server)) ->
+      Enum.any?(others, &(overlaps?(&1, server) or Server.networks_overlap?(&1, server))) ->
         {:error, :address_in_use}
 
       true ->

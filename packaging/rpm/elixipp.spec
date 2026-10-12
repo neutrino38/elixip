@@ -10,7 +10,7 @@
 
 Name:           elixipp
 Version:        1.6.4
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,9 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-4
+- Released together with kelixip 1.6.4-4; nothing changes in the tool.
+
 * Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-3
 - Released together with kelixip 1.6.4-3; nothing changes in the tool.
 

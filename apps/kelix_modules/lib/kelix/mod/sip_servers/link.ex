@@ -233,7 +233,7 @@ defmodule Kelix.Mod.SipServers.Link do
 
     state =
       if state.server.send_keepalive,
-        do: Enum.reduce(uris(state.server), state, &probe(&2, &1)),
+        do: Enum.reduce(Server.uris(state.server), state, &probe(&2, &1)),
         else: state
 
     {:noreply, schedule(state, state.interval_ms)}
@@ -537,7 +537,7 @@ defmodule Kelix.Mod.SipServers.Link do
   # failure — a registrar refusing us is not helped by being asked every second.
   defp register_failed(state, why) do
     reg = state.reg
-    uris = uris(state.server)
+    uris = Server.uris(state.server)
 
     if reg.state != :failed or reg.error != why do
       Logger.warning(
@@ -566,7 +566,7 @@ defmodule Kelix.Mod.SipServers.Link do
   # resolved, as a call is (`Kelix.Mod.SipServers.Route`).
   defp register_msg(state, reg, expires, auth) do
     server = state.server
-    uri = Enum.at(uris(server), reg.target) || server.primary_uri
+    uri = Enum.at(Server.uris(server), reg.target) || server.primary_uri
     {:ok, parsed} = SIP.Uri.parse(uri)
 
     case server.ext_domain do
@@ -768,7 +768,7 @@ defmodule Kelix.Mod.SipServers.Link do
   # The proxy URI to go through: the first one not known to be down, where it
   # resolved. `:down` when every one is, `nil` while none is resolved yet.
   defp proxy_hop(state) do
-    case Enum.reject(uris(state.server), &(Map.get(state.states, &1) == :down)) do
+    case Enum.reject(Server.uris(state.server), &(Map.get(state.states, &1) == :down)) do
       [] ->
         :down
 
@@ -840,11 +840,9 @@ defmodule Kelix.Mod.SipServers.Link do
 
   # ── states ──────────────────────────────────────────────────────────────────
 
-  defp uris(server), do: Enum.reject([server.primary_uri, server.backup_uri], &is_nil/1)
-
   # A URI kept keeps its state; a new one starts unknown.
   defp initial_states(server, old) do
-    Map.new(uris(server), fn uri -> {uri, Map.get(old, uri, :unknown)} end)
+    Map.new(Server.uris(server), fn uri -> {uri, Map.get(old, uri, :unknown)} end)
   end
 
   defp set(state, uri, new, why) do
@@ -892,7 +890,7 @@ defmodule Kelix.Mod.SipServers.Link do
   defp by_host(state, host) when is_binary(host) do
     host = String.downcase(host)
 
-    Enum.find(uris(state.server), fn uri ->
+    Enum.find(Server.uris(state.server), fn uri ->
       {:ok, parsed} = SIP.Uri.parse(uri)
       String.downcase(parsed.domain) == host
     end)

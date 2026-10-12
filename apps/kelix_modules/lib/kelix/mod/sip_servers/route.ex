@@ -42,7 +42,7 @@ defmodule Kelix.Mod.SipServers.Route do
   end
 
   defp shape(req, server, resolved, turn) do
-    uris = rotate(uris(server), server.ha_mode, turn)
+    uris = rotate(Server.uris(server), server.ha_mode, turn)
 
     case server.type do
       "sip-proxy" ->
@@ -66,7 +66,7 @@ defmodule Kelix.Mod.SipServers.Route do
     ruri = if server.type == "sip-proxy", do: :keep, else: :peer
 
     %Peer{
-      peer(server, uris(server), ruri, server.use_dns_srv)
+      peer(server, Server.uris(server), ruri, server.use_dns_srv)
       | trunk_pid: link,
         credentials: credentials(server, link)
     }
@@ -81,8 +81,6 @@ defmodule Kelix.Mod.SipServers.Route do
   defp peer(_server, targets, ruri, use_srv) do
     %Peer{uris: targets, fork: :serial, ruri: ruri, use_srv: use_srv}
   end
-
-  defp uris(server), do: Enum.reject([server.primary_uri, server.backup_uri], &is_nil/1)
 
   defp rotate(uris, "loadsharing", turn) when uris != [] do
     n = rem(turn, length(uris))

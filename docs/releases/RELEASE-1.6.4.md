@@ -1,5 +1,37 @@
 # Release 1.6.4
 
+## 1.6.4-4
+
+2026-10-12 — package revision 4 of 1.6.4. Theme: a SIP server with three
+addresses and a source range, for Microsoft Teams Direct Routing.
+
+### SIP servers
+
+- **`tertiary_uri`**: a third URI, tried when the backup fails or is down too.
+  Probed, failed over and load-shared like the other two.
+- **`source_networks`**: CIDR ranges, comma-separated in kelictl. A request
+  from one of them, over a transport the server's URIs name, comes from that
+  server. An address a URI resolved to still names its own server first. Two
+  servers of a domain may not declare overlapping ranges.
+- Microsoft Teams Direct Routing is the case: `sip`, `sip2` and `sip3`
+  `.pstnhub.microsoft.com` each resolve to one datacenter, and the hub sends
+  from anywhere in `52.112.0.0/14` and `52.120.0.0/14`.
+- `kelictl sip_servers server.list` shows the first URI and counts the others
+  (`sip:a (+2)`); `server.show` lays the URIs out as a table, role, URI and
+  state. The REST rows and kelescope keep every key they had, plus `uris`.
+
+### kelictl
+
+- Two render hints a module may declare: `first:` shows, in a table column
+  holding a list, the first entry's key and counts the rest; `hide:` leaves a
+  field out of a detail view.
+
+### Upgrading
+
+- `dnf upgrade kelixip kelixip-mod-sip_servers` replaces 1.6.4-3. No
+  configuration change; a `server_file` from 1.6.4-2 or -3 is read as is.
+  elixipp 1.6.4-4 is the same tool as 1.6.4-3, rebuilt alongside.
+
 ## 1.6.4-3
 
 2026-10-12 — package revision 3 of 1.6.4. Theme: what the registrar and the

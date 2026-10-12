@@ -27,10 +27,12 @@ defmodule Kelix.Mod.SipServers.Server do
   @trunk_only ~w(register register_expires register_retry auth_username auth_realm auth_password)
   @ext_domain_types ~w(sip-proxy sip-trunk)
 
-  @fields ~w(domain slug type primary_uri backup_uri use_dns_srv send_keepalive
-             initiate_connection ha_mode ext_domain ext_domain_aliases probe_remote_aors
-             probe_interval aors register register_expires register_retry auth_username
-             auth_realm auth_password)
+  @fields ~w(domain slug type primary_uri backup_uri tertiary_uri source_networks use_dns_srv
+             send_keepalive initiate_connection ha_mode ext_domain ext_domain_aliases
+             probe_remote_aors probe_interval aors register register_expires register_retry
+             auth_username auth_realm auth_password)
+
+  @roles [primary_uri: "primary", backup_uri: "backup", tertiary_uri: "tertiary"]
 
   @type t :: %__MODULE__{}
 
@@ -39,6 +41,8 @@ defmodule Kelix.Mod.SipServers.Server do
             type: nil,
             primary_uri: nil,
             backup_uri: nil,
+            tertiary_uri: nil,
+            source_networks: [],
             use_dns_srv: false,
             send_keepalive: true,
             initiate_connection: true,
@@ -84,6 +88,8 @@ defmodule Kelix.Mod.SipServers.Server do
          {:ok, s} <- put_enum(s, args, "type", @types),
          {:ok, s} <- put_uri(s, args, "primary_uri"),
          {:ok, s} <- put_uri(s, args, "backup_uri"),
+         {:ok, s} <- put_uri(s, args, "tertiary_uri"),
+         {:ok, s} <- put_networks(s, args, "source_networks"),
          {:ok, s} <- put_bool(s, args, "use_dns_srv"),
          {:ok, s} <- put_bool(s, args, "send_keepalive"),
          {:ok, s} <- put_bool(s, args, "initiate_connection"),
@@ -107,6 +113,53 @@ defmodule Kelix.Mod.SipServers.Server do
     end
   end
 
+  @doc "The server's URIs in the order they are tried: primary, backup, tertiary."
+  @spec uris(t()) :: [String.t()]
+  def uris(%__MODULE__{} = s), do: for({_role, uri} <- roles(s), do: uri)
+
+  @doc "The server's URIs with their role, in the order they are tried."
+  @spec roles(t()) :: [{String.t(), String.t()}]
+  def roles(%__MODULE__{} = s) do
+    for {field, role} <- @roles, uri = Map.get(s, field), uri != nil, do: {role, uri}
+  end
+
+  @doc """
+  Whether a request from `ip` over `transport` falls in one of the server's
+  `source_networks`. The transport must be one its URIs name: a network widens
+  the addresses a server may come from, not what it speaks.
+  """
+  @spec from_network?(t(), String.t(), :inet.ip_address()) :: boolean()
+  def from_network?(%__MODULE__{source_networks: []}, _transport, _ip), do: false
+
+  def from_network?(%__MODULE__{} = s, transport, ip) do
+    transport in transports(s) and
+      Enum.any?(s.source_networks, fn text ->
+        {:ok, prefix} = SIP.NetUtils.parse_prefix(text)
+        SIP.NetUtils.in_prefix?(ip, prefix)
+      end)
+  end
+
+  @doc "Do the `source_networks` of two servers overlap?"
+  @spec networks_overlap?(t(), t()) :: boolean()
+  def networks_overlap?(%__MODULE__{} = a, %__MODULE__{} = b) do
+    prefixes = fn s ->
+      for text <- s.source_networks, do: elem(SIP.NetUtils.parse_prefix(text), 1)
+    end
+
+    Enum.any?(prefixes.(a), fn {addr_a, _} = pa ->
+      Enum.any?(prefixes.(b), fn {addr_b, _} = pb ->
+        SIP.NetUtils.in_prefix?(addr_a, pb) or SIP.NetUtils.in_prefix?(addr_b, pa)
+      end)
+    end)
+  end
+
+  defp transports(s) do
+    for uri <- uris(s), uniq: true do
+      {:ok, parsed} = parse_uri(uri)
+      SIP.Uri.get_transport(parsed) || "UDP"
+    end
+  end
+
   @doc """
   The host names and addresses this server claims within its domain: the hosts
   of its URIs, plus a proxy's remote domain and aliases. Two servers of a domain
@@ -115,7 +168,7 @@ defmodule Kelix.Mod.SipServers.Server do
   """
   @spec claims(t()) :: [String.t()]
   def claims(%__MODULE__{} = s) do
-    hosts = for uri <- [s.primary_uri, s.backup_uri], uri != nil, do: uri_host(uri)
+    hosts = for uri <- uris(s), do: uri_host(uri)
 
     proxy =
       if s.type == "sip-proxy",
@@ -125,13 +178,17 @@ defmodule Kelix.Mod.SipServers.Server do
     Enum.uniq(hosts ++ proxy)
   end
 
-  @doc "What `show` and `list` display: everything but the HA1."
+  @doc """
+  What `show` and `list` display: everything but the HA1, plus `uris`, the URIs
+  with their role in the order they are tried.
+  """
   @spec public(t()) :: map()
   def public(%__MODULE__{} = s) do
     s
     |> Map.from_struct()
     |> Map.delete(:auth_ha1)
     |> Map.put(:auth, if(s.auth_ha1 == [], do: "none", else: "set"))
+    |> Map.put(:uris, for({role, uri} <- roles(s), do: %{role: role, uri: uri}))
   end
 
   # ── fields ──────────────────────────────────────────────────────────────────
@@ -259,6 +316,16 @@ defmodule Kelix.Mod.SipServers.Server do
     |> Enum.uniq()
   end
 
+  # CIDR prefixes, each kept as the operator wrote it once it parses.
+  defp put_networks(s, args, key) do
+    with {:ok, s} <- put_list(s, args, key, & &1) do
+      case Enum.reject(Map.get(s, field(key)), &match?({:ok, _}, SIP.NetUtils.parse_prefix(&1))) do
+        [] -> {:ok, s}
+        [bad | _] -> {:error, "#{key}: #{inspect(bad)} is not a CIDR network (a.b.c.d/n)"}
+      end
+    end
+  end
+
   defp put_password(s, base, args) do
     case fetch(args, "auth_password") do
       {:ok, pass} when is_binary(pass) and pass != "" ->
@@ -341,7 +408,7 @@ defmodule Kelix.Mod.SipServers.Server do
 
   # An application server is a host, a trunk is an account on one.
   defp check_userpart(%__MODULE__{type: type} = s) do
-    for uri <- [s.primary_uri, s.backup_uri], uri != nil, reduce: :ok do
+    for uri <- uris(s), reduce: :ok do
       :ok ->
         {:ok, parsed} = parse_uri(uri)
 

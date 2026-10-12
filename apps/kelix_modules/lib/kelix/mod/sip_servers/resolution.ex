@@ -27,7 +27,7 @@ defmodule Kelix.Mod.SipServers.Resolution do
           {:ok, %{String.t() => [address]}, pos_integer() | :infinity} | {:error, term}
   def resolve(%Server{} = server) do
     results =
-      for uri <- [server.primary_uri, server.backup_uri], uri != nil, into: %{} do
+      for uri <- Server.uris(server), into: %{} do
         {uri, resolve_uri(uri, server.use_dns_srv)}
       end
 

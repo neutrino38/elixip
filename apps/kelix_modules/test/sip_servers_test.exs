@@ -104,6 +104,42 @@ defmodule Kelix.Mod.SipServersTest do
       assert s.probe_interval == 30
     end
 
+    test "a third URI and the source networks, as kelictl and the API give them" do
+      assert {:ok, s} =
+               create(%{
+                 "slug" => "hub",
+                 "type" => "sip-application",
+                 "primary_uri" => "sip:sip.pstnhub.microsoft.com:5061;transport=tls",
+                 "backup_uri" => "sip:sip2.pstnhub.microsoft.com:5061;transport=tls",
+                 "tertiary_uri" => "sip:sip3.pstnhub.microsoft.com:5061;transport=tls",
+                 "source_networks" => "52.112.0.0/14, 52.120.0.0/14"
+               })
+
+      assert s.tertiary_uri == "sip:sip3.pstnhub.microsoft.com:5061;transport=tls"
+      assert s.source_networks == ["52.112.0.0/14", "52.120.0.0/14"]
+
+      assert Enum.map(s.uris, & &1.role) == ["primary", "backup", "tertiary"]
+
+      assert {:ok, s} =
+               control("server.update", %{
+                 "domain" => @domain,
+                 "slug" => "hub",
+                 "source_networks" => ["52.112.0.0/14"]
+               })
+
+      assert s.source_networks == ["52.112.0.0/14"]
+
+      assert {:error, msg} =
+               create(%{
+                 "slug" => "typo",
+                 "type" => "sip-application",
+                 "primary_uri" => "sip:10.0.0.9",
+                 "source_networks" => "52.112.0.0/33"
+               })
+
+      assert msg =~ "source_networks"
+    end
+
     test "the slug is a hostname" do
       assert {:error, msg} = app("not a host", "sip:10.0.0.5")
       assert msg =~ "hostname"
@@ -187,6 +223,32 @@ defmodule Kelix.Mod.SipServersTest do
     test "an address" do
       {:ok, _} = app("acd", "sip:10.0.0.5")
       assert {:error, :address_in_use} = app("ivr", "sip:10.0.0.5:5070")
+    end
+
+    test "a source network" do
+      {:ok, _} =
+        create(%{
+          "slug" => "a",
+          "type" => "sip-application",
+          "primary_uri" => "sip:10.0.0.5",
+          "source_networks" => "52.112.0.0/14"
+        })
+
+      assert {:error, :address_in_use} =
+               create(%{
+                 "slug" => "b",
+                 "type" => "sip-application",
+                 "primary_uri" => "sip:10.0.0.6",
+                 "source_networks" => "52.114.0.0/16"
+               })
+
+      assert {:ok, _} =
+               create(%{
+                 "slug" => "c",
+                 "type" => "sip-application",
+                 "primary_uri" => "sip:10.0.0.7",
+                 "source_networks" => "52.120.0.0/14"
+               })
     end
 
     test "a remote domain, between two proxies" do
@@ -286,6 +348,54 @@ defmodule Kelix.Mod.SipServersTest do
     end
   end
 
+  # The rows an operator reads: the list keeps to one URI per server and counts the
+  # others, the detail lays every URI out with its role and state.
+  describe "kelictl rendering" do
+    setup do
+      Kelix.Test.Fixtures.with_module("sip_servers", SipServers)
+      :ok = Kelix.Control.Registry.register("sip_servers", SipServers.describe_control())
+      on_exit(fn -> Kelix.Control.Registry.deregister("sip_servers") end)
+    end
+
+    test "server.list shows the first URI and counts the others; server.show tabulates them" do
+      {:ok, _} =
+        create(%{
+          "slug" => "hub",
+          "type" => "sip-application",
+          "primary_uri" => "sip:sip.pstnhub.microsoft.com:5061;transport=tls",
+          "backup_uri" => "sip:sip2.pstnhub.microsoft.com:5061;transport=tls",
+          "tertiary_uri" => "sip:sip3.pstnhub.microsoft.com:5061;transport=tls",
+          "source_networks" => "52.112.0.0/14,52.120.0.0/14"
+        })
+
+      {:ok, _} = app("acd", "sip:10.0.0.5")
+
+      {0, out} = Kelix.Control.CLI.run(["sip_servers", "server.list"], node())
+      [header, acd, hub] = String.split(out, "\n")
+      assert header =~ ~r/^domain\s+slug\s+type\s+uris\s+ha_mode$/
+      assert acd =~ ~r/acd\s+sip-application\s+sip:10\.0\.0\.5\s+failover$/
+      assert hub =~ ~r/sip:sip\.pstnhub\.microsoft\.com:5061;transport=tls \(\+2\)\s+failover$/
+
+      {0, out} =
+        Kelix.Control.CLI.run(
+          ["sip_servers", "server.show", "domain=#{@domain}", "slug=hub"],
+          node()
+        )
+
+      assert out =~ ~r"""
+             ^Uris:
+               role      uri                                                state
+               primary   sip:sip\.pstnhub\.microsoft\.com:5061;transport=tls   \w+
+               backup    sip:sip2\.pstnhub\.microsoft\.com:5061;transport=tls  \w+
+               tertiary  sip:sip3\.pstnhub\.microsoft\.com:5061;transport=tls  \w+
+             """m
+
+      assert out =~ ~r{^Source networks:\s+52\.112\.0\.0/14, 52\.120\.0\.0/14$}m
+      refute out =~ "Primary uri:"
+      refute out =~ "Reachability:"
+    end
+  end
+
   describe "persistence" do
     test "a restart brings the servers back, credentials included", %{path: path} do
       {:ok, _} = trunk("op")
@@ -318,9 +428,17 @@ defmodule Kelix.Mod.SipServersTest do
     end
 
     test "store round trip, field by field", %{path: path} do
-      {:ok, _} = trunk("op", %{"backup_uri" => "sip:0123456789@sbc2.operator.net"})
+      {:ok, _} =
+        trunk("op", %{
+          "backup_uri" => "sip:0123456789@sbc2.operator.net",
+          "tertiary_uri" => "sip:0123456789@sbc3.operator.net",
+          "source_networks" => "198.51.100.0/24"
+        })
+
       assert {:ok, [s]} = Store.load(path)
       assert s.backup_uri == "sip:0123456789@sbc2.operator.net"
+      assert s.tertiary_uri == "sip:0123456789@sbc3.operator.net"
+      assert s.source_networks == ["198.51.100.0/24"]
       assert length(s.auth_ha1) == 2
     end
   end

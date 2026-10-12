@@ -22,12 +22,14 @@ defmodule Kelix.Mod.SipServersRoutingTest do
       "sbc2.operator.net" => {192, 0, 2, 11},
       "proxy.partner.net" => {198, 51, 100, 5},
       "app-a.example.net" => {10, 0, 0, 77},
-      "app-b.example.net" => {10, 0, 0, 77}
+      "app-b.example.net" => {10, 0, 0, 77},
+      "hub.example.net" => {203, 0, 113, 10},
+      "lan.example.net" => {10, 0, 0, 100}
     }
 
     def resolve(server) do
       targets =
-        for uri <- [server.primary_uri, server.backup_uri], uri != nil, into: %{} do
+        for uri <- SipServers.Server.uris(server), into: %{} do
           {:ok, parsed} = SIP.Uri.parse(uri)
           transport = SIP.Uri.get_transport(parsed) || "UDP"
           port = SIP.Uri.target_port(parsed)
@@ -174,6 +176,38 @@ defmodule Kelix.Mod.SipServersRoutingTest do
       assert SipServers.matches_server("other.com", req) == :no_match
     end
 
+    test "a source network answers for an address no URI resolved to, on the URIs' transport" do
+      :ok = app("acd", "sip:10.0.0.5:5060;transport=tcp")
+
+      :ok =
+        app("hub", "sip:hub.example.net:5061;transport=tls", %{
+          "source_networks" => "52.112.0.0/14, 52.120.0.0/14"
+        })
+
+      resolved!("acd")
+      resolved!("hub")
+
+      in_range = request(uri("3000", @domain), {SIP.Transport.TLS, {52, 114, 75, 24}, 40_000})
+      assert {"hub", %Peer{}} = SipServers.matches_server(@domain, in_range)
+
+      # the hub speaks TLS: the same address over TCP is not it
+      tcp = request(uri("3000", @domain), {SIP.Transport.TCP, {52, 114, 75, 24}, 40_000})
+      assert SipServers.matches_server(@domain, tcp) == :no_match
+
+      outside = request(uri("3000", @domain), {SIP.Transport.TLS, {52, 116, 0, 1}, 40_000})
+      assert SipServers.matches_server(@domain, outside) == :no_match
+
+      # an address a URI resolved to is that server, whatever network claims it
+      :ok = app("lan", "sip:lan.example.net;transport=tcp", %{"source_networks" => "10.0.0.0/8"})
+      resolved!("lan")
+
+      exact = request(uri("3000", @domain), {SIP.Transport.TCP, {10, 0, 0, 5}, 40_000})
+      assert {"acd", _} = SipServers.matches_server(@domain, exact)
+
+      near = request(uri("3000", @domain), {SIP.Transport.TCP, {10, 0, 0, 6}, 40_000})
+      assert {"lan", _} = SipServers.matches_server(@domain, near)
+    end
+
     test "two servers resolving to one address are recognised as neither, and said" do
       log =
         capture_log(fn ->
@@ -266,6 +300,18 @@ defmodule Kelix.Mod.SipServersRoutingTest do
       assert {second.domain, second.destip} == {"operator.net", {192, 0, 2, 11}}
       assert first.destproto == "UDP"
       assert newreq.from.domain == "operator.net"
+    end
+
+    test "the three URIs are tried in order: primary, backup, tertiary" do
+      :ok =
+        app("acd", "sip:10.0.0.5", %{
+          "backup_uri" => "sip:10.0.0.6",
+          "tertiary_uri" => "sip:10.0.0.7"
+        })
+
+      req = request(uri("3000", @domain))
+      assert {_, %Peer{fork: :serial, uris: targets}} = SipServers.forward(@domain, req, "acd")
+      assert Enum.map(targets, & &1.domain) == ["10.0.0.5", "10.0.0.6", "10.0.0.7"]
     end
 
     test "loadsharing starts each call on the next server" do

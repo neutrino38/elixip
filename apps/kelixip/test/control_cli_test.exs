@@ -991,6 +991,22 @@ defmodule Kelix.Control.CLITest do
             rw: :r,
             args: [],
             help: "A command with no render hint"
+          },
+          %{
+            name: "thing.heads",
+            rest: {:get, "/things/heads"},
+            rw: :r,
+            args: [],
+            render: %{kind: :table, columns: ~w(name members), first: %{"members" => "name"}},
+            help: "A table whose column shows the first entry of a list and counts the rest"
+          },
+          %{
+            name: "thing.brief",
+            rest: {:get, "/things/brief"},
+            rw: :r,
+            args: [],
+            render: %{kind: :detail, fields: ~w(name), hide: ~w(domain)},
+            help: "A detail view that hides a field of the result"
           }
         ]
       end
@@ -1035,6 +1051,18 @@ defmodule Kelix.Control.CLITest do
         do: {:ok, %{members: [%{name: "alice", state: :connected}]}}
 
       def handle_control("thing.raw", _args), do: {:ok, %{name: "raw"}}
+
+      def handle_control("thing.heads", _args) do
+        {:ok,
+         [
+           %{name: "trio", members: [%{name: "alice"}, %{name: "bob"}, %{name: "carol"}]},
+           %{name: "solo", members: [%{name: "dave"}]},
+           %{name: "empty", members: []}
+         ]}
+      end
+
+      def handle_control("thing.brief", _args),
+        do: {:ok, %{name: "brief", domain: "example.com", stale: false}}
     end
 
     setup do
@@ -1117,6 +1145,21 @@ defmodule Kelix.Control.CLITest do
     test "a command without a render hint keeps the raw term" do
       {0, out} = run(["rmod", "thing.raw"])
       assert out =~ "%{name: \"raw\"}"
+    end
+
+    test "a `first:` column shows the first entry's key and counts the others" do
+      {0, out} = run(["rmod", "thing.heads"])
+      [header, trio, solo, empty] = String.split(out, "\n")
+
+      assert header =~ ~r/^name\s+members$/
+      assert trio =~ ~r/^trio\s+alice \(\+2\)$/
+      assert solo =~ ~r/^solo\s+dave$/
+      assert empty =~ ~r/^empty\s+-$/
+    end
+
+    test "a `hide:` field is left out of the detail view, the others still print" do
+      {0, out} = run(["rmod", "thing.brief"])
+      assert out == "Name:  brief\nStale: false"
     end
   end
 

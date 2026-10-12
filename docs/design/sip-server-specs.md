@@ -137,7 +137,9 @@ declared neither in `config.toml` nor in `domains.toml`: a server names its doma
 slug, and the node's configuration files never describe one.
 
 - un slug qui doit être au format hostname
-- une ou deux SIP uri (primary_uri, backup_uri)
+- une à trois SIP uri (primary_uri, backup_uri, tertiary_uri)
+- source_networks : des réseaux CIDR d'où le serveur peut émettre (Microsoft Teams
+  publie des plages, et ses noms ne résolvent chacun que vers un datacenter)
 - use_dns_srv 
 - send_keepalive
 - ha_mode = failover | loadsharing
@@ -400,7 +402,7 @@ the script names the server it forwards to.
 Finds the server a request is addressed to, from the host of its R-URI, so a script can
 name it to `forward/2` without hard-coding it. Candidates are the `sip-proxy` servers
 (their `ext_domain` and `ext_domain_aliases`) and the `sip-application` servers (the
-host of their `primary_uri` and `backup_uri`); a `sip-trunk` is never found this way.
+host of their URIs); a `sip-trunk` is never found this way.
 
 Returns the server slug or `:no_match`. A host designates at most one server of a
 kelixip domain across both types: kelictl and the API refuse a server whose domain,
@@ -528,7 +530,8 @@ and are the names kelictl and the API use; an absent field takes its default.
 | `slug` | all | hostname-shaped, unique within the domain |
 | `domain` | all | slug of the kelixip domain the server belongs to |
 | `type` | all | `sip-application` \| `sip-proxy` \| `sip-trunk` |
-| `primary_uri`, `backup_uri` | all | a trunk's URIs carry the account's user part |
+| `primary_uri`, `backup_uri`, `tertiary_uri` | all | tried in this order; a trunk's URIs carry the account's user part |
+| `source_networks` | all | CIDR networks a request may come from, besides the resolved URIs; the transport must be one the URIs name |
 | `use_dns_srv` | all | resolve each URI through SRV (default `false`) |
 | `send_keepalive` | all | OPTIONS liveness (default `true`) |
 | `initiate_connection` | all | who opens a connected transport (default `true`) |

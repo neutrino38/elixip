@@ -67,6 +67,8 @@ defmodule Kelix.Mod.SipServers.Store do
       "type" => s.type,
       "primary_uri" => s.primary_uri,
       "backup_uri" => s.backup_uri,
+      "tertiary_uri" => s.tertiary_uri,
+      "source_networks" => s.source_networks,
       "use_dns_srv" => s.use_dns_srv,
       "send_keepalive" => s.send_keepalive,
       "initiate_connection" => s.initiate_connection,
