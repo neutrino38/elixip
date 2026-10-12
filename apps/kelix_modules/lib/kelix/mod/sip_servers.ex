@@ -295,8 +295,9 @@ defmodule Kelix.Mod.SipServers do
       {:ok, server, resolved, turn, link} ->
         result = Route.forward(req, server, resolved, turn, link)
 
-        if is_pid(link) and match?({_, _}, result) and Map.get(req, :method) == :INVITE,
-          do: Link.count_call(link, :out)
+        if is_pid(link) and match?({_, %SIP.B2bua.Peer{}}, result) and
+             Map.get(req, :method) == :INVITE,
+           do: Link.count_call(link, :out)
 
         result
 

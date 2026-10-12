@@ -15,10 +15,16 @@ defmodule Kelix.Mod.SipServersPushTest do
 
   @domain "example.com"
 
-  # A literal address resolves to itself, `shared-*` names to one address, any other
-  # name to a 10.0.3.x address of its own.
+  # A literal address resolves to itself, `shared-*` names to one address,
+  # `unresolved-*` names to nothing, any other name to a 10.0.3.x address of its own.
   defmodule FakeDns do
     def resolve(server) do
+      if String.contains?(server.primary_uri, "unresolved-"),
+        do: {:error, :nxdomain},
+        else: resolve_all(server)
+    end
+
+    defp resolve_all(server) do
       targets =
         for uri <- [server.primary_uri, server.backup_uri], uri != nil, into: %{} do
           {:ok, parsed} = SIP.Uri.parse(uri)
@@ -165,6 +171,22 @@ defmodule Kelix.Mod.SipServersPushTest do
       end)
 
     assert row.metrics.failures == %{"486" => 1}
+  end
+
+  test "a forward that finds nowhere to send is not counted as a call out" do
+    capture_log(fn ->
+      :ok =
+        create("lost", "sip-trunk", "sip:42@unresolved-lost.example.net", %{
+          "send_keepalive" => "false",
+          "register" => "false",
+          "ext_domain" => "operator.net"
+        })
+
+      assert {:error, :not_resolved} =
+               SipServers.forward(@domain, invite_from({10, 0, 0, 1}), "lost")
+    end)
+
+    assert Link.status(link("lost")).metrics.calls_out == 0
   end
 
   test "a challenge for another realm raises an alarm, cleared by a new password" do
