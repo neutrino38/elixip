@@ -32,7 +32,7 @@ Version:        1.6.4
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,25 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-2
+- New subpackage kelixip-mod-sip_servers: the remote SIP servers of a domain
+  (sip-application, sip-proxy, sip-trunk), declared with kelictl sip_servers,
+  the REST API or kelescope and kept in server_file. Scripts call
+  matches_server/2, find_server/2 and forward/3; a [module.sip_servers] block
+  in config.toml enables it.
+- Each server's URIs are probed by OPTIONS; a call skips a URI known to be
+  down. A request from a server that a script recognises proves it alive:
+  its OPTIONS reach a script through a [[domain.options]] rule.
+- A sip-trunk registers its account (register = true by default) and answers
+  the operator's 401/407 on INVITE, re-INVITE, UPDATE, BYE and MESSAGE with
+  its HA1; the password is never stored.
+- A sip-proxy's remote AORs are probed through it and reported to presence.
+- kelescope 0.7.0 shows a domain's servers live: subscribe_sip_servers/2
+  pushes each server's state, counters and alarms (realm mismatch, address
+  shared by two servers).
+- A script can keep an inbound P-Asserted-Identity: trust_asserted_identity/1.
+- Digest: a challenge naming SHA-256, the RFC 8760 spelling, is answered.
+
 * Thu Oct 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-1
 - Screen sharing through the B2BUA. A leg carries several video streams and
   BUNDLE: the second m=video of a browser sharing its screen is a stream of

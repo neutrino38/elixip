@@ -1,5 +1,58 @@
 # Release 1.6.4
 
+## 1.6.4-2
+
+2026-10-12 — package revision 2 of 1.6.4. Theme: the SIP servers of a domain —
+application servers, proxies and trunks.
+
+### SIP servers (new module `sip_servers`)
+
+A domain can now declare the remote hosts it exchanges calls with. See
+[sip_servers.md](../kelixip/modules/sip_servers.md).
+
+- **Three types.** `sip-application` (an ACD, an IVR), `sip-proxy` (a partner
+  PBX with users of its own), `sip-trunk` (an account at an operator). The type
+  decides how a forwarded call is shaped: Request-URI, To, and for a trunk the
+  From.
+- **Declared at run time.** `kelictl sip_servers server.create|list|show|update|delete`,
+  the same commands over REST, and kelescope 0.7.0. The servers are kept in
+  `server_file`, never in `config.toml` or `domains.toml`. A trunk's password is
+  kept only as its MD5 and SHA-256 HA1.
+- **Scripts decide.** `matches_server/2` says which server a request comes
+  from, `find_server/2` which one it is addressed to, `forward/3` how to send a
+  call to one. Recognising a server is not trusting it: keeping its
+  P-Asserted-Identity is the script's `trust_asserted_identity/1`.
+- **Liveness.** Each URI is probed by OPTIONS; a call skips a URI known to be
+  down instead of waiting for its timeout. A server's own OPTIONS prove it
+  alive when a `[[domain.options]]` rule hands them to a script that calls
+  `matches_server/2`.
+- **Trunks** register their account (`register = false` for one that only
+  answers challenges) and answer the operator's 401/407 on INVITE, re-INVITE,
+  UPDATE, BYE and MESSAGE.
+- **Proxies**: their remote AORs are probed through them and reported to
+  presence, so a remote user is watched like a local one.
+- **Supervision**: per server, the state of each URI, the registration, calls
+  in and out, failures by response code, OPTIONS response time, and two alarms
+  — a challenge for an unexpected realm, an address shared by two servers.
+  kelescope shows them live in the domain screen.
+
+### elixipp and the framework
+
+- B2BUA: a peer's `trunk_pid` is asked `{:reachable?, uri}` before each
+  target, and told each attempt's outcome (`{:call_result, target, code}`); a
+  peer's `credentials` answer a 401/407 on the outbound leg.
+- `trust_asserted_identity/1` records an inbound P-Asserted-Identity as the
+  identity a forward asserts.
+- Digest: a challenge naming `SHA-256`, the RFC 8760 spelling, is answered;
+  only `SHA256` was.
+
+### Upgrading
+
+- `dnf upgrade kelixip` replaces 1.6.4-1. `dnf install
+  kelixip-mod-sip_servers` (`apt install kelixip-mod-sip-servers`), then a
+  `[module.sip_servers]` block with `server_file` in `config.toml` and a
+  restart. Nothing changes for a node that does not load the module.
+
 ## 1.6.4-1
 
 2026-10-08 — since 1.6.3-2 (2026-10-06). Theme: screen sharing through the

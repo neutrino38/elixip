@@ -10,7 +10,7 @@
 
 Name:           elixipp
 Version:        1.6.4
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,17 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-2
+- Released together with kelixip 1.6.4-2.
+- B2BUA: a peer's trunk_pid is asked {:reachable?, uri} before each target,
+  and a target reported down is skipped unsent; it is told each attempt's
+  outcome ({:call_result, target, code}).
+- B2BUA: a peer's credentials answer a 401/407 on the outbound leg; the
+  request is sent again once with the digest.
+- trust_asserted_identity/1 records an inbound P-Asserted-Identity as the
+  identity a forward asserts.
+- Digest: a challenge naming SHA-256, the RFC 8760 spelling, is answered.
+
 * Thu Oct 08 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-1
 - Released together with kelixip 1.6.4-1.
 - Several video streams and BUNDLE on a WebRTC leg; a stream the peer stops

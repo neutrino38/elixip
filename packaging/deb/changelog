@@ -1,3 +1,25 @@
+kelixip (1.6.4-2) stable; urgency=low
+
+  * New package kelixip-mod-sip-servers: the remote SIP servers of a domain
+    (sip-application, sip-proxy, sip-trunk), declared with kelictl sip_servers,
+    the REST API or kelescope and kept in server_file. Scripts call
+    matches_server/2, find_server/2 and forward/3; a [module.sip_servers] block
+    in config.toml enables it.
+  * Each server's URIs are probed by OPTIONS; a call skips a URI known to be
+    down. A request from a server that a script recognises proves it alive:
+    its OPTIONS reach a script through a [[domain.options]] rule.
+  * A sip-trunk registers its account (register = true by default) and answers
+    the operator's 401/407 on INVITE, re-INVITE, UPDATE, BYE and MESSAGE with
+    its HA1; the password is never stored.
+  * A sip-proxy's remote AORs are probed through it and reported to presence.
+  * kelescope 0.7.0 shows a domain's servers live: subscribe_sip_servers/2
+    pushes each server's state, counters and alarms (realm mismatch, address
+    shared by two servers).
+  * A script can keep an inbound P-Asserted-Identity: trust_asserted_identity/1.
+  * Digest: a challenge naming SHA-256, the RFC 8760 spelling, is answered.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 18:00:00 +0200
+
 kelixip (1.6.4-1) stable; urgency=low
 
   * Screen sharing through the B2BUA. A leg carries several video streams
