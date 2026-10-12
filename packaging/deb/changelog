@@ -1,3 +1,13 @@
+kelixip (1.6.4-3) stable; urgency=low
+
+  * A registration binding keeps the REGISTER's User-Agent, Call-ID and CSeq:
+    kelictl registration show, the REST API and kelescope's live registrations
+    carry them (user_agent, callid, cseq).
+  * A published presence state reports received_time, the instant the PUBLISH
+    was accepted, in epoch seconds like kamailio's column.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 19:00:00 +0200
+
 kelixip (1.6.4-2) stable; urgency=low
 
   * New package kelixip-mod-sip-servers: the remote SIP servers of a domain

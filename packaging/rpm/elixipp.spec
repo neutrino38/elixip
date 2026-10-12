@@ -10,7 +10,7 @@
 
 Name:           elixipp
 Version:        1.6.4
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,9 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-3
+- Released together with kelixip 1.6.4-3; nothing changes in the tool.
+
 * Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-2
 - Released together with kelixip 1.6.4-2.
 - B2BUA: a peer's trunk_pid is asked {:reachable?, uri} before each target,
@@ -113,15 +116,15 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 * Sat Sep 26 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-6
 - Rebuild, released together with kelixip 1.6.0-6.
 
+* Sat Sep 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.5-2
+- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
+  before the rest of the release landed. No code change.
+
 * Fri Sep 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-1
 - The Finite State Language leaves the tree: it is now the separate package
   finite_state_language (OTP app :fsl, Apache-2.0). Scenarios keep the names they
   use: SIP.Scenario stays the facade a scenario uses.
 - User-Agent is now Elixipp-1.6.0.
-
-* Sat Sep 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.5-2
-- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
-  before the rest of the release landed. No code change.
 
 * Tue Sep 15 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.5-1
 - sip: an INVITE server transaction no longer carries timer F, which ended every

@@ -1,5 +1,29 @@
 # Release 1.6.4
 
+## 1.6.4-3
+
+2026-10-12 — package revision 3 of 1.6.4. Theme: what the registrar and the
+presence collection show of what they hold.
+
+### Registrations
+
+- A binding keeps the REGISTER's **User-Agent**, **Call-ID** and **CSeq**: the
+  software behind the contact, and the registration dialog its refreshes
+  continue. `kelictl registration show`, `GET /domains/<domain>/registrations`
+  and kelescope's live registrations carry them as `user_agent`, `callid` and
+  `cseq`. A REGISTER without User-Agent gives `null`, and no line in the CLI.
+
+### Presence
+
+- A `publish` state row carries `received_time`, the instant the PUBLISH was
+  accepted in epoch seconds, next to its remaining `expires`. A `registrar` or
+  module row has none.
+
+### Upgrading
+
+- `dnf upgrade kelixip` replaces 1.6.4-2. No configuration change. elixipp
+  1.6.4-3 is the same tool as 1.6.4-2, rebuilt alongside.
+
 ## 1.6.4-2
 
 2026-10-12 — package revision 2 of 1.6.4. Theme: the SIP servers of a domain —
