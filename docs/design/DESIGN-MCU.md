@@ -547,10 +547,11 @@ with `a=dcmap` (RFC 8864) gets one back; a browser doing a plain
 `createDataChannel` declares none, opens the channel in band with DCEP, and the
 media server picks it out by its `t140` subprotocol.
 
-**No `a=group:BUNDLE`**, here or anywhere: the media server gives each leg its own
-5-tuple. A browser left at its default `bundlePolicy` is served; one forced to
-`max-bundle` is not, and that is the media server's limitation, not this
-section's.
+**BUNDLE** (RFC 8843) is taken whenever the offer carries `a=group:BUNDLE`: the
+participant is re-created with `bundle=1` on the first offer, and every leg then
+shares the audio leg's transport — the data channel included. A media server
+that refuses `bundle=1` leaves the call unbundled, its bundle-only sections
+declined. Design and trade-offs: `docs/conception/UNIFIED-PLAN/SPEC.md` §4.3.
 
 ---
 

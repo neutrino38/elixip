@@ -95,6 +95,8 @@ BEAM bytecode, no embedded ERTS) into `packaging/build/elixipp-<version>/` and
 | `sysconfig/kelixip` | the environment file: node name, cookie, TOML paths |
 | `config/config.toml`, `config/domains.toml` | the shipped defaults, kept on upgrade |
 | `completion/kelictl` | the CLI's bash completion, installed under `/usr/share/bash-completion/completions/` by both packages |
+| `fail2ban/filter.d/*.conf`, `fail2ban/jail.d/kelixip.conf` | the fail2ban filters and the jail example, installed under `/usr/share/kelixip/fail2ban/` by both packages; `apps/kelixip/test/fail2ban_filter_test.exs` holds them to the lines the node writes |
+| `logrotate/kelixip` | the rotation of `[security] log_file`, installed as `/etc/logrotate.d/kelixip` and kept on upgrade |
 | `stage.sh`, `build-rpm.sh`, `build-deb.sh` | the kelixip builds |
 | `build-in-container.sh`, `Containerfile.al9`, `Containerfile.ubuntu` | the containerised kelixip builds |
 | `rpm/elixipp.spec` | the elixipp spec: one file, one package, no subpackages |

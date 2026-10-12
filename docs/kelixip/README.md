@@ -14,6 +14,7 @@ loadable **modules** (registrar, database auth, …) plugged in Kamailio-style.
 | [running.md](running.md) | Pointing the server at its config, starting/stopping, first boot, logs |
 | [administration.md](administration.md) | `kelictl` — every command, with examples |
 | [rest-api.md](rest-api.md) | The core REST control API and its auth boundary |
+| [unified-plan.md](unified-plan.md) | Screen sharing: several video streams and BUNDLE, in a conference and through the B2BUA |
 | [modules/](modules/README.md) | The module system and the reference for each module |
 | [../../BUILD.md](../../BUILD.md) | **Building the packages** — build-host toolchain (Erlang from EPEL, Elixir in `/opt/elixir`), the RPMs, install & verify |
 

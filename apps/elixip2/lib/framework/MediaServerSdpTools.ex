@@ -137,6 +137,8 @@ defmodule MediaServer.SdpTools do
   `MediaServer.Mendooze.Sdp.transport_cc_extmap/1`.
   """
   defdelegate transport_cc_extmap(desc), to: Sdp
+  defdelegate mid_extmap(desc), to: Sdp
+  defdelegate sdes_mid_uri(), to: Sdp
 
   @doc """
   The extension's URI: the `a=extmap` value, and the media server property key whose

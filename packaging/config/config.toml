@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.6.3"
+# user_agent = "Kelixip/1.6.4"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 # max_message_size = 64000   # biggest inbound SIP message, in bytes; 513 beyond it
 
@@ -24,6 +24,16 @@ module_dir = "/usr/lib/kelixip/modules"
 target = "stdout"
 level  = "info"
 # facility = "local0"
+
+[security]
+# One line per security incident (a refused credential, an unknown domain, a packet
+# that is not SIP, a refused API call), for fail2ban: the filters and a jail example
+# are under /usr/share/kelixip/fail2ban/. The same lines also go to the journal as
+# warnings; this file is the copy that survives [log] level = "error". Rotated by
+# /etc/logrotate.d/kelixip.
+log_file = "/var/log/kelixip/security.log"
+# Incident types not written, e.g. a UA whose messages the parser refuses:
+# ignore = ["invalid-packet"]
 
 # One [[listen]] block per inbound socket. UDP is one socket per node: extra udp
 # entries are ignored with a warning. tls/wss require `cert` + `key`.

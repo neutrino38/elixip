@@ -136,7 +136,7 @@ and so is a module whose configuration changed but whose restart would drop live
 ## Logs
 
 Logs go where `config.toml`'s `[log]` says (keys in
-[installation.md](installation.md#log)). Two things worth knowing:
+[installation.md](installation.md#log)). Three things worth knowing.
 
 **stdout is always live.** `target = "syslog"` *adds* a sink, it does not replace
 one — under systemd, journald captures stdout anyway, and a startup failure has to
@@ -165,5 +165,75 @@ forward what it already captures — `ForwardToSyslog=yes` in
 backend and the syslog sink, not just to the logger's own threshold — a `debug`
 there really does produce the SIP trace. Change it without a restart with
 `kelictl log-level <lvl>` (see [administration.md](administration.md)).
+
+**Security incidents have a file of their own.** A refused credential, a request
+for a domain the node does not serve, a packet that is not SIP, a failed TLS
+handshake, a control-API call without a valid token: each is one line, written
+twice. To the journal as a warning, with everything else — so `[log] level =
+"error"` filters that copy out. And to the file `[security] log_file` names
+([installation.md](installation.md#security)), which the package sets to
+`/var/log/kelixip/security.log` and rotates weekly through
+`/etc/logrotate.d/kelixip`:
+
+```
+2026-10-07T12:34:56Z kelixip: auth-failure src=192.0.2.5 port=5060 proto=UDP method=REGISTER realm=example.com user="alice" reason=bad_password
+2026-10-07T12:35:02Z kelixip: invalid-domain src=203.0.113.7 port=5060 proto=TCP method=INVITE reason=unknown_domain
+2026-10-07T12:35:09Z kelixip: invalid-packet src=198.51.100.2 port=40000 proto=UDP reason=unparsable
+```
+
+The `kelixip: ` prefix, the key order and `src=` second are a contract: the
+fail2ban filters below read them. `user` is the only free text and is quoted and
+escaped, so a username cannot forge a second `src=`. A successful authentication
+is not an incident and is not written. An install upgraded from an earlier version
+keeps its `config.toml`, so it has no `[security]` block: the journal copy is
+there regardless, and the file appears once you add
+
+```toml
+[security]
+log_file = "/var/log/kelixip/security.log"
+```
+
+## fail2ban
+
+The package ships four filters and a jail example under
+`/usr/share/kelixip/fail2ban/`. Link the filters in, copy the jails, reload:
+
+```bash
+ln -s /usr/share/kelixip/fail2ban/filter.d/kelixip-*.conf /etc/fail2ban/filter.d/
+cp /usr/share/kelixip/fail2ban/jail.d/kelixip.conf /etc/fail2ban/jail.d/
+fail2ban-client reload
+fail2ban-client status kelixip-scan
+```
+
+| Jail | Counts | `maxretry` |
+|---|---|---|
+| `kelixip-auth` | `auth-failure … reason=bad_password` | 5 |
+| `kelixip-scan` | `auth-failure` with `unknown_user` or `bad_realm`; `invalid-domain` | 2 |
+| `kelixip-api` | `api-auth` (missing or wrong token, no client certificate) | 3 |
+| `kelixip-packet` | `invalid-packet`; `transport-error` (TLS handshake, WebSocket upgrade) | 20 |
+
+Each jail can read either copy. The example reads the file (`logpath =
+/var/log/kelixip/security.log`); to read the journal instead, replace `logpath`
+with `backend = systemd` and `journalmatch = _SYSTEMD_UNIT=kelixip.service`. Check
+a filter against what the node actually wrote with
+`fail2ban-regex /var/log/kelixip/security.log kelixip-auth`.
+
+Four caveats, none of which the jails solve:
+
+- **UDP source addresses are spoofable.** Whoever forges a customer's address can
+  get it banned. Put your own peers and trunks in `ignoreip`.
+- **Over IPv6, ban a /64**, not one address: a host has more addresses than
+  `maxretry` will ever see. fail2ban bans the exact address unless its action is
+  told otherwise.
+- **A NATed office is one address.** Keep `maxretry` generous on `kelixip-auth` and
+  strict on `kelixip-scan`.
+- **Never behind a reverse proxy or a load balancer** that terminates the
+  connection: every source the node sees is the proxy's own address, and the first
+  ban cuts off every user at once. kelixip does not read `X-Forwarded-For` or the
+  PROXY protocol.
+
+A UA whose messages trip a parser case kelixip does not foresee is counted by
+`kelixip-packet`. The node-side switch is `[security] ignore = ["invalid-packet"]`:
+that type is no longer written, the other three jails keep working.
 
 Next: [administration.md](administration.md).

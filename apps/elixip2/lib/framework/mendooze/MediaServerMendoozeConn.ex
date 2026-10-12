@@ -330,6 +330,16 @@ defmodule MediaServer.Mendooze.Conn do
       leg: name,
       endpoint_id: endpoint_id,
       medias: medias,
+      # One transport for every medium of this endpoint (BUNDLE, RFC 8843),
+      # decided on the first offer: the media server fixes it when the endpoint
+      # is created, so the endpoint is re-created with it (`adopt_bundle/2`).
+      bundle: false,
+      # Video sections beyond the first (UNIFIED-PLAN E3): section key — its
+      # a=mid, or its position — → %{role:, neg:}. The role is the media server's
+      # (`EndpointCreateVideoStream`), never reused; `neg` is nil until the
+      # section is answered. Everything keyed by media type below describes the
+      # role-0 sections, on the path every call takes today.
+      extra_videos: %{},
       local_ports: %{},
       # The SCTP parameters of every media carried by a data channel, as the
       # media server answered them: what the SDP publishes, offer or answer
@@ -422,8 +432,25 @@ defmodule MediaServer.Mendooze.Conn do
         nil -> nil
       end
 
-    %{policy: state.policy, carried: (other && other.peer_codecs) || %{}}
+    %{
+      policy: state.policy,
+      carried: (other && other.peer_codecs) || %{},
+      # the video streams the other leg RECEIVES beyond its camera, which an
+      # offer of ours relays (UNIFIED-PLAN E3) — never the ones it relays itself
+      extras: (other && received_extras(other)) || []
+    }
   end
+
+  # A leg's extra video streams, in role order: the received ones (a section the
+  # peer offered and we answered), or the relayed ones (a section we offered).
+  defp received_extras(leg),
+    do:
+      leg.extra_videos |> Enum.reject(fn {_k, s} -> s[:relayed] || s.neg == nil end) |> by_role()
+
+  defp relayed_extras(leg),
+    do: leg.extra_videos |> Enum.filter(fn {_k, s} -> s[:relayed] end) |> by_role()
+
+  defp by_role(extras), do: Enum.sort_by(extras, fn {_k, s} -> s.role end)
 
   defp put_leg(state, name, leg), do: %{state | legs: Map.put(state.legs, name, leg)}
 
@@ -671,6 +698,8 @@ defmodule MediaServer.Mendooze.Conn do
              end
            end) do
         {:ok, state} ->
+          state = attach_extra_videos(state, la, lb, medias)
+
           Logger.info(
             module: __MODULE__,
             cnx_tag: state.sess_tag,
@@ -1251,14 +1280,29 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   defp leg_shaping(leg, other, medias, policy) do
-    for {media, how, _sel} <- medias,
-        media != :text,
-        shape = shape_for(how, Map.get(policy, media, :avoid)),
-        shape != nil,
-        codes = codec_intersection(leg, other, media),
-        shape == :decline or codes != [],
+    shaping =
+      for {media, how, _sel} <- medias,
+          media != :text,
+          shape = shape_for(how, Map.get(policy, media, :avoid)),
+          shape != nil,
+          codes = codec_intersection(leg, other, media),
+          shape == :decline or codes != [],
+          into: %{},
+          do: {media, {shape, codes}}
+
+    # A stream relayed as is may announce only what the far end's same-rank
+    # stream took (plan §9): the caller's codecs the callee lacks have no
+    # transcoder behind them.
+    case relayed_codes(other) do
+      empty when empty == %{} -> shaping
+      codes -> Map.put(shaping, :extras, codes)
+    end
+  end
+
+  defp relayed_codes(leg) do
+    for {_key, %{peer_key: peer_key, neg: %{peer_codecs: codes}}} <- relayed_extras(leg),
         into: %{},
-        do: {media, {shape, codes}}
+        do: {peer_key, codes}
   end
 
   # What the caller may be told, per media, once both legs are known.
@@ -1337,6 +1381,8 @@ defmodule MediaServer.Mendooze.Conn do
         nil
 
       descs ->
+        leg = restrict_extras(leg, Map.get(shaping, :extras, %{}))
+
         negs =
           leg.negs
           # a declined media leaves `negs` entirely: `answer_or_reject/3` then
@@ -1347,23 +1393,42 @@ defmodule MediaServer.Mendooze.Conn do
           end)
           |> Map.new(fn {media, neg} -> {media, restrict_neg(neg, shaping, media)} end)
 
+        descs = Enum.reject(descs, &omit_from_answer?(&1, negs))
+
+        medias =
+          descs
+          |> Enum.map(&prefer_first(&1, negs, shaping))
+          |> Enum.map(&scenario_prefer(&1, negs, leg))
+          |> Enum.map(&answer_or_reject(leg, negs, &1))
+
         Sdp.build(%{
           ip: leg.local_ip,
           ice_lite: match?({:dtls, _, _}, leg.local_crypto),
-          medias:
-            descs
-            |> Enum.reject(&omit_from_answer?(&1, negs))
-            |> Enum.map(&prefer_first(&1, negs, shaping))
-            |> Enum.map(&scenario_prefer(&1, negs, leg))
-            |> Enum.map(&answer_or_reject(leg, negs, &1))
+          # RFC 8843 §7.3: every accepted section of the offered group, in order
+          bundle: answered_bundle(leg, descs, medias),
+          medias: medias
         })
     end
   end
+
+  # The mids of the sections we answered inside the group the offer bundled.
+  # Empty on an unbundled leg: no `a=group:BUNDLE` is ever invented.
+  defp answered_bundle(%{bundle: true}, descs, medias) do
+    for {desc, %{port: port}} <- Enum.zip(descs, medias),
+        Map.get(desc, :bundled, false),
+        port != 0,
+        is_binary(Map.get(desc, :mid)),
+        do: desc.mid
+  end
+
+  defp answered_bundle(_leg, _descs, _medias), do: []
 
   # `:prefer` is expressed by reordering the OFFER's own format list, which is
   # where `answer_codecs/2` reads the answer's order from. The codecs both legs
   # carry come first, each group keeping the caller's relative order among itself:
   # a permutation, never an addition or a removal.
+  defp prefer_first(%{role: role} = desc, _negs, _shaping) when role != @role_main, do: desc
+
   defp prefer_first(desc, negs, shaping) do
     with {:ok, {:prefer, codes}} <- Map.fetch(shaping, Map.get(desc, :type)),
          neg when is_map(neg) <- Map.get(negs, desc.type),
@@ -1385,6 +1450,8 @@ defmodule MediaServer.Mendooze.Conn do
   # format list, never an addition or a removal — but ranked by the scenario's
   # list rather than keeping the offer's relative order, because a preference
   # list IS a ranking and its order is the point.
+  defp scenario_prefer(%{role: role} = desc, _negs, _leg) when role != @role_main, do: desc
+
   defp scenario_prefer(desc, negs, leg) do
     with codes when codes != [] <- Map.get(leg.prefer, Map.get(desc, :type), []),
          neg when is_map(neg) <- Map.get(negs, desc.type),
@@ -1501,30 +1568,36 @@ defmodule MediaServer.Mendooze.Conn do
   # loses nothing by it: the server has no transcoder on that path either way, so
   # nothing but the peer's own packets can be sent and there is no numbering to
   # preserve against.
-  defp keep_original_seqnum(state, leg, media, m) when media in [:audio, :video] do
-    case rpc(state, "EndpointSetRTPProperties", [
-           state.sess_id,
-           leg.endpoint_id,
-           m,
-           %{"useOriSeqNum" => "1"}
-         ]) do
+  defp keep_original_seqnum(state, leg, media, m, role \\ @role_main)
+
+  defp keep_original_seqnum(state, leg, media, m, role) when media in [:audio, :video] do
+    case rpc(
+           state,
+           "EndpointSetRTPProperties",
+           with_role([state.sess_id, leg.endpoint_id, m, %{"useOriSeqNum" => "1"}], role)
+         ) do
       {:ok, _} -> :ok
       {:error, _} = err -> err
     end
   end
 
-  defp keep_original_seqnum(_state, _leg, _media, _m), do: :ok
+  defp keep_original_seqnum(_state, _leg, _media, _m, _role), do: :ok
 
   # ── Per-leg handlers (run through on_leg/3) ─────────────────────────────────
 
   defp do_get_local_offer(state, cross) do
     with {:ok, state} <- setup_local_security(state),
          {:ok, state} <- start_receiving_all(state, cross),
+         {:ok, state} <- offer_extra_videos(state, cross),
          {:ok, state} <- ensure_local_address(state) do
+      medias = offer_specs(state, cross)
+
       offer =
         Sdp.build(%{
           ip: state.local_ip,
-          medias: Enum.map(state.medias, &offer_media_spec(state, &1, cross))
+          # a bundled leg stays bundled: the group names every live section
+          bundle: offered_bundle(state, medias),
+          medias: medias
         })
 
       Logger.debug(
@@ -1550,7 +1623,9 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp do_set_remote_answer(state, sdp) do
     with {:ok, descs} <- Sdp.parse(sdp),
-         {:ok, state} <- apply_remote_medias(state, descs) do
+         descs = index_sections(descs),
+         {:ok, state} <- apply_remote_medias(state, descs),
+         {:ok, state} <- apply_extra_answers(state, descs) do
       # :ice_connected is no longer emitted here: it now reflects the real media
       # connectivity, surfaced when the server reports the first validated RTP
       # packet (EndpointConnectedEvent, type 7 → handle_server_event below).
@@ -1564,6 +1639,8 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp do_set_remote_offer(state, sdp, cross) do
     with {:ok, descs} <- Sdp.parse(sdp),
+         descs = index_sections(descs),
+         {:ok, state} <- adopt_bundle(state, descs),
          # G9: keep every offered m= section; the ones we can answer with real
          # media are the supported RTP sections of a configured media type. The
          # rest (unknown type, non-RTP transport, disabled media) are echoed as
@@ -1575,10 +1652,14 @@ defmodule MediaServer.Mendooze.Conn do
          {withdrawn, answerable} =
            descs
            |> Enum.filter(&answerable?(&1, state.medias))
-           |> Enum.split_with(&(&1.port == 0)),
+           |> Enum.split_with(&withdrawn?(state, &1)),
+         # video sections beyond the first are extra streams of this leg (E3)
+         extras = extra_video_sections(answerable),
+         primary = answerable -- extras,
+         descs = mark_extras(descs, extras),
          state = Enum.reduce(withdrawn, state, &note_declined(&2, &1.type)),
-         state = Enum.reduce(answerable, state, &clear_declined(&2, &1.type)),
-         :ok <- ensure_media_present(answerable),
+         state = Enum.reduce(primary, state, &clear_declined(&2, &1.type)),
+         :ok <- ensure_media_present(primary),
          _ =
            Logger.info(
              module: __MODULE__,
@@ -1589,20 +1670,24 @@ defmodule MediaServer.Mendooze.Conn do
                  "answering: #{inspect(Enum.map(answerable, & &1.type))}"
            ),
          # open the receive plane only for what we actually answer
-         state = %{state | medias: Enum.map(answerable, & &1.type)},
-         {:ok, state} <- setup_local_security_for_offer(state, answerable),
+         state = %{state | medias: Enum.map(primary, & &1.type)},
+         {:ok, state} <- setup_local_security_for_offer(state, primary),
          # delegated negotiation: the offer is the menu — propose its own payload
          # types to the server and answer from its verdict (a media with nothing
          # accepted is declined with port 0, not a call failure)
-         {:ok, state, negotiated} <- open_offered_receive_plane(state, answerable),
+         {:ok, state, negotiated} <- open_offered_receive_plane(state, primary),
          :ok <- ensure_negotiated(negotiated),
-         {:ok, state, negotiated} <- apply_offered_medias(state, answerable, negotiated) do
+         {:ok, state, negotiated} <- apply_offered_medias(state, primary, negotiated),
+         {:ok, state} <- open_extra_videos(state, extras) do
+      # a stream whose section this offer no longer carries leaves the server
+      state = delete_withdrawn_videos(state, extras)
+
       # :ice_connected deferred to the first validated RTP packet (type 7);
       # see the set_remote_answer path and handle_server_event below. Every
       # StartSending has been issued at this point, so R is known (§4).
       state =
         state
-        |> note_receiving_medias(Enum.filter(answerable, &Map.has_key?(negotiated, &1.type)))
+        |> note_receiving_medias(Enum.filter(primary, &Map.has_key?(negotiated, &1.type)))
 
       state = %{state | status: :active, offer_descs: descs, negs: negotiated}
 
@@ -1626,16 +1711,36 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
+  # A trickled candidate names its section by `sdpMid` (JSEP §4.1.x), and the
+  # section says which leg of the endpoint it is for. Without one — the bare
+  # candidate line this used to take — the audio is the only guess left. On a
+  # bundled leg every candidate is for the carrier, the audio, whatever its mid.
   defp do_add_remote_candidate(state, candidate) do
-    # media selection is not carried by the candidate line: apply to audio
-    case rpc(state, "EndpointAddICECandidate", [
-           state.sess_id,
-           state.endpoint_id,
-           @media_int.audio,
-           candidate
-         ]) do
+    {line, mid} =
+      case candidate do
+        {line, mid} -> {line, mid}
+        line when is_binary(line) -> {line, nil}
+      end
+
+    {m, role} = candidate_target(state, mid)
+
+    case rpc(
+           state,
+           "EndpointAddICECandidate",
+           with_role([state.sess_id, state.endpoint_id, m, line], role)
+         ) do
       {:ok, _} -> {:reply, :ok, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp candidate_target(%{bundle: true}, _mid), do: {@media_int.audio, @role_main}
+  defp candidate_target(_state, nil), do: {@media_int.audio, @role_main}
+
+  defp candidate_target(state, mid) do
+    case Enum.find(state.offer_descs || [], &(Map.get(&1, :mid) == mid)) do
+      nil -> {@media_int.audio, @role_main}
+      desc -> {@media_int[desc.type], extra_role(state, desc)}
     end
   end
 
@@ -1676,7 +1781,23 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  defp handle_server_event({:endpoint_disconnected, _tag, ep, media}, state) do
+  # An event on a video stream other than the camera (role ≥ 2, UNIFIED-PLAN E3)
+  # is the stream's own: it neither releases nor reaps the call, whose
+  # connectivity the role-0 sections state. Logged, and nothing else.
+  defp handle_server_event({kind, _tag, ep, media, role}, state)
+       when kind in [:endpoint_disconnected, :endpoint_connected] and role != @role_main do
+    on_endpoint_event(state, ep, fn l, _handle ->
+      Logger.info(
+        module: __MODULE__,
+        session: l.sess_tag,
+        message: "#{kind} on #{media} stream role #{role} of leg #{l.leg}"
+      )
+
+      l
+    end)
+  end
+
+  defp handle_server_event({:endpoint_disconnected, _tag, ep, media, _role}, state) do
     on_endpoint_event(state, ep, fn l, handle ->
       Logger.warning(module: __MODULE__, session: l.sess_tag, message: "timeout on #{media}")
       send(l.event_sink, {:ms_event, handle, {:media_timeout, media}})
@@ -1695,7 +1816,7 @@ defmodule MediaServer.Mendooze.Conn do
   # plain RTP packet is simply the first media packet. The server re-arms it on
   # each StartReceiving, so the raw event repeats on renegotiation while
   # :ice_connected stays one-shot — docs/design/DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send.
-  defp handle_server_event({:endpoint_connected, _tag, ep, media}, state) do
+  defp handle_server_event({:endpoint_connected, _tag, ep, media, _role}, state) do
     on_endpoint_event(state, ep, fn l, handle ->
       Logger.info(module: __MODULE__, session: l.sess_tag, message: "media connected on #{media}")
       send(l.event_sink, {:ms_event, handle, {:media_connected, media}})
@@ -1714,10 +1835,16 @@ defmodule MediaServer.Mendooze.Conn do
     end)
   end
 
-  defp handle_server_event({:external_fir, _tag, ep, media}, state) do
+  defp handle_server_event({:external_fir, _tag, ep, media, role}, state) do
     on_endpoint_event(state, ep, fn l, _handle ->
-      # remote peer asked for a full intra frame: forward the update request
-      rpc(l, "EndpointRequestUpdate", [l.sess_id, l.endpoint_id, @media_int[media]])
+      # remote peer asked for a full intra frame: forward the update request to
+      # the stream it concerns
+      rpc(
+        l,
+        "EndpointRequestUpdate",
+        with_role([l.sess_id, l.endpoint_id, @media_int[media]], role)
+      )
+
       l
     end)
   end
@@ -2008,6 +2135,15 @@ defmodule MediaServer.Mendooze.Conn do
   # AES_CM_128 keying material is a 16-byte key plus a 14-byte salt, carried
   # base64 in the a=crypto line (RFC 4568 §6.1).
   defp random_sdes_key(), do: :crypto.strong_rand_bytes(30) |> Base.encode64()
+
+  # A leg that already has its pair keeps it: minting fresh credentials on a
+  # re-offer IS an ICE restart (RFC 8445 §9.1.1.1), asked for by nothing but the
+  # fact that we are answering again — and on a bundled leg it restarts the
+  # whole call. The credentials are pushed again for the medias this offer
+  # carries, so a section new to this offer is keyed like the others.
+  defp setup_dtls_ice(%{local_ice: %{} = ice} = state) do
+    with :ok <- set_local_stun_all(state, ice), do: {:ok, state}
+  end
 
   defp setup_dtls_ice(state) do
     with {:ok, [fingerprint | _]} <-
@@ -2362,6 +2498,7 @@ defmodule MediaServer.Mendooze.Conn do
   defp open_offered_receive(state, desc) do
     media = desc.type
     m = @media_int[media]
+    role = role_of(desc)
 
     case Sdp.propose_all(desc, dtmf?(state, media)) do
       # nothing nameable to propose on this media: declined (port 0)
@@ -2374,15 +2511,15 @@ defmodule MediaServer.Mendooze.Conn do
         # codec properties when it runs)
         relay_offered_fmtp(state, m, desc, rtp_map)
 
-        with {:ok, state, profile} <- leg_profile(state, desc),
+        with :ok <- push_bundle_props(state, m, desc),
+             {:ok, state, profile} <- leg_profile(state, desc),
              {:ok, [port | rest]} <- start_receiving_offered(state, m, desc, rtp_map, profile),
              {:ok, [candidate | _]} <-
-               rpc(state, "GetMediaCandidates", [
-                 state.sess_id,
-                 state.endpoint_id,
-                 @proto_rtp,
-                 m
-               ]),
+               rpc(
+                 state,
+                 "GetMediaCandidates",
+                 with_role([state.sess_id, state.endpoint_id, @proto_rtp, m], role)
+               ),
              {:ok, ip, _cport} <- Sdp.parse_media_candidate(candidate) do
           # the server's verdict, minus any entry that cannot legally be stated in
           # an answer to THIS offer (RFC 3264 §6.1 / RFC 6184 §8.2.2)
@@ -2419,20 +2556,21 @@ defmodule MediaServer.Mendooze.Conn do
             # answer a codec the caller cannot match — and close the receive plane
             # we just opened, or the server holds a port for a media the answer
             # says is off
-            rpc(state, "EndpointStopReceiving", [state.sess_id, state.endpoint_id, m])
+            rpc(
+              state,
+              "EndpointStopReceiving",
+              with_role([state.sess_id, state.endpoint_id, m], role)
+            )
+
             {:skip, state}
           else
-            st = %{
-              state
-              | local_ports: Map.put(state.local_ports, media, port),
-                local_ip: ip,
-                proposed_recv: Map.put(state.proposed_recv, media, rtp_map),
-                accepted: Map.put(state.accepted, media, accepted)
-            }
+            st = note_receive_plane(state, desc, port, ip, rtp_map, accepted)
 
             neg =
               neg
               |> Map.put(:accepted, accepted)
+              |> Map.put(:rec_port, port)
+              |> Map.put(:role, role)
               # the offer's own format order, kept for the places that must agree
               # about the caller's preference: the answer's rtpmap order and the
               # payload type we send on
@@ -2463,10 +2601,11 @@ defmodule MediaServer.Mendooze.Conn do
   # merely refused — and it stays written down.
   defp start_receiving_offered(state, m, desc, rtp_map, profile) do
     offer_fmtp = Map.take(Map.get(desc, :fmtp_raw, %{}), Map.keys(rtp_map))
-    args = start_receiving_args(state, m, rtp_map, offer_fmtp, profile)
+    role = role_of(desc)
+    args = start_receiving_args(state, m, rtp_map, offer_fmtp, profile, role)
 
     cond do
-      not is_nil(profile) or offer_fmtp == %{} ->
+      role != @role_main or not is_nil(profile) or offer_fmtp == %{} ->
         rpc(state, "EndpointStartReceiving", args)
 
       true ->
@@ -2592,7 +2731,9 @@ defmodule MediaServer.Mendooze.Conn do
   # the same in both directions, and the server refuses a second, different one
   # (§6.7 bis). Repeating it is a no-op, which is why it is read rather than
   # re-derived.
-  defp start_sending_args(leg, m, ip, port, send_map) do
+  defp start_sending_args(leg, m, ip, port, send_map, role \\ @role_main)
+
+  defp start_sending_args(leg, m, ip, port, send_map, @role_main) do
     base = [leg.sess_id, leg.endpoint_id, m, ip, port, send_map]
 
     case leg.address_profile do
@@ -2601,13 +2742,49 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, nil) do
+  defp start_sending_args(leg, m, ip, port, send_map, role),
+    do: [leg.sess_id, leg.endpoint_id, m, ip, port, send_map, leg.address_profile || "", role]
+
+  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, profile, role \\ @role_main)
+
+  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, nil, @role_main) do
     base = [leg.sess_id, leg.endpoint_id, m, rtp_map]
     if offer_fmtp in [nil, %{}], do: base, else: base ++ [%{"fmtp" => offer_fmtp}]
   end
 
-  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, profile) do
+  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, profile, @role_main) do
     [leg.sess_id, leg.endpoint_id, m, rtp_map, %{"fmtp" => offer_fmtp || %{}}, profile]
+  end
+
+  # The role comes LAST, after every optional parameter (JSR-309 API §1): the
+  # offer struct and the profile are therefore always sent, empty if need be.
+  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, profile, role) do
+    [
+      leg.sess_id,
+      leg.endpoint_id,
+      m,
+      rtp_map,
+      %{"fmtp" => offer_fmtp || %{}},
+      profile || "",
+      role
+    ]
+  end
+
+  # What the receive plane just opened tells the LEG. The role-0 sections fill
+  # the per-media maps every other path reads; an extra video stream (role ≥ 2)
+  # is described by its own negotiation and must not overwrite the camera's.
+  defp note_receive_plane(state, desc, port, ip, rtp_map, accepted) do
+    if role_of(desc) == @role_main do
+      %{
+        state
+        | local_ports: Map.put(state.local_ports, desc.type, port),
+          local_ip: ip,
+          proposed_recv: Map.put(state.proposed_recv, desc.type, rtp_map),
+          accepted: Map.put(state.accepted, desc.type, accepted)
+      }
+    else
+      %{state | local_ip: state.local_ip || ip}
+    end
   end
 
   # The `codec.<name>.fmtp` channel — per CODEC, the coarser of the two relays —
@@ -2635,7 +2812,11 @@ defmodule MediaServer.Mendooze.Conn do
 
     with false <- props == %{},
          {:error, reason} <-
-           rpc(state, "EndpointSetRTPProperties", [state.sess_id, state.endpoint_id, m, props]) do
+           rpc(
+             state,
+             "EndpointSetRTPProperties",
+             with_role([state.sess_id, state.endpoint_id, m, props], role_of(desc))
+           ) do
       Logger.warning(
         module: __MODULE__,
         cnx_tag: state.sess_tag,
@@ -2656,6 +2837,10 @@ defmodule MediaServer.Mendooze.Conn do
   # open_offered_receive/2).
   defp apply_remote_medias(state, descs) do
     descs = Enum.filter(descs, &answerable?(&1, state.medias))
+    # the video sections after the first answer the streams we relay, each on
+    # its own (`apply_extra_answers/2`): read by type they would overwrite the
+    # camera's — and a declined screen would decline the whole video
+    descs = descs -- extra_video_sections(descs)
 
     with :ok <- ensure_media_present(descs),
          {:ok, state, negotiated} <- apply_answered_medias(state, descs),
@@ -2947,9 +3132,12 @@ defmodule MediaServer.Mendooze.Conn do
   # sending (music on hold), so it stays armed; what starves our reception is the
   # peer declaring it will not send — `a=recvonly`, `a=inactive` — or blackholing
   # the media (RFC 3264 §8.4, the legacy hold).
+  # A bundled section's `c=` says nothing — the transport is the carrier's, and
+  # a browser writes `c=IN IP4 0.0.0.0` on every bundle-only section — so only
+  # an unbundled section can be blackholed.
   defp peer_sends?(desc) do
     Map.get(desc, :direction, :sendrecv) not in [:recvonly, :inactive] and
-      not Sdp.blackholed?(desc)
+      not (Sdp.blackholed?(desc) and not Map.get(desc, :bundled, false))
   end
 
   # What this media's watchdog must be, from the description just applied: the
@@ -2963,7 +3151,16 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp note_watchdog(state, desc) do
     ms = if peer_sends?(desc), do: rtp_timeout_ms(), else: 0
-    %{state | watchdogs: Map.put(state.watchdogs, desc.type, ms)}
+    %{state | watchdogs: Map.put(state.watchdogs, watchdog_key(desc), ms)}
+  end
+
+  # The camera and the other medias are watched by type; an extra video stream
+  # by `{:video, role}`, so that deleting the stream takes its watchdog with it.
+  defp watchdog_key(desc) do
+    case role_of(desc) do
+      @role_main -> desc.type
+      role -> {desc.type, role}
+    end
   end
 
   # Push one media's recorded watchdog to the server, if the call is up.
@@ -2984,6 +3181,17 @@ defmodule MediaServer.Mendooze.Conn do
     case Map.fetch(state.watchdogs, media) do
       {:ok, ms} -> start_rtp_timeout(state, media, ms)
       :error -> :ok
+    end
+  end
+
+  defp start_rtp_timeout(state, {media, role}, ms) do
+    case rpc(
+           state,
+           "EndpointStartRTPTimeout",
+           with_role([state.sess_id, state.endpoint_id, @media_int[media], ms], role)
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
     end
   end
 
@@ -3055,7 +3263,11 @@ defmodule MediaServer.Mendooze.Conn do
     if props == %{} do
       :ok
     else
-      case rpc(state, "EndpointSetRTPProperties", [state.sess_id, state.endpoint_id, m, props]) do
+      case rpc(
+             state,
+             "EndpointSetRTPProperties",
+             with_role([state.sess_id, state.endpoint_id, m, props], role_of(desc))
+           ) do
         {:ok, _} -> :ok
         {:error, _} = err -> err
       end
@@ -3173,7 +3385,11 @@ defmodule MediaServer.Mendooze.Conn do
       end
 
     Enum.reduce_while(crypto_calls ++ ice_calls, :ok, fn {method, args}, :ok ->
-      case rpc(state, method, [state.sess_id, state.endpoint_id, m | args]) do
+      case rpc(
+             state,
+             method,
+             with_role([state.sess_id, state.endpoint_id, m | args], role_of(desc))
+           ) do
         {:ok, _} -> {:cont, :ok}
         {:error, _} = err -> {:halt, err}
       end
@@ -3186,6 +3402,82 @@ defmodule MediaServer.Mendooze.Conn do
   defp peer_setup(role), do: role
 
   # ── SDP spec builders ───────────────────────────────────────────────────────
+
+  # The sections of an offer of ours. A leg that never answered offers its
+  # medias, then the streams it relays. A leg that ANSWERED re-offers every
+  # section it answered, in the peer's order and under the peer's mids — the
+  # live ones, the declined ones at port 0, the streams it receives as
+  # `recvonly` — and appends the relayed streams the peer has not seen yet.
+  # An offer never drops a section (RFC 3264 §8): a browser matches a re-offer
+  # against its own m= lines and refuses one whose count or order moved.
+  defp offer_specs(%{offer_descs: nil} = state, cross),
+    do: Enum.map(state.medias, &offer_media_spec(state, &1, cross)) ++ extra_offer_specs(state)
+
+  defp offer_specs(state, cross) do
+    descs = Enum.reject(state.offer_descs, &omit_from_answer?(&1, state.negs))
+    known = MapSet.new(descs, &Map.get(&1, :mid))
+
+    {specs, _seen} =
+      Enum.map_reduce(descs, MapSet.new(), fn desc, seen ->
+        cond do
+          Map.get(desc, :extra, false) ->
+            {extra_reoffer_spec(state, desc), seen}
+
+          desc.type in state.medias and desc.type not in seen ->
+            {offer_media_spec(state, desc.type, cross), MapSet.put(seen, desc.type)}
+
+          true ->
+            {reject_media_spec(desc), seen}
+        end
+      end)
+
+    new_relayed =
+      for {_key, %{mid: mid} = stream} <- relayed_extras(state),
+          mid not in known,
+          do: relayed_offer_spec(state, stream)
+
+    specs ++ new_relayed
+  end
+
+  defp extra_reoffer_spec(state, desc) do
+    case Map.get(state.extra_videos, section_key(desc)) do
+      %{relayed: true} = stream -> relayed_offer_spec(state, stream)
+      %{neg: %{} = neg} -> received_offer_spec(state, desc, neg)
+      _ -> reject_media_spec(desc)
+    end
+  end
+
+  # A stream we receive, offered back to the peer that sends it: its own
+  # section, `recvonly` from our side, in ITS payload-type numbering.
+  defp received_offer_spec(state, desc, neg) do
+    {rtpmaps, fmtp} = answer_codecs(desc, neg)
+
+    %{
+      type: :video,
+      port: neg.rec_port,
+      rtpmaps: rtpmaps,
+      fmtp: fmtp,
+      bandwidth: bandwidth_kbps(state, :video),
+      direction: if(extra_paused?(state, desc), do: :inactive, else: :recvonly),
+      crypto: local_crypto_spec(state, :actpass),
+      ice: state.local_ice,
+      rtcp_mux: false
+    }
+    |> add_offer_webrtc(state, :video, neg.rec_port, Map.get(desc, :mid))
+    |> add_offer_rtp_profile(state, :video)
+  end
+
+  defp extra_paused?(state, desc) do
+    case Map.get(state.extra_videos, section_key(desc)) do
+      %{paused: true} -> true
+      _ -> false
+    end
+  end
+
+  defp offered_bundle(%{bundle: true}, medias),
+    do: for(%{port: port, mid: mid} <- medias, port != 0, is_binary(mid), do: mid)
+
+  defp offered_bundle(_state, _medias), do: []
 
   defp offer_media_spec(state, media, cross) do
     cond do
@@ -3286,23 +3578,41 @@ defmodule MediaServer.Mendooze.Conn do
   # WebRTC offer transport plane (§2.4). rtcp-mux is always offered (G5),
   # candidates are host-only with the receive port (D6), and rtcp-fb is advertised
   # per video PT. No a=ice-lite in offers (D7): we emulate a browser-shaped offer.
-  defp add_offer_webrtc(base, state, media) do
+  defp add_offer_webrtc(base, state, media),
+    do:
+      add_offer_webrtc(
+        base,
+        state,
+        media,
+        Map.fetch!(state.local_ports, media),
+        offer_mid(state, media)
+      )
+
+  defp add_offer_webrtc(base, state, media, port, mid) do
     if webrtc?(state) do
       Map.merge(base, %{
         rtcp_mux: true,
-        mid: offer_mid(state, media),
-        candidates:
-          Sdp.host_candidates(state.local_ip, Map.fetch!(state.local_ports, media), true),
+        mid: mid,
+        candidates: Sdp.host_candidates(state.local_ip, port, true),
         rtcp_fb: media == :video,
         # transport-wide-cc, when configured: the builder pairs it with its
         # `a=rtcp-fb:<pt> transport-cc` lines. The property is posted only if the
-        # peer's answer takes it (`transport_cc_props/1`).
-        extmaps: List.wrap(Sdp.transport_cc_offer(media))
+        # peer's answer takes it (`transport_cc_props/1`). On a bundled leg, the
+        # MID extension the peer negotiated, under its id: a browser demuxes a
+        # bundled transport by MID, and a section we add is nothing without it.
+        extmaps: List.wrap(Sdp.transport_cc_offer(media)) ++ offer_bundle_extmaps(state)
       })
     else
       base
     end
   end
+
+  defp offer_bundle_extmaps(%{bundle: true} = state), do: List.wrap(leg_mid_extmap(state))
+  defp offer_bundle_extmaps(_state), do: []
+
+  # The sdes:mid extension as the peer offered it on this leg — one id for the
+  # whole session in every browser.
+  defp leg_mid_extmap(state), do: Enum.find_value(state.offer_descs || [], &Sdp.mid_extmap/1)
 
   # A section's mid does not change once it is negotiated (RFC 8843 §6.3.2, JSEP
   # §5.2.1). On a leg where we ANSWERED, the mid is the peer's — echoed verbatim
@@ -3338,6 +3648,26 @@ defmodule MediaServer.Mendooze.Conn do
   # echoing the offered transport and format list verbatim (RFC 3264 §6).
   defp answer_or_reject(state, negotiated, desc) do
     cond do
+      # Port 0 is the peer's own verdict on the section (RFC 3264 §6, §8.2),
+      # unless it is a bundle-only section of a group we took — see withdrawn?/2.
+      withdrawn?(state, desc) ->
+        reject_media_spec(desc)
+
+      # An extra video stream answers with its own negotiation, received only
+      # (UNIFIED-PLAN E3). It goes with the camera: a call whose video is declined
+      # — by the other leg, say — carries no second video either.
+      Map.get(desc, :extra, false) ->
+        case {Map.has_key?(negotiated, :video), Map.get(state.extra_videos, section_key(desc))} do
+          # nothing left once restricted to what the far end took: declined
+          {true, %{neg: %{rtp_map: map} = neg}} when map_size(map) > 0 ->
+            answer_media_spec(state, %{video: neg}, Map.put(desc, :role, neg.role))
+
+          # no stream (withdrawn, declined, or the peer stopped sending), or
+          # the camera itself declined: the section is declined too
+          _ ->
+            reject_media_spec(desc)
+        end
+
       # A configured text-over-WebSocket section is answered for real, URL
       # included — this is the section the client is waiting for to open its chat.
       match?(%{transport: :ws}, desc) and Map.has_key?(negotiated, desc.type) ->
@@ -3451,12 +3781,25 @@ defmodule MediaServer.Mendooze.Conn do
 
     %{
       type: desc.type,
-      port: Map.fetch!(state.local_ports, desc.type),
+      port: Map.get(neg, :rec_port) || Map.fetch!(state.local_ports, desc.type),
       # the offerer's payload-type numbering, in ITS preference order
       rtpmaps: rtpmaps,
       fmtp: fmtp,
       bandwidth: Sdp.negotiate_bandwidth(desc.bandwidth, bandwidth_kbps(state, desc.type)),
-      direction: Sdp.reverse_direction(desc.direction),
+      # a stream other than the camera is received only — `inactive` while the
+      # peer pauses it — unless it is one we relay: nothing of ours is ever
+      # sent on a received stream
+      direction:
+        cond do
+          role_of(desc) == @role_main or relayed?(state, desc) ->
+            Sdp.reverse_direction(desc.direction)
+
+          extra_paused?(state, desc) ->
+            :inactive
+
+          true ->
+            :recvonly
+        end,
       # G3: mendooze answers DTLS as server (setup:passive) — the safe role a
       # browser/gateway expects from the answerer; an offer that already
       # committed to a role is mirrored. Or the SDES key we generated.
@@ -3472,8 +3815,9 @@ defmodule MediaServer.Mendooze.Conn do
       # the feedback types actually agreed, per video PT — never the offerer form
       rtcp_fb: answered_rtcp_fb(desc),
       # RFC 8285 §5: the extension is confirmed with the offer's OWN id, never
-      # renumbered. Empty unless transport-wide-cc is negotiated on this media.
-      extmaps: List.wrap(Sdp.transport_cc_extmap(desc)),
+      # renumbered. Empty unless transport-wide-cc is negotiated on this media,
+      # plus the MID extension on a bundled leg (RFC 8843 §9.1).
+      extmaps: List.wrap(Sdp.transport_cc_extmap(desc)) ++ bundle_extmaps(state, desc),
       # the offer's a=mid, echoed verbatim on EVERY answered section (JSEP
       # §5.3.1), not only the DTLS ones: a SIP peer that names its sections
       # would otherwise get an anonymous answer
@@ -3646,9 +3990,16 @@ defmodule MediaServer.Mendooze.Conn do
   defp answer_candidates(state, desc) do
     Sdp.host_candidates(
       state.local_ip,
-      Map.fetch!(state.local_ports, desc.type),
+      answered_port(state, desc),
       Map.get(desc, :rtcp_mux, false)
     )
+  end
+
+  defp answered_port(state, desc) do
+    case extra_role(state, desc) do
+      @role_main -> Map.fetch!(state.local_ports, desc.type)
+      _role -> Map.fetch!(state.extra_videos, section_key(desc)).neg.rec_port
+    end
   end
 
   # ── Legacy (no-verdict) answer fmtp synthesis ───────────────────────────────
@@ -3853,6 +4204,10 @@ defmodule MediaServer.Mendooze.Conn do
     Enum.each(state.medias, fn media ->
       rpc(state, "EndpointDettach", [state.sess_id, state.endpoint_id, @media_int[media]])
     end)
+
+    Enum.each(state.extra_videos, fn {_key, %{role: role}} ->
+      rpc(state, "EndpointDettach", [state.sess_id, state.endpoint_id, @media_int[:video], role])
+    end)
   end
 
   defp each_media_rpc(state, call_fun) do
@@ -3949,6 +4304,649 @@ defmodule MediaServer.Mendooze.Conn do
     state = teardown(state)
     {:stop, :normal, {:error, reason}, state}
   end
+
+  # ── Several video streams and BUNDLE (UNIFIED-PLAN E3) ─────────────────────
+  #
+  # The media server speaks in `(media, role)`: role 0 is the camera, every other
+  # video section of an offer is a stream the server creates on demand and names
+  # by the role it returns. The leg keeps the role under the section's key, so a
+  # re-offer finds it again — a JSEP peer keeps a transceiver's mid for its life.
+  # Without BUNDLE a second video is only a second port; with it, every section
+  # shares the audio's transport and the server tells them apart by MID.
+
+  defp index_sections(descs),
+    do: descs |> Enum.with_index() |> Enum.map(fn {desc, i} -> Map.put(desc, :index, i) end)
+
+  defp section_key(desc), do: Map.get(desc, :mid) || "#" <> Integer.to_string(desc.index)
+
+  # Port 0 declines or withdraws a section (RFC 3264 §6, §8.2) — unless it is a
+  # bundle-only section of a group we took, which lives on the shared port
+  # (RFC 8843 §6). A bundled leg declines an RTP or data channel section left
+  # out of the group: it would need a transport of its own (§7.3.3). Text over
+  # a WebSocket is TCP, never bundled, and stays served.
+  defp withdrawn?(%{bundle: true}, desc) do
+    out_of_group? =
+      Map.get(desc, :transport, :rtp) in [:rtp, :sctp] and not Map.get(desc, :bundled, false)
+
+    out_of_group? or (Map.get(desc, :port) == 0 and not Map.get(desc, :bundle_only, false))
+  end
+
+  defp withdrawn?(_state, desc), do: Map.get(desc, :port) == 0
+
+  # The offer asks for BUNDLE: the endpoint created with the leg is replaced by
+  # one created with `bundle`, the new one first so that a media server refusing
+  # it leaves the call as it was — unbundled, its bundle-only sections declined.
+  # Only before anything was opened on it: the server groups at creation, so a
+  # BUNDLE first offered on a renegotiation is not taken.
+  defp adopt_bundle(%{bundle: false, status: :init, local_ports: ports} = state, descs)
+       when map_size(ports) == 0 do
+    if webrtc_allowed?(state) and Enum.any?(descs, &Map.get(&1, :bundled, false)) do
+      case create(state, "EndpointCreate", [
+             state.sess_id,
+             endpoint_tag(state),
+             :audio in state.medias,
+             :video in state.medias,
+             :text in state.medias,
+             true
+           ]) do
+        {:ok, endpoint_id} ->
+          rpc(state, "EndpointDelete", [state.sess_id, state.endpoint_id])
+
+          Logger.info(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message: "leg #{state.leg}: Endpoint #{endpoint_id} re-created with BUNDLE"
+          )
+
+          {:ok, %{state | endpoint_id: endpoint_id, bundle: true}}
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message: "media server refused BUNDLE (#{inspect(reason)}); answering unbundled"
+          )
+
+          {:ok, state}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp adopt_bundle(state, _descs), do: {:ok, state}
+
+  # The tag `EndpointCreate` was given for this leg: the session's for the inbound
+  # leg, suffixed with the leg's name for any other (`add_leg`).
+  defp endpoint_tag(%{leg: :inbound} = leg), do: leg.sess_tag
+  defp endpoint_tag(leg), do: "#{leg.sess_tag}-#{leg.leg}"
+
+  # Every answerable RTP video section after the first one. The first stays the
+  # camera, role 0, on the path every other leg takes.
+  defp extra_video_sections(answerable) do
+    answerable
+    |> Enum.filter(&(&1.type == :video and Map.get(&1, :transport, :rtp) == :rtp))
+    |> Enum.drop(1)
+  end
+
+  defp open_extra_videos(state, extras) do
+    Enum.reduce_while(extras, {:ok, state}, fn desc, {:ok, st} ->
+      case open_extra_video(st, desc) do
+        {:ok, st} -> {:cont, {:ok, st}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # One stream on the media server per extra section, keyed with this leg's ICE
+  # credentials and opened like the camera with its role. A section nothing can
+  # be proposed on, or that the verdict empties, is declined on its own and its
+  # stream deleted; the call stands. Received only: the remote side is the peer's
+  # security material, never a StartSending.
+  defp open_extra_video(state, desc) do
+    key = section_key(desc)
+
+    if Map.get(desc, :sdes_offers, []) != [] and not match?({:dtls, _, _, _}, desc.crypto) do
+      # SDES keys are kept per media type, and a second stream would need its
+      # own. The browsers that offer several videos key them with DTLS.
+      Logger.warning(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "extra video section #{key} offered under SDES alone: declined"
+      )
+
+      {:ok, delete_video_stream(state, key)}
+    else
+      with {:ok, state, stream} <- ensure_video_stream(state, key),
+           desc = Map.put(desc, :role, stream.role),
+           :ok <- extra_local_ice(state, desc) do
+        case open_offered_receive(state, desc) do
+          {:ok, state, neg} ->
+            m = @media_int[:video]
+
+            with :ok <- set_remote_crypto(state, m, desc),
+                 state = note_watchdog(state, desc),
+                 :ok <- apply_watchdog(state, watchdog_key(desc)) do
+              # A received stream the peer no longer sends on — a browser that
+              # stops sharing keeps the section and turns it recvonly or
+              # inactive — is PAUSED, not withdrawn: the section is answered
+              # `inactive` and the stream kept under its role, so the peer's
+              # transceiver stays usable and a later share resumes it as is.
+              # Declining it with port 0 stops the transceiver (JSEP), and
+              # Trix could then share no more (traffic of 2026-10-07).
+              paused = not relayed?(state, desc) and not peer_sends?(desc)
+
+              if paused do
+                Logger.info(
+                  module: __MODULE__,
+                  cnx_tag: state.sess_tag,
+                  message:
+                    "video section #{key} offered #{Map.get(desc, :direction, :sendrecv)}: " <>
+                      "the peer no longer sends on it, its stream (role #{stream.role}) is paused"
+                )
+              end
+
+              {:ok, put_extra_video(state, key, Map.merge(stream, %{neg: neg, paused: paused}))}
+            end
+
+          {:skip, state} ->
+            {:ok, delete_video_stream(state, key)}
+
+          {:error, _} = err ->
+            err
+        end
+      end
+    end
+  end
+
+  defp ensure_video_stream(state, key) do
+    case Map.fetch(state.extra_videos, key) do
+      {:ok, stream} ->
+        {:ok, state, %{stream | neg: nil}}
+
+      :error ->
+        case rpc(state, "EndpointCreateVideoStream", [state.sess_id, state.endpoint_id]) do
+          {:ok, [role | _]} when is_integer(role) ->
+            stream = %{role: role, neg: nil}
+            {:ok, put_extra_video(state, key, stream), stream}
+
+          {:ok, other} ->
+            {:error, {:bad_create_video_stream, other}}
+
+          {:error, _} = err ->
+            err
+        end
+    end
+  end
+
+  defp put_extra_video(state, key, stream),
+    do: %{state | extra_videos: Map.put(state.extra_videos, key, stream)}
+
+  defp extra_local_ice(%{local_ice: %{ufrag: ufrag, pwd: pwd}} = state, %{ice: %{}} = desc) do
+    case rpc(
+           state,
+           "EndpointSetLocalSTUNCredentials",
+           with_role(
+             [state.sess_id, state.endpoint_id, @media_int[:video], ufrag, pwd],
+             desc.role
+           )
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp extra_local_ice(_state, _desc), do: :ok
+
+  # A stream whose section is gone from the offer, or declined in it, leaves the
+  # media server with its watchdog.
+  defp delete_withdrawn_videos(state, extras) do
+    live = MapSet.new(extras, &section_key/1)
+
+    state.extra_videos
+    |> Enum.reject(fn {key, stream} -> stream[:relayed] == true or MapSet.member?(live, key) end)
+    |> Enum.reduce(state, fn {key, _stream}, st -> delete_video_stream(st, key) end)
+  end
+
+  # Every video section after the first carries the mark, so that the answer
+  # never reads one with the camera's negotiation — live or not.
+  defp mark_extras(descs, extras) do
+    marked = MapSet.new(extras, & &1.index)
+    Enum.map(descs, &if(&1.index in marked, do: Map.put(&1, :extra, true), else: &1))
+  end
+
+  defp delete_video_stream(state, key) do
+    case Map.fetch(state.extra_videos, key) do
+      {:ok, %{role: role}} ->
+        rpc(state, "EndpointDeleteVideoStream", [state.sess_id, state.endpoint_id, role])
+
+        %{
+          state
+          | extra_videos: Map.delete(state.extra_videos, key),
+            watchdogs: Map.delete(state.watchdogs, {:video, role})
+        }
+
+      :error ->
+        state
+    end
+  end
+
+  # What the media server routes a bundled section by (JSR-309 API §6.5): its
+  # MID, the extension id that carries it, and the SSRC it announces. Before
+  # StartReceiving, so the first packet already finds its section.
+  defp push_bundle_props(%{bundle: true} = state, m, %{mid: mid} = desc) when is_binary(mid) do
+    props =
+      %{"mid" => mid}
+      |> then(fn p ->
+        case Sdp.mid_extmap(desc) || leg_mid_extmap(state) do
+          %{id: id} -> Map.put(p, Sdp.sdes_mid_uri(), Integer.to_string(id))
+          nil -> p
+        end
+      end)
+      |> then(fn p ->
+        if desc[:remote_ssrc],
+          do: Map.put(p, "remote-ssrc", Integer.to_string(desc.remote_ssrc)),
+          else: p
+      end)
+
+    case rpc(
+           state,
+           "EndpointSetRTPProperties",
+           with_role([state.sess_id, state.endpoint_id, m, props], role_of(desc))
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp push_bundle_props(_state, _m, _desc), do: :ok
+
+  defp bundle_extmaps(%{bundle: true}, desc), do: List.wrap(Sdp.mid_extmap(desc))
+  defp bundle_extmaps(_state, _desc), do: []
+
+  # ── Relaying the streams through a B2BUA ───────────────────────────────────
+  #
+  # The leg we offer on creates one stream per stream the other leg receives,
+  # under the SAME key and in role order, and offers each as a `sendonly`
+  # section carrying exactly the codecs the received stream carries: the far
+  # end's answer is then a subset of them, and the two streams relay as they
+  # are (plan §9: no transcoder behind a stream other than the camera). Both
+  # endpoints create their streams in the same order, so the same rank gets the
+  # same role on each — which `EndpointAttachToEndpoint(…, role)` requires.
+
+  defp offer_extra_videos(state, %{extras: extras}) do
+    state = withdraw_relayed(state, extras)
+
+    if :video in state.medias do
+      Enum.reduce_while(extras, {:ok, state}, fn {key, src}, {:ok, st} ->
+        case offer_extra_video(st, key, src) do
+          {:ok, st} -> {:cont, {:ok, st}}
+          {:error, _} = err -> {:halt, err}
+        end
+      end)
+    else
+      {:ok, state}
+    end
+  end
+
+  # A relayed stream whose source the other leg no longer receives is deleted
+  # on the server, and kept as a withdrawn section: an offer keeps one m= per
+  # section it ever carried (RFC 3264 §8), at port 0 from now on — which is
+  # what tells the far end the screen has gone.
+  defp withdraw_relayed(state, extras) do
+    sources = MapSet.new(extras, fn {key, _src} -> key end)
+
+    state.extra_videos
+    |> Enum.filter(fn {_key, s} ->
+      s[:relayed] == true and s.neg != nil and s.peer_key not in sources
+    end)
+    |> Enum.reduce(state, fn {key, stream}, st ->
+      rpc(st, "EndpointDeleteVideoStream", [st.sess_id, st.endpoint_id, stream.role])
+
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: st.sess_tag,
+        message: "relayed video stream #{key} (role #{stream.role}) withdrawn: its source is gone"
+      )
+
+      fmt = stream.neg.rtp_map |> Map.keys() |> Enum.map(&String.to_integer/1) |> Enum.sort()
+      put_extra_video(st, key, %{stream | neg: nil} |> Map.merge(%{withdrawn: true, fmt: fmt}))
+    end)
+  end
+
+  # The relayed stream lives under the mid WE offer, which is what the far end
+  # names it by in its re-offers; `peer_key` remembers the received stream it
+  # relays, for the attach and the caller's rebuilt answer.
+  defp offer_extra_video(state, peer_key, src) do
+    key = relay_key(peer_key)
+
+    case carried_names(:video, peer_codecs(src.neg)) do
+      [] ->
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message:
+            "video stream #{peer_key} of the other leg carries no codec we can name; not relayed"
+        )
+
+        {:ok, delete_video_stream(state, key)}
+
+      names ->
+        rtp_map = Sdp.local_rtp_map(:video, names)
+        m = @media_int[:video]
+
+        with {:ok, state, stream} <- ensure_video_stream(state, key),
+             role = stream.role,
+             :ok <- relayed_local_ice(state, role),
+             {:ok, state, profile} <- leg_profile(state, nil),
+             {:ok, [port | rest]} <-
+               rpc(
+                 state,
+                 "EndpointStartReceiving",
+                 start_receiving_args(state, m, rtp_map, nil, profile, role)
+               ),
+             {:ok, [candidate | _]} <-
+               rpc(
+                 state,
+                 "GetMediaCandidates",
+                 with_role([state.sess_id, state.endpoint_id, @proto_rtp, m], role)
+               ),
+             {:ok, ip, _cport} <- Sdp.parse_media_candidate(candidate) do
+          neg = %{
+            rtp_map: rtp_map,
+            accepted: Sdp.accepted_pts(rtp_map, List.first(rest)),
+            rec_port: port,
+            role: role,
+            names: names,
+            send_map: nil,
+            peer_codecs: []
+          }
+
+          stream =
+            Map.merge(stream, %{
+              relayed: true,
+              peer_key: peer_key,
+              mid: key,
+              neg: neg,
+              paused: src[:paused] == true
+            })
+
+          {:ok, put_extra_video(%{state | local_ip: state.local_ip || ip}, key, stream)}
+        end
+    end
+  end
+
+  defp relayed_local_ice(%{local_ice: %{ufrag: ufrag, pwd: pwd}} = state, role) do
+    case rpc(
+           state,
+           "EndpointSetLocalSTUNCredentials",
+           with_role([state.sess_id, state.endpoint_id, @media_int[:video], ufrag, pwd], role)
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp relayed_local_ice(_state, _role), do: :ok
+
+  # One `m=video … a=sendonly` per relayed stream, after the medias, in role order.
+  defp extra_offer_specs(state),
+    do: for({_key, stream} <- relayed_extras(state), do: relayed_offer_spec(state, stream))
+
+  defp relayed_offer_spec(state, %{withdrawn: true, mid: mid, fmt: fmt}),
+    do: %{type: :video, port: 0, protocol: offer_protocol(state), reject_fmt: fmt, mid: mid}
+
+  defp relayed_offer_spec(state, %{mid: mid, neg: neg} = stream) do
+    %{
+      type: :video,
+      port: neg.rec_port,
+      bandwidth: bandwidth_kbps(state, :video),
+      # nothing flows while the source is paused; the section and the stream
+      # stay, so that the resume is a direction change and not a new stream
+      direction: if(stream[:paused], do: :inactive, else: :sendonly),
+      crypto: local_crypto_spec(state, :actpass),
+      ice: state.local_ice,
+      rtcp_mux: false
+    }
+    |> add_offer_webrtc(state, :video, neg.rec_port, mid)
+    |> add_offer_rtp_profile(state, :video)
+    |> Map.merge(relayed_offer_codecs(neg))
+  end
+
+  defp offer_protocol(state) do
+    cond do
+      webrtc?(state) -> "UDP/TLS/RTP/SAVPF"
+      rtp_profile(state) == :avpf -> "RTP/AVPF"
+      true -> "RTP/AVP"
+    end
+  end
+
+  defp relayed_offer_codecs(%{accepted: nil, names: names}), do: %{codecs: names, dtmf: false}
+
+  defp relayed_offer_codecs(%{accepted: accepted, rtp_map: rtp_map, names: names}) do
+    ordered =
+      names
+      |> Enum.flat_map(&Map.keys(Sdp.local_rtp_map(:video, [&1])))
+      |> Enum.filter(&(Map.has_key?(rtp_map, &1) and Map.has_key?(accepted, &1)))
+
+    rtpmaps =
+      Enum.flat_map(ordered, fn pt_str ->
+        pt = String.to_integer(pt_str)
+        rtpmap_entry(pt, Sdp.pt_rtpmap(:video, pt))
+      end)
+
+    %{rtpmaps: rtpmaps, fmtp: Map.take(accepted, ordered)}
+  end
+
+  # The answer's video sections after the first, in order, are the answers to
+  # the streams we offered, in role order. A section answered live gets the
+  # remote side of its stream and a StartSending with its role; one declined
+  # (port 0) leaves the stream without a far end, and it is not attached.
+  # Each relayed stream finds its answer section by the mid we offered it under;
+  # the answer's sections may also hold the peer's own streams, which we receive
+  # and have nothing to do with here. Without mids — a peer that names nothing —
+  # the video sections after the first are the relayed ones, in role order.
+  defp apply_extra_answers(state, descs) do
+    answered =
+      descs
+      |> Enum.filter(&(&1.type == :video and Map.get(&1, :transport, :rtp) == :rtp))
+      |> Enum.drop(1)
+
+    relayed = relayed_extras(state)
+
+    pairs =
+      if Enum.all?(answered, &is_binary(Map.get(&1, :mid))) do
+        for {key, stream} <- relayed,
+            desc = Enum.find(answered, &(&1.mid == stream.mid)),
+            do: {{key, stream}, desc}
+      else
+        Enum.zip(relayed, answered)
+      end
+
+    Enum.reduce_while(pairs, {:ok, state}, fn
+      # a withdrawn section has no stream behind it any more
+      {{_key, %{withdrawn: true}}, _desc}, {:ok, st} ->
+        {:cont, {:ok, st}}
+
+      {{key, stream}, desc}, {:ok, st} ->
+        case apply_extra_answer(st, key, stream, desc) do
+          {:ok, st} -> {:cont, {:ok, st}}
+          {:error, _} = err -> {:halt, err}
+        end
+    end)
+  end
+
+  defp apply_extra_answer(state, key, stream, %{port: 0}) do
+    Logger.info(
+      module: __MODULE__,
+      cnx_tag: state.sess_tag,
+      message: "relayed video stream #{key} (role #{stream.role}) declined by the peer"
+    )
+
+    neg = %{stream.neg | send_map: nil, peer_codecs: []}
+    {:ok, put_extra_video(state, key, %{stream | neg: neg})}
+  end
+
+  defp apply_extra_answer(state, key, stream, desc) do
+    neg = stream.neg
+    m = @media_int[:video]
+    desc = Map.put(desc, :role, stream.role)
+
+    case Sdp.negotiate(desc, neg.names, false) do
+      {:error, :no_common_codec} ->
+        apply_extra_answer(state, key, stream, %{desc | port: 0})
+
+      {:ok, n} ->
+        send_map =
+          Sdp.restrict_send_map(n.rtp_map, neg.rtp_map, neg.accepted)
+          |> one_pt_per_codec(:video, n)
+
+        # on a bundled leg the stream is stamped with the mid we offered it
+        # under, or the peer cannot tell its packets from the camera's
+        with :ok <- set_rtp_properties(state, m, desc),
+             :ok <- push_bundle_props(state, m, desc),
+             :ok <- set_remote_crypto(state, m, desc),
+             {:ok, _} <-
+               rpc(
+                 state,
+                 "EndpointStartSending",
+                 start_sending_args(state, m, desc.ip, desc.port, send_map, stream.role)
+               ) do
+          neg = %{neg | send_map: send_map, peer_codecs: peer_codecs(%{rtp_map: send_map})}
+          {:ok, put_extra_video(state, key, %{stream | neg: neg})}
+        end
+    end
+  end
+
+  # The streams both legs hold under one key, attached to each other in both
+  # directions once, with the sequence numbers kept (relay, never transcoded).
+  # Best-effort: the camera and the audio are bridged by now, and a screen that
+  # cannot be relayed is not a reason to take the call down.
+  defp attach_extra_videos(state, la, lb, medias) do
+    video_bridged? = Enum.any?(medias, fn {m, how, _} -> m == :video and how != :decline end)
+
+    if video_bridged? do
+      Enum.reduce(la.extra_videos, state, fn {key, sa}, st ->
+        with %{} = sb <- Map.get(lb.extra_videos, partner_key(sa, key)),
+             true <- live_extra?(sa) and live_extra?(sb),
+             false <- Map.has_key?(st.bridges, {:video, sa.role}) do
+          attach_extra_pair(st, la, lb, key, sa, sb)
+        else
+          _ -> st
+        end
+      end)
+    else
+      state
+    end
+  end
+
+  # A received stream is live once answered; a relayed one once the far end
+  # answered its section with a port.
+  defp live_extra?(%{neg: nil}), do: false
+  defp live_extra?(%{relayed: true, neg: %{send_map: nil}}), do: false
+  defp live_extra?(_stream), do: true
+
+  defp attach_extra_pair(state, la, lb, key, %{role: role}, %{role: role}) do
+    m = @media_int[:video]
+
+    with {:ok, _} <-
+           rpc(state, "EndpointAttachToEndpoint", [
+             state.sess_id,
+             la.endpoint_id,
+             lb.endpoint_id,
+             m,
+             role
+           ]),
+         {:ok, _} <-
+           rpc(state, "EndpointAttachToEndpoint", [
+             state.sess_id,
+             lb.endpoint_id,
+             la.endpoint_id,
+             m,
+             role
+           ]),
+         :ok <- keep_original_seqnum(state, la, :video, m, role),
+         :ok <- keep_original_seqnum(state, lb, :video, m, role) do
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "relaying video stream #{key} (role #{role}) between #{la.leg} and #{lb.leg}"
+      )
+
+      put_bridge(state, {:video, role}, :attach)
+    else
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message: "could not relay video stream #{key} (role #{role}): #{inspect(reason)}"
+        )
+
+        state
+    end
+  end
+
+  defp attach_extra_pair(state, _la, _lb, key, %{role: ra}, %{role: rb}) do
+    Logger.warning(
+      module: __MODULE__,
+      cnx_tag: state.sess_tag,
+      message:
+        "video stream #{key} has role #{ra} on one leg and #{rb} on the other; " <>
+          "the media server attaches same-role streams only — not relayed"
+    )
+
+    state
+  end
+
+  # A received stream's partner is the relayed stream under its relay key; a
+  # relayed stream's partner is the received stream it remembers.
+  defp partner_key(%{relayed: true, peer_key: peer_key}, _key), do: peer_key
+  defp partner_key(_stream, key), do: relay_key(key)
+
+  # A mid token (RFC 5888 §4) built from the received stream's key, which is a
+  # mid or a `#<position>` — both token characters.
+  defp relay_key(peer_key), do: "video-" <> peer_key
+
+  defp relayed?(state, desc) do
+    case Map.get(state.extra_videos, section_key(desc)) do
+      %{relayed: true} -> true
+      _ -> false
+    end
+  end
+
+  # What a relayed stream's answer may announce: the codecs the far end took.
+  defp restrict_extras(leg, codes_by_key) when map_size(codes_by_key) == 0, do: leg
+
+  defp restrict_extras(leg, codes_by_key) do
+    extras =
+      Map.new(leg.extra_videos, fn
+        {key, %{neg: %{} = neg} = stream} when is_map_key(codes_by_key, key) ->
+          {key, %{stream | neg: restrict_neg(neg, %{video: {:only, codes_by_key[key]}}, :video)}}
+
+        other ->
+          other
+      end)
+
+    %{leg | extra_videos: extras}
+  end
+
+  # The role of a section, when it travels with it.
+  defp role_of(desc), do: Map.get(desc, :role, @role_main)
+
+  # The role of a section of the leg's last offer, looked up by its key: an
+  # extra video stream's, or the camera's for everything else.
+  defp extra_role(state, desc) do
+    case Map.get(state.extra_videos, section_key(desc)) do
+      %{role: role} -> role
+      nil -> @role_main
+    end
+  end
+
+  # The role is the last argument of every RPC aimed at a leg, and it is only
+  # sent when it says something: the role-0 calls stay the ones a media server
+  # that predates the parameter accepts.
+  defp with_role(args, @role_main), do: args
+  defp with_role(args, role), do: args ++ [role]
 
   # ── Helpers ─────────────────────────────────────────────────────────────────
 

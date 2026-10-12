@@ -66,6 +66,7 @@ defmodule Kelix.Config do
           control_api: map,
           metrics: map,
           database: map,
+          security: %{log_file: String.t() | nil, ignore: [Elixip.Security.Incident.type()]},
           debug: %{
             trace_retention: pos_integer,
             max_traces: pos_integer,
@@ -94,7 +95,7 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.6.3",
+            user_agent: "Kelixip/1.6.4",
             max_calls: nil,
             # The largest inbound SIP message this node accepts, in bytes. Past it a
             # request is answered 513 instead of being parsed. Read by the framework
@@ -152,7 +153,10 @@ defmodule Kelix.Config do
             # memory by Kelix.Traces: for `trace_retention` seconds once written,
             # `max_traces` at most, the oldest dropped first, each cut at
             # `max_trace_bytes` of message text. Lost on restart.
-            debug: %{trace_retention: 3600, max_traces: 100, max_trace_bytes: 1_048_576}
+            debug: %{trace_retention: 3600, max_traces: 100, max_trace_bytes: 1_048_576},
+            # `[security]`: the file the incident lines go to, none by default (the
+            # journal copy is always there), and the incident types not written.
+            security: %{log_file: nil, ignore: []}
 
   @protos %{"udp" => :udp, "tcp" => :tcp, "tls" => :tls, "wss" => :wss}
   @log_levels ~w(debug info warning error)
@@ -269,6 +273,14 @@ defmodule Kelix.Config do
     # has no working directory an operator reads files from. Read by
     # SIP.FSL.Host.journal_events/2.
     Application.put_env(:elixip2, :sequence_output, {Kelix.Traces, :store})
+
+    # Where the stack reports a security incident: Kelix.Security.IncidentReporter,
+    # which writes the line fail2ban reads. Called by Elixip.Security.report/1.
+    Application.put_env(
+      :elixip2,
+      :security_sink,
+      {Kelix.Security.IncidentReporter, :report}
+    )
 
     # Which of our addresses to publish to a peer outside, per bound address: the
     # `advertise` of a `[[listen]]` block. Read by `SIP.Transport.publish_ip/2`,
@@ -389,7 +401,7 @@ defmodule Kelix.Config do
          :ok <-
            reject_keys(
              map,
-             ~w(server log listen mediaserver module control_api metrics tls debug database session_timer),
+             ~w(server log listen mediaserver module control_api metrics tls debug database session_timer security),
              "config"
            ),
          {:ok, server} <- parse_server(Map.get(map, "server", %{})),
@@ -401,6 +413,7 @@ defmodule Kelix.Config do
          {:ok, debug} <- parse_debug(Map.get(map, "debug", %{})),
          {:ok, database} <- parse_database(Map.get(map, "database", %{})),
          {:ok, session_timer} <- parse_session_timer(Map.get(map, "session_timer")),
+         {:ok, security} <- parse_security(Map.get(map, "security", %{})),
          {:ok, mediaserver} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
@@ -422,8 +435,44 @@ defmodule Kelix.Config do
          metrics: metrics,
          tls: tls,
          debug: debug,
-         database: database
+         database: database,
+         security: security
        }}
+    end
+  end
+
+  # [security] — where the incident line goes, and which incident types are not
+  # written (docs/design/fail2ban-plan.md). No `log_file` ⇒ the journal copy only.
+  defp parse_security(%{} = sec) do
+    with :ok <- reject_keys(sec, ~w(log_file ignore), "[security]"),
+         {:ok, log_file} <- opt_string(sec, "log_file", nil, "[security]"),
+         {:ok, ignore} <- opt_incident_types(sec, "ignore", "[security]") do
+      {:ok, %{log_file: log_file, ignore: ignore}}
+    end
+  end
+
+  defp parse_security(_), do: {:error, "[security] must be a table"}
+
+  defp opt_incident_types(map, key, ctx) do
+    known = Elixip.Security.Incident.type_names()
+
+    case Map.get(map, key) do
+      nil ->
+        {:ok, []}
+
+      names when is_list(names) ->
+        case Enum.reject(names, &(&1 in known)) do
+          [] ->
+            {:ok, Enum.map(names, &Elixip.Security.Incident.type_from_name/1)}
+
+          bad ->
+            {:error,
+             "#{ctx}: `#{key}` names unknown incident type(s) #{inspect(bad)}; " <>
+               "known: #{Enum.join(known, ", ")}"}
+        end
+
+      _ ->
+        {:error, "#{ctx}: `#{key}` must be a list of incident type names"}
     end
   end
 

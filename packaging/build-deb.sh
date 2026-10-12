@@ -190,6 +190,15 @@ install -D -m 0644 "$stage/systemd/kelixip.service" "$root/lib/systemd/system/ke
 install -D -m 0644 "$stage/completion/kelictl" \
   "$root/usr/share/bash-completion/completions/kelictl"
 
+# The fail2ban filters and the jail example, as data the operator links into
+# /etc/fail2ban (doc/running.md, "fail2ban"); and the rotation of the security log,
+# a conffile like the rest of /etc.
+install -d -m 0755 "$root/usr/share/kelixip/fail2ban/filter.d" \
+  "$root/usr/share/kelixip/fail2ban/jail.d"
+install -m 0644 "$stage"/fail2ban/filter.d/*.conf "$root/usr/share/kelixip/fail2ban/filter.d/"
+install -m 0644 "$stage"/fail2ban/jail.d/*.conf "$root/usr/share/kelixip/fail2ban/jail.d/"
+install -D -m 0644 "$stage/logrotate/kelixip" "$root/etc/logrotate.d/kelixip"
+
 # Mutable state (future usrloc persistence, operator-installed scripts) and the log
 # directory used when stdout is redirected; postinst chowns both to the service.
 install -d -m 0750 "$root/var/lib/kelixip" "$root/var/log/kelixip"

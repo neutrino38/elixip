@@ -478,4 +478,118 @@ defmodule Kelix.Mod.AuthDbTest do
       assert hex == @ha1
     end
   end
+
+  # Every 403 the module answers is one `auth-failure` incident with the source the
+  # request came from — what a fail2ban jail counts. Nothing the SBB does not count
+  # is reported: not the first challenge, not a stale nonce, not a 500.
+  describe "security incidents" do
+    defmodule Sink do
+      def take(incident), do: send(:auth_db_security_test, {:incident, incident})
+    end
+
+    setup do
+      prev = Application.get_env(:elixip2, :security_sink)
+      Process.register(self(), :auth_db_security_test)
+      Application.put_env(:elixip2, :security_sink, {Sink, :take})
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:elixip2, :security_sink, prev),
+          else: Application.delete_env(:elixip2, :security_sink)
+      end)
+
+      :ok
+    end
+
+    @src {192, 0, 2, 5}
+
+    # A REGISTER as the transport hands it up: its R-URI carries where it came from.
+    defp reg_from(auth) do
+      ruri = %SIP.Uri{
+        scheme: "sip:",
+        domain: @domain,
+        destip: @src,
+        destport: 40000,
+        tp_module: SIP.Transport.UDP
+      }
+
+      %{method: :REGISTER, ruri: ruri, authorization: auth}
+    end
+
+    test "a wrong password is one bad_password incident from the request's source" do
+      a = auth(nonce(), response: "00000000000000000000000000000000")
+
+      assert {:reject, 403, _} =
+               AuthDb.do_registration_auth(reg_from(a), @domain, [now: @now] ++ lookup())
+
+      assert_received {:incident,
+                       %Elixip.Security.Incident{
+                         type: :auth_failure,
+                         src: @src,
+                         port: 40000,
+                         proto: "UDP",
+                         method: :REGISTER,
+                         realm: @domain,
+                         user: @user,
+                         reason: :bad_password
+                       }}
+
+      refute_received {:incident, _}
+    end
+
+    test "an unknown user is one unknown_user incident" do
+      lookup = [ha1_lookup: fn _u, _r -> :notfound end]
+
+      assert {:reject, 403, _} =
+               AuthDb.do_registration_auth(
+                 reg_from(auth(nonce())),
+                 @domain,
+                 [now: @now] ++ lookup
+               )
+
+      assert_received {:incident,
+                       %Elixip.Security.Incident{
+                         type: :auth_failure,
+                         src: @src,
+                         user: @user,
+                         reason: :unknown_user
+                       }}
+
+      refute_received {:incident, _}
+    end
+
+    test "a credential minted for another realm is one bad_realm incident, realm being ours" do
+      a = auth(nonce(), realm: "evil.com")
+
+      assert {:reject, 403, _} =
+               AuthDb.do_registration_auth(reg_from(a), @domain, [now: @now] ++ lookup())
+
+      assert_received {:incident,
+                       %Elixip.Security.Incident{
+                         type: :auth_failure,
+                         src: @src,
+                         realm: @domain,
+                         reason: :bad_realm
+                       }}
+
+      refute_received {:incident, _}
+    end
+
+    test "the first challenge, a stale nonce and a lookup error are not incidents" do
+      assert {:requireauth, false} =
+               AuthDb.do_registration_auth(%{method: :REGISTER}, @domain, lookup())
+
+      stale = [now: @now + 100, max_age: 60] ++ lookup()
+
+      assert {:requireauth, true} =
+               AuthDb.do_registration_auth(reg_from(auth(nonce(@now))), @domain, stale)
+
+      down = [ha1_lookup: fn _u, _r -> {:error, :db_down} end]
+
+      assert {:reject, 500, _} =
+               AuthDb.do_registration_auth(reg_from(auth(nonce())), @domain, [now: @now] ++ down)
+
+      refute_received {:incident, _}
+    end
+  end
 end

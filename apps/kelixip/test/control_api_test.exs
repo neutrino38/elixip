@@ -450,4 +450,67 @@ defmodule Kelix.ControlAPITest do
       assert call(conn(:get, "/status")).status == 403
     end
   end
+
+  # A refused credential is one `api-auth` incident from the caller's address, with
+  # the verb and never the path — the path is the caller's text.
+  describe "security incidents" do
+    defmodule Sink do
+      def take(incident), do: send(:control_api_security_test, {:incident, incident})
+    end
+
+    setup do
+      prev = Application.get_env(:elixip2, :security_sink)
+      Process.register(self(), :control_api_security_test)
+      Application.put_env(:elixip2, :security_sink, {Sink, :take})
+      Application.put_env(:kelixip, :control_api, %{auth: "token", token: "s3cret"})
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:elixip2, :security_sink, prev),
+          else: Application.delete_env(:elixip2, :security_sink)
+      end)
+
+      :ok
+    end
+
+    test "a wrong bearer is one invalid_token incident from 127.0.0.1" do
+      conn(:get, "/status") |> put_req_header("authorization", "Bearer wrong") |> call()
+
+      assert_received {:incident,
+                       %Elixip.Security.Incident{
+                         type: :api_auth,
+                         src: {127, 0, 0, 1},
+                         proto: "HTTP",
+                         method: "GET",
+                         reason: :invalid_token
+                       } = incident}
+
+      refute to_string(incident) =~ "/status"
+      refute_received {:incident, _}
+    end
+
+    test "a missing bearer is one missing_token incident" do
+      call(conn(:post, "/reload"))
+
+      assert_received {:incident,
+                       %Elixip.Security.Incident{
+                         type: :api_auth,
+                         method: "POST",
+                         reason: :missing_token
+                       }}
+    end
+
+    test "a missing client certificate is one no_client_cert incident" do
+      Application.put_env(:kelixip, :control_api, %{auth: "mtls"})
+      call(conn(:get, "/status"))
+
+      assert_received {:incident,
+                       %Elixip.Security.Incident{type: :api_auth, reason: :no_client_cert}}
+    end
+
+    test "a correct bearer is not an incident" do
+      conn(:get, "/status") |> put_req_header("authorization", "Bearer s3cret") |> call()
+      refute_received {:incident, _}
+    end
+  end
 end

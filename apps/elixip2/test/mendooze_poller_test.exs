@@ -54,12 +54,12 @@ defmodule Mendooze.EventPollerTest do
     test "decodes the seven JSR309 event types" do
       cases = [
         {[1, "cx-1", "p-1"], {:player_end_of_file, "cx-1", "p-1"}},
-        {[2, "cx-1", 4, 1, 0], {:external_fir, "cx-1", 4, :video}},
+        {[2, "cx-1", 4, 1, 0], {:external_fir, "cx-1", 4, :video, 0}},
         {[3, "cx-1", "p-1"], {:player_started, "cx-1", "p-1"}},
         {[4, "cx-1", "r-1"], {:recorder_started, "cx-1", "r-1"}},
         {[5, "cx-1", "r-1", 1], {:recorder_stopped, "cx-1", "r-1", :duration}},
-        {[6, "cx-1", 4, 0, 0], {:endpoint_disconnected, "cx-1", 4, :audio}},
-        {[7, "cx-1", 4, 0, 0], {:endpoint_connected, "cx-1", 4, :audio}}
+        {[6, "cx-1", 4, 0, 0], {:endpoint_disconnected, "cx-1", 4, :audio, 0}},
+        {[7, "cx-1", 4, 0, 0], {:endpoint_connected, "cx-1", 4, :audio, 0}}
       ]
 
       for {param, expected} <- cases do
@@ -201,7 +201,7 @@ defmodule Mendooze.EventPollerTest do
     refute_receive {:mendooze_event, _}, 100
     send(conn, {:chunk, tail})
 
-    assert_receive {:mendooze_event, {:endpoint_disconnected, "cx-1", 4, :audio}}, 1_000
+    assert_receive {:mendooze_event, {:endpoint_disconnected, "cx-1", 4, :audio, 0}}, 1_000
   end
 
   test "reconnects after the stream ends and keeps delivering" do
