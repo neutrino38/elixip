@@ -117,7 +117,7 @@ defmodule Kelix.Mod.SipServersRegistrationTest do
     assert parsed(first.from).userpart == "0123456789"
     assert parsed(first.to).userpart == "0123456789"
     assert expires(first) == {:ok, "600"}
-    assert registration("reg1").state == "registering"
+    until!(fn -> registration("reg1").state == "registering" end)
 
     :ok = Manual.simulate(tp, 401, 0)
     second = next_register!()

@@ -307,21 +307,46 @@ defmodule SIP.Test.B2bua.SerialFork do
 
   describe "trunk_pid reachability" do
     # The process a peer's `trunk_pid` names: answers `{:reachable?, uri}` from a
-    # set of domains it holds down, changeable while a hunt runs.
+    # set of domains it holds down, changeable while a hunt runs, and hands the
+    # `{:call_result, …}` it is told to `listener`.
     defmodule Reachability do
       use GenServer
 
-      def start_link(down), do: GenServer.start_link(__MODULE__, MapSet.new(down))
+      def start_link(down, listener \\ nil),
+        do: GenServer.start_link(__MODULE__, {MapSet.new(down), listener})
+
       def set_down(pid, down), do: GenServer.call(pid, {:set_down, MapSet.new(down)})
 
       @impl true
-      def init(down), do: {:ok, down}
+      def init(state), do: {:ok, state}
 
       @impl true
-      def handle_call({:reachable?, uri}, _from, down),
-        do: {:reply, not MapSet.member?(down, uri.domain), down}
+      def handle_call({:reachable?, uri}, _from, {down, _} = state),
+        do: {:reply, not MapSet.member?(down, uri.domain), state}
 
-      def handle_call({:set_down, down}, _from, _old), do: {:reply, :ok, down}
+      def handle_call({:set_down, down}, _from, {_old, listener}),
+        do: {:reply, :ok, {down, listener}}
+
+      @impl true
+      def handle_cast({:call_result, _target, _code} = result, {_down, listener} = state) do
+        if listener, do: send(listener, result)
+        {:noreply, state}
+      end
+    end
+
+    test "each attempt's outcome is told to the trunk_pid", %{ctx: ctx} do
+      _a = peer!("rcr1a")
+      _b = peer!("rcr1b")
+      {:ok, trunk} = Reachability.start_link([], self())
+
+      peer = serial_peer(["rcr1a", "rcr1b"], trunk_pid: trunk)
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
+
+      _ctx = relay_final(ctx, 486)
+      assert_receive {:call_result, %SIP.Uri{domain: "rcr1a.example.com"}, 486}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 2_000
+      assert second.ruri.domain == "rcr1b.example.com"
     end
 
     test "a target known to be down is skipped without an INVITE", %{ctx: ctx} do

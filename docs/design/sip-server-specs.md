@@ -467,6 +467,57 @@ Events, pushed to kelescope:
 Metrics, per server: inbound and outbound calls, failures by response code, OPTIONS
 response time.
 
+Plan for L6, split in two:
+
+**L6a — kelixip (`feat/sip-server-1.6.4`).**
+
+- Push. `Kelix.Mod.SipServers.subscribe_sip_servers(pid, domain)` answers
+  `{:ok, %{owner: pid, servers: [row]}}`, then `pid` receives
+  `{:kelix_sip_servers, domain, {:upsert, row}}` and
+  `{:kelix_sip_servers, domain, {:remove, slug}}`. `row` is what `server.show` returns
+  (reachability, registration, remote AOR states, metrics, active alarms): the initial
+  read and the push are one rendering, and every message carries the whole row, no
+  diff. Any state change of a URI, a registration or a remote AOR pushes the row.
+  Registration of the subscriber and the snapshot happen in one message of the
+  service, so nothing slips between them. `unsubscribe_sip_servers(pid, domain)` ends
+  it; a subscriber that dies is dropped.
+- Alarms. `{:kelix_sip_servers, domain, {:alarm, alarm}}` for a challenge for an
+  unexpected realm (server, expected and received realms) and for a resolved IP shared
+  by two servers (both named). An active alarm is also part of the row, so a screen
+  opened afterwards sees it; it clears when the cause goes (the password re-entered,
+  the address no longer shared).
+- Metrics, in the row. Inbound calls: INVITEs `matches_server/2` recognised. Outbound
+  calls: INVITEs `forward/3` shaped. Failures by response code: the B2BUA tells the
+  peer's `trunk_pid` the final outcome of each attempt it made on one of its targets
+  (`{:call_result, target, code}`, a cast, a framework addition beside
+  `{:reachable?, uri}`). OPTIONS response time: last and mean, measured by the
+  server's process.
+- `Kelix.Control.subscribe_sip_servers/2` and `unsubscribe_sip_servers/2`, the facade
+  kelescope calls, as for the conferences; `owner: nil` and no row when the module is
+  not loaded.
+
+As implemented (L6a): each server's process publishes its status to the service
+(`{:link_status, …}`) whenever it changes, at once for a state and at most once a
+second for the metrics alone; the service keeps the last one, so `server.show`,
+`aor.list` and the push read it without calling the process. A row adds to the
+definition `reachability`, `registration`, `aor_states` (`aor => state`), `metrics`
+and `alarms`. `metrics` is `calls_in`, `calls_out`, `answered`, `failures`
+(`code => count`, `transport_error` included) and `options_rtt_ms` (`last`, `mean`),
+counted since the process started. An alarm is a map with `kind`
+(`realm_mismatch`: `expected`, `received`; `shared_address`: `address`, `servers`)
+and the `server` it is shown on; a shared address is pushed once per server named.
+The B2BUA casts `{:call_result, target, code}` from where it records each attempt's
+outcome (`note_progress/2`), whether or not the peer asked for progress events.
+
+**L6b — kelescope (`release/0.7.0`).** No screen of its own: the servers of a domain
+are a section of the domain screen, beside its registrations and presence.
+`DomainsLink` holds the subscription per expanded domain and relays it on a
+`"kelixip:sip_servers:<domain>"` topic. The section lists the servers live (each URI's
+state, the registration, the alarms, the metrics), with create, edit and delete
+(through `module_command`, the password entered but never shown back) and a proxy's
+remote AORs with their state. It is absent when the module is not loaded. A design
+note in kelescope's `docs/conception/`, in French as the others.
+
 # Persistence entry
 
 One entry per server in the module's persistence file. Field names are snake_case
@@ -523,5 +574,6 @@ and are the names kelictl and the API use; an absent field takes its default.
 | L3 | OPTIONS liveness and up/down state |
 | L4 | trunk registration and challenge answering |
 | L5 | remote AOR probing (`sip-proxy`) |
-| L6 | kelescope API, events and metrics |
+| L6a | push subscription, alarms, metrics, `{:call_result, …}` in the B2BUA |
+| L6b | kelescope: the servers section of the domain screen |
 | L7 | documentation |

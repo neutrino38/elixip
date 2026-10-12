@@ -74,6 +74,17 @@ defmodule Kelix.Mod.SipServers.Link do
   @doc "A trunk's registration, as `server.show` reports it; `nil` for another type."
   def registration(pid), do: GenServer.call(pid, :registration)
 
+  @doc "An INVITE from the server (`:in`) or sent to it (`:out`), for the metrics."
+  def count_call(pid, direction) when direction in [:in, :out],
+    do: GenServer.cast(pid, {:count_call, direction})
+
+  @doc """
+  Everything this process knows about its server, as the service shows and pushes
+  it: `reachability`, `registration`, the remote AORs' states (`aor_states`),
+  `metrics` and the active `alarms`.
+  """
+  def status(pid), do: GenServer.call(pid, :status)
+
   # ── GenServer ───────────────────────────────────────────────────────────────
 
   @impl GenServer
@@ -83,6 +94,11 @@ defmodule Kelix.Mod.SipServers.Link do
     server = Keyword.fetch!(opts, :server)
 
     state = %{
+      owner: Keyword.get(opts, :owner),
+      published: nil,
+      flush: nil,
+      metrics: new_metrics(),
+      alarms: %{},
       server: server,
       resolved: Keyword.get(opts, :resolved, %{}),
       interval_ms: Keyword.get(opts, :interval, @default_interval_s) * 1000,
@@ -100,8 +116,20 @@ defmodule Kelix.Mod.SipServers.Link do
       }
     }
 
-    {:ok, state |> schedule(0) |> register_soon(0) |> schedule_aor()}
+    {:ok, state |> schedule(0) |> register_soon(0) |> schedule_aor() |> publish()}
   end
+
+  @impl GenServer
+  def handle_call(:status, _from, state), do: {:reply, current_status(state), state}
+
+  def handle_call(msg, from, state), do: msg |> call(from, state) |> published()
+
+  @impl GenServer
+  def handle_cast(msg, state), do: msg |> cast(state) |> published()
+
+  @impl GenServer
+  def handle_info(:flush_status, state), do: {:noreply, send_status(%{state | flush: nil})}
+  def handle_info(msg, state), do: msg |> info(state) |> published()
 
   @impl GenServer
   def terminate(_reason, state) do
@@ -109,8 +137,7 @@ defmodule Kelix.Mod.SipServers.Link do
     :ok
   end
 
-  @impl GenServer
-  def handle_call({:reachable?, target}, _from, state) do
+  defp call({:reachable?, target}, _from, state) do
     reply =
       case uri_of(state, target) do
         nil -> true
@@ -120,29 +147,32 @@ defmodule Kelix.Mod.SipServers.Link do
     {:reply, reply, state}
   end
 
-  def handle_call(:states, _from, state), do: {:reply, state.states, state}
+  defp call(:states, _from, state), do: {:reply, state.states, state}
 
-  def handle_call(:aor_states, _from, state), do: {:reply, state.aors.states, state}
+  defp call(:aor_states, _from, state), do: {:reply, state.aors.states, state}
 
-  def handle_call(:registration, _from, %{reg: nil} = state), do: {:reply, nil, state}
+  defp call(:registration, _from, %{reg: nil} = state), do: {:reply, nil, state}
 
-  def handle_call(:registration, _from, %{reg: reg} = state) do
+  defp call(:registration, _from, %{reg: reg} = state) do
     {:reply, %{state: Atom.to_string(reg.state), error: reg.error}, state}
   end
 
-  def handle_call({:authorize, code, challenge, method, digest_uri}, _from, state)
-      when code in [401, 407] do
+  defp call({:authorize, code, challenge, method, digest_uri}, _from, state)
+       when code in [401, 407] do
     {:reply, authorize(state, challenge, method, digest_uri), state}
   end
 
-  @impl GenServer
-  def handle_cast({:update, server, resolved}, state) do
+  defp cast({:update, server, resolved}, state) do
     restart = server != state.server
     newly_resolved = resolved != state.resolved
 
     # The binding made under the old definition is dropped first: it would
     # otherwise outlive a trunk told to stop registering, or to use another account.
     state = if restart, do: unregister(state), else: state
+
+    # A new definition is a new chance: the password re-entered for the realm the
+    # remote side asked is what clears its alarm.
+    state = if restart, do: %{state | alarms: %{}}, else: state
 
     state = %{
       state
@@ -167,7 +197,7 @@ defmodule Kelix.Mod.SipServers.Link do
     {:noreply, if(restart, do: update_aors(state), else: state)}
   end
 
-  def handle_cast({:seen, transport, ip}, state) do
+  defp cast({:seen, transport, ip}, state) do
     uris =
       for {uri, addrs} <- state.resolved,
           Enum.any?(addrs, fn {t, a, _port} -> t == transport and a == ip end),
@@ -176,8 +206,29 @@ defmodule Kelix.Mod.SipServers.Link do
     {:noreply, Enum.reduce(uris, state, &set(&2, &1, :up, "a request was received from it"))}
   end
 
-  @impl GenServer
-  def handle_info(:probe, state) do
+  defp cast({:count_call, direction}, state) do
+    key = if direction == :in, do: :calls_in, else: :calls_out
+    {:noreply, update_in(state.metrics[key], &(&1 + 1))}
+  end
+
+  defp cast({:call_result, _target, code}, state) do
+    metrics =
+      case code do
+        code when code in 200..299 ->
+          Map.update!(state.metrics, :answered, &(&1 + 1))
+
+        code ->
+          Map.update!(
+            state.metrics,
+            :failures,
+            &Map.update(&1, to_string(code), 1, fn n -> n + 1 end)
+          )
+      end
+
+    {:noreply, %{state | metrics: metrics}}
+  end
+
+  defp info(:probe, state) do
     state = %{state | timer: nil}
 
     state =
@@ -188,53 +239,53 @@ defmodule Kelix.Mod.SipServers.Link do
     {:noreply, schedule(state, state.interval_ms)}
   end
 
-  def handle_info(:register, %{reg: nil} = state), do: {:noreply, state}
+  defp info(:register, %{reg: nil} = state), do: {:noreply, state}
 
-  def handle_info(:register, state) do
+  defp info(:register, state) do
     state = %{state | reg: %{state.reg | timer: nil}}
     {:noreply, send_register(state, state.server.register_expires)}
   end
 
-  def handle_info({:response, %{response: code} = resp, tid}, %{reg: %{tid: tid}} = state)
-      when is_integer(code) and code >= 200 do
+  defp info({:response, %{response: code} = resp, tid}, %{reg: %{tid: tid}} = state)
+       when is_integer(code) and code >= 200 do
     {:noreply, registered(state, resp)}
   end
 
-  def handle_info({:transaction_timeout, _timer, tid, _req, _module}, %{reg: %{tid: tid}} = state) do
+  defp info({:transaction_timeout, _timer, tid, _req, _module}, %{reg: %{tid: tid}} = state) do
     {:noreply, register_failed(state, "REGISTER not answered")}
   end
 
-  def handle_info(:probe_aor, state) do
+  defp info(:probe_aor, state) do
     state = put_in(state.aors.timer, nil)
     {:noreply, state |> probe_next_aor() |> schedule_aor()}
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{aors: %{presence: ref}} = state) do
+  defp info({:DOWN, ref, :process, _pid, _reason}, %{aors: %{presence: ref}} = state) do
     # What we reported went with it: report again on the next probe.
     {:noreply, %{state | aors: %{state.aors | presence: nil, reported: %{}}}}
   end
 
-  def handle_info({:response, %{response: code}, tid}, state)
-      when is_integer(code) and code >= 200 and is_map_key(state.aors.probes, tid) do
+  defp info({:response, %{response: code}, tid}, state)
+       when is_integer(code) and code >= 200 and is_map_key(state.aors.probes, tid) do
     {aor, probes} = Map.pop(state.aors.probes, tid)
     status = if code in 200..299, do: :open, else: :closed
     {:noreply, aor_result(put_in(state.aors.probes, probes), aor, status)}
   end
 
-  def handle_info({:transaction_timeout, _timer, tid, _req, _module}, state)
-      when is_map_key(state.aors.probes, tid) do
+  defp info({:transaction_timeout, _timer, tid, _req, _module}, state)
+       when is_map_key(state.aors.probes, tid) do
     {aor, probes} = Map.pop(state.aors.probes, tid)
     {:noreply, aor_result(put_in(state.aors.probes, probes), aor, :closed)}
   end
 
-  def handle_info({:response, %{response: code}, tid}, state)
-      when is_integer(code) and code >= 200 do
+  defp info({:response, %{response: code}, tid}, state)
+       when is_integer(code) and code >= 200 do
     case Map.pop(state.probes, tid) do
       {nil, _} ->
         {:noreply, state}
 
-      {uri, probes} ->
-        state = %{state | probes: probes}
+      {{uri, sent_at}, probes} ->
+        state = %{state | probes: probes} |> rtt(now_ms() - sent_at)
 
         if code == 503,
           do: {:noreply, set(state, uri, :down, "OPTIONS answered 503")},
@@ -242,17 +293,96 @@ defmodule Kelix.Mod.SipServers.Link do
     end
   end
 
-  def handle_info({:transaction_timeout, _timer, tid, _req, _module}, state) do
+  defp info({:transaction_timeout, _timer, tid, _req, _module}, state) do
     case Map.pop(state.probes, tid) do
       {nil, _} ->
         {:noreply, state}
 
-      {uri, probes} ->
+      {{uri, _sent_at}, probes} ->
         {:noreply, set(%{state | probes: probes}, uri, :down, "OPTIONS not answered")}
     end
   end
 
-  def handle_info(_msg, state), do: {:noreply, state}
+  defp info({:alarm, kind, alarm}, state),
+    do: {:noreply, %{state | alarms: Map.put(state.alarms, kind, alarm)}}
+
+  defp info(_msg, state), do: {:noreply, state}
+
+  # ── status ──────────────────────────────────────────────────────────────────
+
+  defp published({:noreply, state}), do: {:noreply, publish(state)}
+  defp published({:reply, reply, state}), do: {:reply, reply, publish(state)}
+
+  # Sent to the service when it changed: at once for a state, at most once a
+  # second for the metrics alone — a busy trunk changes them on every call.
+  defp publish(state) do
+    status = current_status(state)
+
+    cond do
+      status == state.published ->
+        state
+
+      state.published != nil and
+          Map.delete(status, :metrics) == Map.delete(state.published, :metrics) ->
+        if state.flush,
+          do: state,
+          else: %{state | flush: Process.send_after(self(), :flush_status, 1_000)}
+
+      true ->
+        if state.flush, do: Process.cancel_timer(state.flush)
+        send_status(%{state | flush: nil})
+    end
+  end
+
+  defp send_status(state) do
+    status = current_status(state)
+    if is_pid(state.owner), do: send(state.owner, {:link_status, key(state), self(), status})
+    %{state | published: status}
+  end
+
+  defp key(state), do: {state.server.domain, state.server.slug}
+
+  defp current_status(state) do
+    %{
+      reachability: Map.new(state.states, fn {uri, st} -> {uri, Atom.to_string(st)} end),
+      registration:
+        state.reg && %{state: Atom.to_string(state.reg.state), error: state.reg.error},
+      aor_states: Map.new(state.aors.states, fn {aor, st} -> {aor, Atom.to_string(st)} end),
+      metrics: render_metrics(state.metrics),
+      alarms: state.alarms |> Map.values() |> Enum.map(&Map.put(&1, :server, state.server.slug))
+    }
+  end
+
+  defp new_metrics(),
+    do: %{
+      calls_in: 0,
+      calls_out: 0,
+      answered: 0,
+      failures: %{},
+      rtt_last: nil,
+      rtt_sum: 0,
+      rtt_n: 0
+    }
+
+  defp rtt(state, ms) do
+    m = state.metrics
+    %{state | metrics: %{m | rtt_last: ms, rtt_sum: m.rtt_sum + ms, rtt_n: m.rtt_n + 1}}
+  end
+
+  defp render_metrics(m) do
+    %{
+      calls_in: m.calls_in,
+      calls_out: m.calls_out,
+      answered: m.answered,
+      failures: m.failures,
+      options_rtt_ms: %{
+        last: m.rtt_last,
+        mean: if(m.rtt_n > 0, do: div(m.rtt_sum, m.rtt_n))
+      }
+    }
+  end
+
+  defp now_ms(), do: System.monotonic_time(:millisecond)
 
   # ── credentials ─────────────────────────────────────────────────────────────
 
@@ -262,6 +392,12 @@ defmodule Kelix.Mod.SipServers.Link do
         ok
 
       {:error, {:realm_mismatch, expected, received}} = error ->
+        send(
+          self(),
+          {:alarm, :realm_mismatch,
+           %{kind: "realm_mismatch", expected: expected, received: received}}
+        )
+
         Logger.error(
           module: __MODULE__,
           message:
@@ -492,7 +628,7 @@ defmodule Kelix.Mod.SipServers.Link do
                @options_timeout_s
              ) do
           {:ok, tid, _sent} ->
-            %{state | probes: Map.put(state.probes, tid, uri)}
+            %{state | probes: Map.put(state.probes, tid, {uri, now_ms()})}
 
           other ->
             set(state, uri, :down, "OPTIONS could not be sent (#{inspect(other)})")

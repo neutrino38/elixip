@@ -53,7 +53,10 @@ defmodule SIP.B2bua.Peer do
       `{:reachable?, uri}`; `false` skips the target without sending anything,
       as `{:serial_not_reachable, uri, :down, at}`. No answer counts as
       reachable, and `nil` (the default) asks nothing. Targets handed out by a
-      `provider` are not asked: the provider already chose them.
+      `provider` are not asked: the provider already chose them. It is also told
+      the outcome of every attempt on one of the peer's targets, as a cast
+      `{:call_result, target, code}` — `code` the final response (`200` for an
+      answer) or `:transport_error`.
     * `credentials` — the process answering a 401/407 the far end of this leg
       sends. Asked `{:authorize, code, challenge, method, digest_uri}`, it
       answers `{:ok, params}` — the `Authorization` / `Proxy-Authorization`
@@ -3309,9 +3312,29 @@ defmodule SIP.Session.B2bua do
       end
 
     if match?(%Peer{notify_progress: true}, peer), do: send(self(), {@outbound_tag, event})
+    tell_trunk(peer, event)
 
     sip_ctx
   end
+
+  # The outcome of each attempt on a target, told to the process that answers for
+  # the peer's reachability: `{:call_result, target, code}`, `code` the final
+  # response or `:transport_error`. A cast, so a slow or dead process costs the
+  # call nothing; what it does with it (counting failures by code) is its own.
+  defp tell_trunk(%Peer{trunk_pid: pid}, event) when is_pid(pid) do
+    case event do
+      {:serial_connected, target, _at} ->
+        GenServer.cast(pid, {:call_result, target, 200})
+
+      {:serial_not_reachable, target, outcome, _at} when outcome != :down ->
+        GenServer.cast(pid, {:call_result, target, outcome})
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp tell_trunk(_peer, _event), do: :ok
 
   # Wall clock, because what these feed is a record of WHEN things happened. A
   # duration taken between two of them inherits the clock's jumps; somewhere

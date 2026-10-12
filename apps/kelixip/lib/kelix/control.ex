@@ -312,6 +312,33 @@ defmodule Kelix.Control do
     do: safe(fn -> Kelix.ModuleRegistry.facade("mcu", fun, args, default) end, default)
 
   @doc """
+  Subscribe `pid` to the remote SIP servers of `domain` (kelescope's domain
+  screen). Returns the current rows; `pid` then receives
+  `{:kelix_sip_servers, domain, {:upsert, row}}`,
+  `{:kelix_sip_servers, domain, {:remove, slug}}` and
+  `{:kelix_sip_servers, domain, {:alarm, alarm}}`.
+
+  `row` is what `sip_servers server.show` returns. `owner` is the process holding
+  the subscription — monitor it and subscribe again on `:DOWN`. `owner: nil` with
+  no row is the answer when the module is not loaded.
+  """
+  @spec subscribe_sip_servers(pid(), String.t()) ::
+          {:ok, %{owner: pid() | nil, servers: [map]}} | {:error, :down | :timeout}
+  def subscribe_sip_servers(pid, domain) when is_binary(domain),
+    do:
+      sip_servers_facade(:subscribe_sip_servers, [pid, domain], {:ok, %{owner: nil, servers: []}})
+
+  @doc "Stop a subscription started by `subscribe_sip_servers/2`."
+  @spec unsubscribe_sip_servers(pid(), String.t()) :: :ok
+  def unsubscribe_sip_servers(pid, domain) when is_binary(domain) do
+    sip_servers_facade(:unsubscribe_sip_servers, [pid, domain], :ok)
+    :ok
+  end
+
+  defp sip_servers_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("sip_servers", fun, args, default) end, default)
+
+  @doc """
   Every served domain and its registrations (`kelictl registration list`), in
   `domains.toml` order.
 

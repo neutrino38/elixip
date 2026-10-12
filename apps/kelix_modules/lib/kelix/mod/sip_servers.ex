@@ -29,6 +29,16 @@ defmodule Kelix.Mod.SipServers do
 
   A trunk password is given as `auth_password=` with `auth_username` and
   `auth_realm`, and is never stored nor shown: only its HA1 is kept.
+
+  ## Push
+
+  `subscribe_sip_servers/2` (kelescope's domain screen) answers the servers of a
+  domain as `server.show` renders them, then pushes every change:
+  `{:kelix_sip_servers, domain, {:upsert, row}}`,
+  `{:kelix_sip_servers, domain, {:remove, slug}}` and, when one is raised,
+  `{:kelix_sip_servers, domain, {:alarm, alarm}}`. A row is whole — definition,
+  `reachability`, `registration`, `aor_states`, `metrics`, active `alarms` — never
+  a diff.
   """
   use GenServer
   @behaviour Kelix.Module
@@ -146,7 +156,7 @@ defmodule Kelix.Mod.SipServers do
           fields: ~w(domain slug type primary_uri backup_uri use_dns_srv send_keepalive
                initiate_connection ha_mode ext_domain ext_domain_aliases probe_remote_aors
                probe_interval aors register register_expires register_retry auth_username auth_realm
-               auth reachability registration)
+               auth reachability registration aor_states metrics alarms)
         },
         help: "Show one SIP server (never its credentials)"
       },
@@ -237,7 +247,11 @@ defmodule Kelix.Mod.SipServers do
          {slug, _t} <- Enum.find(entries, fn {_slug, t} -> t == transport end),
          [{_, server, link}] <- lookup(@servers_table, {domain, slug}) do
       # Any request from the server is proof of life.
-      if is_pid(link), do: Link.seen(link, transport, ip)
+      if is_pid(link) do
+        Link.seen(link, transport, ip)
+        if Map.get(req, :method) == :INVITE, do: Link.count_call(link, :in)
+      end
+
       {slug, Route.peer(server, link)}
     else
       _ -> :no_match
@@ -278,9 +292,35 @@ defmodule Kelix.Mod.SipServers do
            __MODULE__,
            {:forward, domain_of(ctx_or_domain), String.downcase(slug)}
          ) do
-      {:ok, server, resolved, turn, link} -> Route.forward(req, server, resolved, turn, link)
-      {:error, _} = error -> error
+      {:ok, server, resolved, turn, link} ->
+        result = Route.forward(req, server, resolved, turn, link)
+
+        if is_pid(link) and match?({_, _}, result) and Map.get(req, :method) == :INVITE,
+          do: Link.count_call(link, :out)
+
+        result
+
+      {:error, _} = error ->
+        error
     end
+  end
+
+  @doc """
+  Subscribe `pid` to the servers of `domain`: `{:ok, %{owner: pid, servers: [row]}}`,
+  then the pushes described in the module doc. The snapshot and the registration
+  happen in one message of the service, so no change falls between them. `owner`
+  is the service: monitor it, and subscribe again after a `:DOWN`.
+  """
+  @spec subscribe_sip_servers(pid(), String.t()) ::
+          {:ok, %{owner: pid(), servers: [map]}} | {:error, :down | :timeout}
+  def subscribe_sip_servers(pid, domain) when is_pid(pid) and is_binary(domain),
+    do: Kelix.Module.safe_call(__MODULE__, {:subscribe, pid, String.downcase(domain)})
+
+  @doc "End a subscription made by `subscribe_sip_servers/2`."
+  @spec unsubscribe_sip_servers(pid(), String.t()) :: :ok
+  def unsubscribe_sip_servers(pid, domain) when is_pid(pid) and is_binary(domain) do
+    _ = Kelix.Module.safe_call(__MODULE__, {:unsubscribe, pid, String.downcase(domain)})
+    :ok
   end
 
   @doc "The servers of `domain`, or every server when `domain` is nil."
@@ -331,7 +371,11 @@ defmodule Kelix.Mod.SipServers do
       resolved: %{},
       gen: %{},
       turns: %{},
-      conflicts: MapSet.new()
+      conflicts: MapSet.new(),
+      # what each server's process last said of it
+      status: %{},
+      # domain => %{subscriber pid => monitor ref}
+      subs: %{}
     }
 
     {:ok, sync(state, %{state | servers: servers})}
@@ -348,6 +392,22 @@ defmodule Kelix.Mod.SipServers do
       {:ok, result} -> {:reply, {:ok, result}, state}
       {:error, _} = error -> {:reply, error, state}
     end
+  end
+
+  def handle_call({:subscribe, pid, domain}, _from, state) do
+    subs = Map.get(state.subs, domain, %{})
+
+    subs =
+      if Map.has_key?(subs, pid), do: subs, else: Map.put(subs, pid, Process.monitor(pid))
+
+    rows = for server <- list(state, domain), do: row(state, server)
+    {:reply, {:ok, %{owner: self(), servers: rows}}, put_in(state.subs[domain], subs)}
+  end
+
+  def handle_call({:unsubscribe, pid, domain}, _from, state) do
+    {ref, subs} = Map.pop(Map.get(state.subs, domain, %{}), pid)
+    if ref, do: Process.demonitor(ref, [:flush])
+    {:reply, :ok, put_in(state.subs[domain], subs)}
   end
 
   def handle_call({:forward, domain, slug}, _from, state) do
@@ -380,7 +440,72 @@ defmodule Kelix.Mod.SipServers do
       else: {:noreply, state}
   end
 
+  def handle_info({:link_status, key, pid, status}, state) do
+    with ^pid <- Map.get(state.links, key),
+         %Server{} = server <- Map.get(state.servers, key) do
+      old = Map.get(state.status, key, %{})
+      state = put_in(state.status[key], status)
+
+      for alarm <- status.alarms -- Map.get(old, :alarms, []),
+          do: push(state, server.domain, {:alarm, alarm})
+
+      push(state, server.domain, {:upsert, row(state, server)})
+      {:noreply, state}
+    else
+      _ -> {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    subs =
+      Map.new(state.subs, fn {domain, subs} ->
+        {domain, if(Map.get(subs, pid) == ref, do: Map.delete(subs, pid), else: subs)}
+      end)
+
+    {:noreply, %{state | subs: subs}}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # ── push ─────────────────────────────────────────────────────────────────────
+
+  defp push(state, domain, event) do
+    for pid <- Map.keys(Map.get(state.subs, domain, %{})),
+        do: send(pid, {:kelix_sip_servers, domain, event})
+
+    :ok
+  end
+
+  # A server as shown and pushed: its definition, what its process last said of
+  # it, and the alarms the service itself holds about it (a shared address).
+  defp row(state, server) do
+    status = Map.get(state.status, key(server), %{})
+
+    server
+    |> Server.public()
+    |> Map.merge(%{
+      reachability: Map.get(status, :reachability, %{}),
+      registration: Map.get(status, :registration),
+      aor_states: Map.get(status, :aor_states, %{}),
+      metrics: Map.get(status, :metrics),
+      alarms: Map.get(status, :alarms, []) ++ shared_address_alarms(state, server)
+    })
+  end
+
+  defp shared_address_alarms(state, server) do
+    for {domain, ip, slugs} <- state.conflicts,
+        domain == server.domain and server.slug in slugs,
+        do: shared_address_alarm(server.slug, ip, slugs)
+  end
+
+  defp shared_address_alarm(slug, ip, slugs) do
+    %{
+      kind: "shared_address",
+      server: slug,
+      address: ip |> :inet.ntoa() |> to_string(),
+      servers: slugs
+    }
+  end
 
   # ── commands ─────────────────────────────────────────────────────────────────
 
@@ -400,13 +525,7 @@ defmodule Kelix.Mod.SipServers do
   end
 
   defp control("server.show", args, state) do
-    with {:ok, server} <- fetch(state, args) do
-      {:ok,
-       server
-       |> Server.public()
-       |> Map.put(:reachability, reachability(state, server))
-       |> Map.put(:registration, registration(state, server))}
-    end
+    with {:ok, server} <- fetch(state, args), do: {:ok, row(state, server)}
   end
 
   defp control("server.update", args, state) do
@@ -430,8 +549,8 @@ defmodule Kelix.Mod.SipServers do
   defp control("aor.list", args, state) do
     with {:ok, server} <- fetch(state, args),
          :ok <- proxy(server) do
-      states = aor_states(state, server)
-      {:ok, Enum.map(server.aors, &%{aor: &1, state: to_string(Map.get(states, &1, :none))})}
+      states = state.status |> Map.get(key(server), %{}) |> Map.get(:aor_states, %{})
+      {:ok, Enum.map(server.aors, &%{aor: &1, state: Map.get(states, &1, "none")})}
     end
   end
 
@@ -560,12 +679,20 @@ defmodule Kelix.Mod.SipServers do
       | resolved: Map.drop(new.resolved, gone),
         gen: Map.drop(new.gen, gone),
         turns: Map.drop(new.turns, gone),
-        links: Map.drop(new.links, gone)
+        links: Map.drop(new.links, gone),
+        status: Map.drop(new.status, gone)
     }
 
     new = Enum.reduce(changed, new, &link/2)
+    new = changed |> Enum.reduce(new, &resolve(&2, &1)) |> rebuild_index()
 
-    changed |> Enum.reduce(new, &resolve(&2, &1)) |> rebuild_index()
+    for {domain, slug} <- gone, do: push(new, domain, {:remove, slug})
+
+    for key <- changed,
+        server = Map.fetch!(new.servers, key),
+        do: push(new, server.domain, {:upsert, row(new, server)})
+
+    new
   end
 
   # Off the service's process: a DNS answer can take seconds, and kelictl must not
@@ -620,7 +747,7 @@ defmodule Kelix.Mod.SipServers do
           pid
 
         nil ->
-          opts = [server: server, resolved: targets, interval: state.interval]
+          opts = [server: server, resolved: targets, interval: state.interval, owner: self()]
           spec = Supervisor.child_spec({Link, opts}, restart: :temporary)
 
           case DynamicSupervisor.start_child(@links, spec) do
@@ -631,48 +758,6 @@ defmodule Kelix.Mod.SipServers do
 
     :ets.insert(@servers_table, {key, server, pid})
     %{state | links: Map.put(state.links, key, pid)}
-  end
-
-  defp aor_states(state, server) do
-    case Map.get(state.links, {server.domain, server.slug}) do
-      pid when is_pid(pid) ->
-        try do
-          Link.aor_states(pid)
-        catch
-          :exit, _ -> %{}
-        end
-
-      _ ->
-        %{}
-    end
-  end
-
-  defp registration(state, server) do
-    case Map.get(state.links, {server.domain, server.slug}) do
-      pid when is_pid(pid) ->
-        try do
-          Link.registration(pid)
-        catch
-          :exit, _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  defp reachability(state, server) do
-    case Map.get(state.links, {server.domain, server.slug}) do
-      pid when is_pid(pid) ->
-        try do
-          Map.new(Link.states(pid), fn {uri, st} -> {uri, Atom.to_string(st)} end)
-        catch
-          :exit, _ -> %{}
-        end
-
-      _ ->
-        %{}
-    end
   end
 
   # `{domain, ip} => [{slug, transport}]`, or `:ambiguous` when two servers of a
@@ -703,6 +788,26 @@ defmodule Kelix.Mod.SipServers do
             "#{:inet.ntoa(ip)}: requests from it are recognised as neither"
       )
     end
+
+    new_state = %{state | conflicts: conflicts}
+    raised = MapSet.difference(conflicts, state.conflicts)
+    cleared = MapSet.difference(state.conflicts, conflicts)
+
+    for {domain, ip, slugs} <- raised,
+        slug <- slugs,
+        do: push(new_state, domain, {:alarm, shared_address_alarm(slug, ip, slugs)})
+
+    # the rows whose shared-address alarm came or went
+    touched =
+      for {domain, _ip, slugs} <- MapSet.union(raised, cleared),
+          slug <- slugs,
+          server = Map.get(state.servers, {domain, slug}),
+          server != nil,
+          uniq: true,
+          do: server
+
+    for server <- touched,
+        do: push(new_state, server.domain, {:upsert, row(new_state, server)})
 
     ambiguous = MapSet.new(conflicts, fn {domain, ip, _} -> {domain, ip} end)
 
