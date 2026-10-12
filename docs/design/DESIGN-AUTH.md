@@ -380,9 +380,13 @@ A deployment behind a trusted peer — where RFC 3325 §5 lets an inbound assert
 through — says so in its script, not in configuration:
 
 ```elixir
-case Kelix.Mod.SipServers.matches_server(req) do
-  {_slug, _peer} -> trust_asserted_identity(req)
-  :no_match -> ...
+case Kelix.Mod.SipServers.matches_server(sip_ctx, req) do
+  {_slug, _peer} ->
+    trust_asserted_identity(req)
+    goto(place_call, "from a trusted server")
+
+  :no_match ->
+    goto(authenticate, "from a user")
 end
 ```
 

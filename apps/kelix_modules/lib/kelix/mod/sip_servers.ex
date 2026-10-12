@@ -233,8 +233,12 @@ defmodule Kelix.Mod.SipServers do
   it, accept it, keep its P-Asserted-Identity) is the script's decision.
 
       case Kelix.Mod.SipServers.matches_server(sip_ctx, req) do
-        {_slug, _peer} -> trust_asserted_identity(req)
-        :no_match -> ...
+        {_slug, _peer} ->
+          trust_asserted_identity(req)
+          goto(place_call, "from a trusted server")
+
+        :no_match ->
+          goto(authenticate, "from a user")
       end
   """
   @spec matches_server(%SIP.Context{} | String.t(), map()) ::

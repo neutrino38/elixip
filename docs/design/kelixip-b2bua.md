@@ -1,7 +1,7 @@
 # kelixip call control: `queue()` — future work
 
-**Status: partly built.** `call()` exists — see below; `queue()` and the kelixip
-objects both verbs take names from do not. This records a direction so the pieces
+**Status: partly built.** `call()` exists — see below — and so do the SIP servers
+(§3.1); `queue()` and its agents do not. This records a direction so the pieces
 being built now (the B2BUA primitives of
 [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md#5-b2bua), the registrar, presence) are not shaped in a
 way that forecloses it.
@@ -14,18 +14,22 @@ since it separates cleanly what Asterisk's older channel drivers conflated:
 
 ### 3.1 SIP trunks
 
-An `endpoint`-like object: where an operator or a PBX is reached, over which
-transport, with which identity.
+**Built**, as `Kelix.Mod.SipServers` ([sip_servers.md](../kelixip/modules/sip_servers.md),
+design in [sip-server-specs.md](sip-server-specs.md)): an `endpoint`-like object,
+named by a slug within its domain — where an operator, a PBX or an application
+server is reached, over which transport, with which identity.
 
-- outbound **registration** to the far end (an elixip UAC scenario already does
-  this — `scenarios/uac_register.exs` — what is missing is running it as a
-  supervised, long-lived node service rather than a test run);
-- **liveness by OPTIONS**, per `chan_pjsip`'s `aor/qualify`: the dialog layer
-  already sends and counts keepalives (`SIP.DialogImpl.KeepAlive`); the missing
-  part is a trunk-level *state* (up / down / degraded) other things can read;
-- that state is what `%SIP.B2bua.Peer{trunk_pid:}` was reserved for
-  (DESIGN-FRAMEWORK.md) — a hunt should skip a trunk known to be down rather
-  than time out against it.
+- outbound **registration** of a trunk, run by the server's own supervised
+  process, refreshed and retried;
+- **liveness by OPTIONS**, per `chan_pjsip`'s `aor/qualify`: a per-URI state
+  (up / down / unknown) the B2BUA reads through `%SIP.B2bua.Peer{trunk_pid:}`
+  (DESIGN-FRAMEWORK.md), so a hunt skips a target known to be down rather than
+  time out against it;
+- the answer to the operator's challenges on the outbound leg, through
+  `%SIP.B2bua.Peer{credentials:}`.
+
+What `queue()` would add is a capacity: `max_sessions`, planned for v2 of the
+module.
 
 ### 3.2 Queue agents
 

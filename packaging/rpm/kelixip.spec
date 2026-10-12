@@ -63,7 +63,7 @@ The core ships NO SIP function. The registrar, the authentication back-end, the
 conference mixer and the presence collection are loadable modules delivered as
 separate packages (kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu,
 kelixip-mod-presence, kelixip-mod-mcu_presence, kelixip-mod-dialog_state,
-kelixip-mod-silo, kelixip-mod-conversation) which
+kelixip-mod-silo, kelixip-mod-conversation, kelixip-mod-sip_servers) which
 drop their bytecode into the
 root-owned module directory; a deployment installs only what it uses.
 
@@ -167,6 +167,18 @@ PostgreSQL) until the next message between the same two parties wakes it, on
 whichever node it reaches. The schema ships under
 /usr/share/kelixip/sql/conversation/ and is the operator's to create. Enable it
 with a [module.conversation] block in config.toml.
+
+%package mod-sip_servers
+Summary:        Remote SIP servers of a domain, for kelixip
+Requires:       %{name} = %{version}
+
+%description mod-sip_servers
+The remote SIP servers a domain exchanges calls with: application servers,
+proxies and trunks. Each server's URIs are probed by OPTIONS, and a call skips
+one known to be down; a trunk registers its account and answers the operator's
+challenges; a proxy's remote AORs are probed and reported to presence. Servers
+are declared with kelictl, the REST API or kelescope, and kept in the module's
+file. Enable it with a [module.sip_servers] block in config.toml.
 
 %prep
 %setup -q
@@ -363,6 +375,10 @@ fi
 %doc doc/modules/conversation.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.Conversation*.beam
 %{_datadir}/%{name}/sql/conversation
+
+%files mod-sip_servers
+%doc doc/modules/sip_servers.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
 * Tue Oct 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-2

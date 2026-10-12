@@ -576,4 +576,4 @@ and are the names kelictl and the API use; an absent field takes its default.
 | L5 | remote AOR probing (`sip-proxy`) |
 | L6a | push subscription, alarms, metrics, `{:call_result, …}` in the B2BUA |
 | L6b | kelescope: the servers section of the domain screen |
-| L7 | documentation |
+| L7 | documentation: `docs/kelixip/modules/sip_servers.md`; packaging: subpackage `kelixip-mod-sip_servers` / `kelixip-mod-sip-servers`, `[module.sip_servers]` in the shipped `config.toml` |

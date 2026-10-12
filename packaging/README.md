@@ -14,6 +14,7 @@ RPM only so far) — from one `mix release` plus one `mix escript.build`:
 | `kelixip-mod-dialog_state` / `kelixip-mod-dialog-state` | `Kelix.Mod.DialogState` bytecode — the call occupancy of the served users (BLF, on-the-phone); requires `kelixip-mod-presence` |
 | `kelixip-mod-silo` | `Kelix.Mod.Silo` bytecode — store-and-forward of instant messages, with its DDL (`/usr/share/kelixip/sql/silo/`) and the reference chat scripts |
 | `kelixip-mod-conversation` | `Kelix.Mod.Conversation` bytecode — hibernated chat conversations, with its DDL (`/usr/share/kelixip/sql/conversation/`) |
+| `kelixip-mod-sip_servers` / `kelixip-mod-sip-servers` | `Kelix.Mod.SipServers` bytecode — the remote SIP servers of a domain: application servers, proxies, trunks |
 | `elixipp` | the test-tool escript (`/usr/bin/elixipp`) + `ELIXIPP.md`/`FSL.md` |
 
 Each module package carries **its own document** under `/usr/share/doc/<package>/`,
