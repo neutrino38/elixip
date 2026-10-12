@@ -29,7 +29,7 @@ rpmbuild -bb --define "_topdir $BUILD" "$BUILD/SPECS/elixipp.spec"
 # Drop this package's older builds from dist/ so it only ever holds the spec's
 # current Version-Release; packages from other scripts (kelixip's RPM/deb) are
 # untouched.
-name="$(rpmspec -q --qf '%{name}\n' "$BUILD/SPECS/elixipp.spec" | head -1)"
+name="$(rpmspec -q --srpm --qf '%{name}\n' "$BUILD/SPECS/elixipp.spec")"
 rm -f "$DIST/${name}"-*.rpm
 find "$BUILD/RPMS" -name '*.rpm' -exec cp -v {} "$DIST/" \;
 echo "==> packages in packaging/dist:"

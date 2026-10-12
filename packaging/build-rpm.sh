@@ -29,7 +29,10 @@ rpmbuild -bb --define "_topdir $BUILD" "$BUILD/SPECS/kelixip.spec"
 # Likewise, drop this package's older builds from dist/ so it only ever holds the
 # spec's current Version-Release; packages from other scripts (e.g. build-deb.sh's
 # .deb) are untouched.
-name="$(rpmspec -q --qf '%{name}\n' "$BUILD/SPECS/kelixip.spec" | head -1)"
+# --srpm: the source package's name, one line. Without it rpmspec prints one line
+# per subpackage, and `| head -1` under pipefail kills it with SIGPIPE (exit 141)
+# once the list outgrows what head reads before closing the pipe.
+name="$(rpmspec -q --srpm --qf '%{name}\n' "$BUILD/SPECS/kelixip.spec")"
 rm -f "$DIST/${name}"-*.rpm
 find "$BUILD/RPMS" -name '*.rpm' -exec cp -v {} "$DIST/" \;
 echo "==> packages in packaging/dist:"
