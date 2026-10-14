@@ -69,7 +69,7 @@ defmodule Kelix.Mod.SipServersLivenessTest do
         %{
           "domain" => @domain,
           "slug" => slug,
-          "type" => "sip-application",
+          "type" => "sip-appsrv",
           "primary_uri" => uri(slug)
         },
         extra

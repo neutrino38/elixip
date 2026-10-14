@@ -956,7 +956,7 @@ defmodule Kelix.Control.CLI do
   defp render_hinted(rows, %{kind: :table} = hint) when is_list(rows) do
     labels = Map.get(hint, :labels, %{})
     columns = Map.get(hint, :columns) || derived_columns(rows)
-    table_of(rows, columns, labels, [], Map.get(hint, :first, %{}))
+    table_of(rows, columns, labels, [], Map.get(hint, :first, %{}), Map.get(hint, :truncate, %{}))
   end
 
   defp render_hinted(map, %{kind: :detail} = hint) when is_map(map) do
@@ -1002,14 +1002,24 @@ defmodule Kelix.Control.CLI do
   # `path` prefixes the label lookup, so a nested table's columns are declared the
   # way every other field is — `"participants.state"`. `first` names, for a column
   # holding a list of maps, the key to show from its first entry; the rest of the
-  # list is counted, not printed.
-  defp table_of(rows, columns, labels, path, first \\ %{}) do
+  # list is counted, not printed. `truncate` caps a column's width: a longer cell is
+  # cut and ends with an ellipsis.
+  defp table_of(rows, columns, labels, path, first \\ %{}, truncate \\ %{}) do
     table(columns, rows, fn row ->
       Enum.map(columns, fn column ->
-        dash(column_cell(field(row, column), column, path, labels, Map.get(first, column)))
+        field(row, column)
+        |> column_cell(column, path, labels, Map.get(first, column))
+        |> dash()
+        |> clip(Map.get(truncate, column))
       end)
     end)
   end
+
+  defp clip(text, width) when is_integer(width) and width > 0 do
+    if String.length(text) > width, do: String.slice(text, 0, width - 1) <> "…", else: text
+  end
+
+  defp clip(text, _width), do: text
 
   defp column_cell([head | rest], column, path, labels, key)
        when is_map(head) and is_binary(key) do

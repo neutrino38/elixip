@@ -411,7 +411,7 @@ fi
 
 * Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-2
 - New subpackage kelixip-mod-sip_servers: the remote SIP servers of a domain
-  (sip-application, sip-proxy, sip-trunk), declared with kelictl sip_servers,
+  (sip-appsrv, sip-proxy, sip-trunk), declared with kelictl sip_servers,
   the REST API or kelescope and kept in server_file. Scripts call
   matches_server/2, find_server/2 and forward/3; a [module.sip_servers] block
   in config.toml enables it.

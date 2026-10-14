@@ -14,7 +14,9 @@ defmodule Kelix.Mod.SipServers.Server do
 
   alias SIP.Auth
 
-  @types ~w(sip-application sip-proxy sip-trunk)
+  @types ~w(sip-appsrv sip-proxy sip-trunk)
+  # A name a type was read by before: a server_file written then still loads.
+  @former_types %{"sip-application" => "sip-appsrv"}
   @ha_modes ~w(failover loadsharing)
 
   # The algorithms a trunk password is hashed for at entry: the remote side picks
@@ -85,7 +87,7 @@ defmodule Kelix.Mod.SipServers.Server do
   def build(args, %__MODULE__{} = base \\ %__MODULE__{}) when is_map(args) do
     with {:ok, s} <- put_string(base, args, "domain", &String.downcase/1),
          {:ok, s} <- put_string(s, args, "slug", &String.downcase/1),
-         {:ok, s} <- put_enum(s, args, "type", @types),
+         {:ok, s} <- put_enum(s, former_type(args), "type", @types),
          {:ok, s} <- put_uri(s, args, "primary_uri"),
          {:ok, s} <- put_uri(s, args, "backup_uri"),
          {:ok, s} <- put_uri(s, args, "tertiary_uri"),
@@ -211,6 +213,11 @@ defmodule Kelix.Mod.SipServers.Server do
       error -> error
     end
   end
+
+  defp former_type(%{"type" => type} = args) when is_binary(type),
+    do: Map.put(args, "type", Map.get(@former_types, String.downcase(type), type))
+
+  defp former_type(args), do: args
 
   defp put_enum(s, args, key, allowed) do
     case fetch(args, key) do
@@ -413,8 +420,8 @@ defmodule Kelix.Mod.SipServers.Server do
         {:ok, parsed} = parse_uri(uri)
 
         case {type, parsed.userpart} do
-          {"sip-application", u} when u not in [nil, ""] ->
-            {:error, "#{uri}: a sip-application URI has no user part"}
+          {"sip-appsrv", u} when u not in [nil, ""] ->
+            {:error, "#{uri}: a sip-appsrv URI has no user part"}
 
           {"sip-trunk", u} when u in [nil, ""] ->
             {:error, "#{uri}: a sip-trunk URI carries the account's user part"}

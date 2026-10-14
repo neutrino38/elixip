@@ -18,7 +18,7 @@ defmodule Kelix.Mod.SipServers do
   ## Control
 
       kelictl sip_servers server.create domain=example.com slug=acd \\
-        type=sip-application primary_uri=sip:10.0.0.5:5060
+        type=sip-appsrv primary_uri=sip:10.0.0.5:5060
       kelictl sip_servers server.list [domain]
       kelictl sip_servers server.show example.com acd
       kelictl sip_servers server.update example.com acd backup_uri=sip:10.0.0.6
@@ -58,6 +58,7 @@ defmodule Kelix.Mod.SipServers do
   @min_refresh_s 30
   @max_refresh_s 3_600
   @retry_ms 60_000
+  @yes_no %{"true" => "Y", "false" => "N"}
 
   @config_keys ~w(module server_file keepalive_interval)
 
@@ -144,8 +145,9 @@ defmodule Kelix.Mod.SipServers do
         args: [%{name: "domain", required: false}],
         render: %{
           kind: :table,
-          columns: ~w(domain slug type uris ha_mode),
-          first: %{"uris" => "uri"}
+          columns: ~w(domain slug type primary_uri additional_uris reachable ha_mode),
+          labels: %{"additional_uris" => @yes_no, "reachable" => @yes_no},
+          truncate: %{"primary_uri" => 48}
         },
         help: "List the SIP servers, optionally of one domain"
       },
@@ -291,7 +293,7 @@ defmodule Kelix.Mod.SipServers do
 
   @doc """
   The server a request is addressed to, from the host of its Request-URI: a
-  `sip-proxy` by its `ext_domain` and aliases, a `sip-application` by the host of
+  `sip-proxy` by its `ext_domain` and aliases, a `sip-appsrv` by the host of
   its URIs. The slug to hand to `forward/3`, or `:no_match`; a trunk is never
   found this way.
   """
@@ -530,6 +532,19 @@ defmodule Kelix.Mod.SipServers do
     })
   end
 
+  # A list entry: the definition, plus what a glance at the list answers — whether
+  # a hunt would still try the server (no URI known `down`; `unknown` counts as
+  # reachable, as `Link` rules) and whether there is more than the primary URI.
+  defp listed(state, server) do
+    states = state.status |> Map.get(key(server), %{}) |> Map.get(:reachability, %{})
+    public = Server.public(server)
+
+    Map.merge(public, %{
+      reachable: Enum.any?(public.uris, &(Map.get(states, &1.uri, "unknown") != "down")),
+      additional_uris: length(public.uris) > 1
+    })
+  end
+
   defp shared_address_alarms(state, server) do
     for {domain, ip, slugs} <- state.conflicts,
         domain == server.domain and server.slug in slugs,
@@ -559,7 +574,7 @@ defmodule Kelix.Mod.SipServers do
 
   defp control("server.list", args, state) do
     domain = args["domain"] && String.downcase(args["domain"])
-    {:ok, Enum.map(list(state, domain), &Server.public/1)}
+    {:ok, for(server <- list(state, domain), do: listed(state, server))}
   end
 
   defp control("server.show", args, state) do

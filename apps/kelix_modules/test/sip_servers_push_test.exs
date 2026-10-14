@@ -117,14 +117,14 @@ defmodule Kelix.Mod.SipServersPushTest do
   end
 
   test "a subscriber gets the rows, then every creation, change and deletion" do
-    :ok = create("acd", "sip-application", "sip:10.0.0.5", %{"send_keepalive" => "false"})
+    :ok = create("acd", "sip-appsrv", "sip:10.0.0.5", %{"send_keepalive" => "false"})
 
-    assert {:ok, %{owner: owner, servers: [%{slug: "acd", type: "sip-application"}]}} =
+    assert {:ok, %{owner: owner, servers: [%{slug: "acd", type: "sip-appsrv"}]}} =
              SipServers.subscribe_sip_servers(self(), @domain)
 
     assert owner == Process.whereis(SipServers)
 
-    :ok = create("ivr", "sip-application", "sip:10.0.0.6", %{"send_keepalive" => "false"})
+    :ok = create("ivr", "sip-appsrv", "sip:10.0.0.6", %{"send_keepalive" => "false"})
     assert pushed!("ivr", &(&1.primary_uri == "sip:10.0.0.6"))
 
     {:ok, _} =
@@ -147,14 +147,14 @@ defmodule Kelix.Mod.SipServersPushTest do
   test "a URI coming up is pushed, with the OPTIONS response time" do
     {:ok, _} = SipServers.subscribe_sip_servers(self(), @domain)
     _tp = peer!("push1")
-    :ok = create("push1", "sip-application", uri("push1"))
+    :ok = create("push1", "sip-appsrv", uri("push1"))
 
     row = pushed!("push1", &(&1.reachability == %{uri("push1") => "up"}))
     assert is_integer(row.metrics.options_rtt_ms.last)
   end
 
   test "calls in, calls out and failures by code are counted" do
-    :ok = create("gw", "sip-application", "sip:10.0.0.8", %{"send_keepalive" => "false"})
+    :ok = create("gw", "sip-appsrv", "sip:10.0.0.8", %{"send_keepalive" => "false"})
     until!(fn -> Map.has_key?(:sys.get_state(SipServers).resolved, {@domain, "gw"}) end)
     {:ok, _} = SipServers.subscribe_sip_servers(self(), @domain)
 
@@ -237,10 +237,10 @@ defmodule Kelix.Mod.SipServersPushTest do
 
     capture_log(fn ->
       :ok =
-        create("a", "sip-application", "sip:shared-a.example.net", %{"send_keepalive" => "false"})
+        create("a", "sip-appsrv", "sip:shared-a.example.net", %{"send_keepalive" => "false"})
 
       :ok =
-        create("b", "sip-application", "sip:shared-b.example.net", %{"send_keepalive" => "false"})
+        create("b", "sip-appsrv", "sip:shared-b.example.net", %{"send_keepalive" => "false"})
 
       assert_receive {:kelix_sip_servers, @domain,
                       {:alarm,
@@ -271,7 +271,7 @@ defmodule Kelix.Mod.SipServersPushTest do
     Kelix.ModuleRegistry.register("sip_servers", SipServers, %{})
     on_exit(fn -> Kelix.ModuleRegistry.unregister("sip_servers") end)
 
-    :ok = create("acd", "sip-application", "sip:10.0.0.5", %{"send_keepalive" => "false"})
+    :ok = create("acd", "sip-appsrv", "sip:10.0.0.5", %{"send_keepalive" => "false"})
 
     assert {:ok, %{owner: owner, servers: [%{slug: "acd"}]}} =
              Kelix.Control.subscribe_sip_servers(self(), @domain)
@@ -281,7 +281,7 @@ defmodule Kelix.Mod.SipServersPushTest do
   end
 
   test "status/1 is what the row carries" do
-    :ok = create("acd", "sip-application", "sip:10.0.0.5", %{"send_keepalive" => "false"})
+    :ok = create("acd", "sip-appsrv", "sip:10.0.0.5", %{"send_keepalive" => "false"})
 
     assert %{reachability: _, registration: nil, aor_states: %{}, metrics: _, alarms: []} =
              Link.status(link("acd"))

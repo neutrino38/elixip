@@ -7,7 +7,7 @@ defmodule Kelix.Mod.SipServers.Route do
   | Type | R-URI | To | From |
   |---|---|---|---|
   | `sip-proxy` | kept (`:keep`), its host moved to `ext_domain` when it is ours | follows the R-URI | kept |
-  | `sip-application` | rewritten (`:peer`): the user part of the request at the server | kept | kept |
+  | `sip-appsrv` | rewritten (`:peer`): the user part of the request at the server | kept | kept |
   | `sip-trunk` | rewritten (`:peer`): the user part at `ext_domain`, else at the trunk | as the R-URI | the trunk account |
 
   A trunk with an `ext_domain` names a domain the DNS would route elsewhere, so its
@@ -48,7 +48,7 @@ defmodule Kelix.Mod.SipServers.Route do
       "sip-proxy" ->
         {to_ext_domain(req, server), peer(server, uris, :keep, server.use_dns_srv)}
 
-      "sip-application" ->
+      "sip-appsrv" ->
         targets = for uri <- uris, do: %SIP.Uri{parse!(uri) | userpart: user(req)}
         {req, peer(server, targets, :peer, server.use_dns_srv)}
 

@@ -21,7 +21,7 @@ kelixip (1.6.4-3) stable; urgency=low
 kelixip (1.6.4-2) stable; urgency=low
 
   * New package kelixip-mod-sip-servers: the remote SIP servers of a domain
-    (sip-application, sip-proxy, sip-trunk), declared with kelictl sip_servers,
+    (sip-appsrv, sip-proxy, sip-trunk), declared with kelictl sip_servers,
     the REST API or kelescope and kept in server_file. Scripts call
     matches_server/2, find_server/2 and forward/3; a [module.sip_servers] block
     in config.toml enables it.

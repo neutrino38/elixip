@@ -83,10 +83,7 @@ defmodule Kelix.Mod.SipServersRoutingTest do
   end
 
   defp app(slug, uri, extra \\ %{}),
-    do:
-      create(
-        Map.merge(%{"slug" => slug, "type" => "sip-application", "primary_uri" => uri}, extra)
-      )
+    do: create(Map.merge(%{"slug" => slug, "type" => "sip-appsrv", "primary_uri" => uri}, extra))
 
   defp proxy(slug, extra) do
     create(

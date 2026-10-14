@@ -1001,6 +1001,14 @@ defmodule Kelix.Control.CLITest do
             help: "A table whose column shows the first entry of a list and counts the rest"
           },
           %{
+            name: "thing.clipped",
+            rest: {:get, "/things/clipped"},
+            rw: :r,
+            args: [],
+            render: %{kind: :table, columns: ~w(name uri), truncate: %{"uri" => 12}},
+            help: "A table whose column is cut at a width"
+          },
+          %{
             name: "thing.brief",
             rest: {:get, "/things/brief"},
             rw: :r,
@@ -1058,6 +1066,15 @@ defmodule Kelix.Control.CLITest do
            %{name: "trio", members: [%{name: "alice"}, %{name: "bob"}, %{name: "carol"}]},
            %{name: "solo", members: [%{name: "dave"}]},
            %{name: "empty", members: []}
+         ]}
+      end
+
+      def handle_control("thing.clipped", _args) do
+        {:ok,
+         [
+           %{name: "long", uri: "sip:alice@example.com"},
+           %{name: "exact", uri: "sip:bob@ex.o"},
+           %{name: "none", uri: nil}
          ]}
       end
 
@@ -1155,6 +1172,16 @@ defmodule Kelix.Control.CLITest do
       assert trio =~ ~r/^trio\s+alice \(\+2\)$/
       assert solo =~ ~r/^solo\s+dave$/
       assert empty =~ ~r/^empty\s+-$/
+    end
+
+    test "a `truncate:` column is cut at its width and ends with an ellipsis" do
+      {0, out} = run(["rmod", "thing.clipped"])
+      [header, long, exact, none] = String.split(out, "\n")
+
+      assert header =~ ~r/^name\s+uri$/
+      assert long == "long   sip:alice@e…"
+      assert exact == "exact  sip:bob@ex.o"
+      assert none == "none   -"
     end
 
     test "a `hide:` field is left out of the detail view, the others still print" do

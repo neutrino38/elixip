@@ -54,8 +54,9 @@ defmodule Kelix.Module do
   path to `%{"raw" => "human"}` value names (`"video.size" => %{"6" => "hd720p"}`);
   `nested:` declares the `columns:` of a field holding a list of maps; `first:`
   maps a table column holding a list of maps to the key shown from its first entry,
-  the others being counted (`sip:a (+2)`) — everything is strings so the hint
-  survives both the RPC and the JSON encoding of `GET /modules`.
+  the others being counted (`sip:a (+2)`); `truncate:` caps a table column at a
+  number of characters, a longer cell ending with `…` — everything is strings or
+  integers so the hint survives both the RPC and the JSON encoding of `GET /modules`.
 
   An argument whose *value* has a vocabulary of its own (a mosaic name, an enum, a
   compact syntax) may carry its own `help:` — one string or a list of lines, printed
@@ -91,6 +92,7 @@ defmodule Kelix.Module do
             optional(:labels) => %{optional(String.t()) => %{optional(String.t()) => String.t()}},
             optional(:nested) => %{optional(String.t()) => %{optional(:columns) => [String.t()]}},
             optional(:first) => %{optional(String.t()) => String.t()},
+            optional(:truncate) => %{optional(String.t()) => pos_integer},
             optional(:hide) => [String.t()]
           }
         }

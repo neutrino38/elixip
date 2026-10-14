@@ -51,7 +51,7 @@ defmodule Kelix.Mod.SipServersTest do
   defp create(args), do: control("server.create", Map.put_new(args, "domain", @domain))
 
   defp app(slug, uri),
-    do: create(%{"slug" => slug, "type" => "sip-application", "primary_uri" => uri})
+    do: create(%{"slug" => slug, "type" => "sip-appsrv", "primary_uri" => uri})
 
   defp trunk(slug, extra \\ %{}) do
     create(
@@ -80,7 +80,7 @@ defmodule Kelix.Mod.SipServersTest do
   describe "declaring a server" do
     test "an application server, with the defaults filled in" do
       assert {:ok, s} = app("acd", "sip:10.0.0.5:5060;transport=tcp")
-      assert s.type == "sip-application"
+      assert s.type == "sip-appsrv"
       assert s.ha_mode == "failover"
       assert s.send_keepalive == true
       assert s.auth == "none"
@@ -108,7 +108,7 @@ defmodule Kelix.Mod.SipServersTest do
       assert {:ok, s} =
                create(%{
                  "slug" => "hub",
-                 "type" => "sip-application",
+                 "type" => "sip-appsrv",
                  "primary_uri" => "sip:sip.pstnhub.microsoft.com:5061;transport=tls",
                  "backup_uri" => "sip:sip2.pstnhub.microsoft.com:5061;transport=tls",
                  "tertiary_uri" => "sip:sip3.pstnhub.microsoft.com:5061;transport=tls",
@@ -132,7 +132,7 @@ defmodule Kelix.Mod.SipServersTest do
       assert {:error, msg} =
                create(%{
                  "slug" => "typo",
-                 "type" => "sip-application",
+                 "type" => "sip-appsrv",
                  "primary_uri" => "sip:10.0.0.9",
                  "source_networks" => "52.112.0.0/33"
                })
@@ -149,7 +149,7 @@ defmodule Kelix.Mod.SipServersTest do
       assert {:error, msg} =
                create(%{
                  "slug" => "acd",
-                 "type" => "sip-application",
+                 "type" => "sip-appsrv",
                  "primary_uri" => "sip:10.0.0.5",
                  "register_expires" => "600"
                })
@@ -229,7 +229,7 @@ defmodule Kelix.Mod.SipServersTest do
       {:ok, _} =
         create(%{
           "slug" => "a",
-          "type" => "sip-application",
+          "type" => "sip-appsrv",
           "primary_uri" => "sip:10.0.0.5",
           "source_networks" => "52.112.0.0/14"
         })
@@ -237,7 +237,7 @@ defmodule Kelix.Mod.SipServersTest do
       assert {:error, :address_in_use} =
                create(%{
                  "slug" => "b",
-                 "type" => "sip-application",
+                 "type" => "sip-appsrv",
                  "primary_uri" => "sip:10.0.0.6",
                  "source_networks" => "52.114.0.0/16"
                })
@@ -245,7 +245,7 @@ defmodule Kelix.Mod.SipServersTest do
       assert {:ok, _} =
                create(%{
                  "slug" => "c",
-                 "type" => "sip-application",
+                 "type" => "sip-appsrv",
                  "primary_uri" => "sip:10.0.0.7",
                  "source_networks" => "52.120.0.0/14"
                })
@@ -272,7 +272,7 @@ defmodule Kelix.Mod.SipServersTest do
                create(%{
                  "domain" => "other.com",
                  "slug" => "acd",
-                 "type" => "sip-application",
+                 "type" => "sip-appsrv",
                  "primary_uri" => "sip:10.0.0.5"
                })
     end
@@ -287,7 +287,7 @@ defmodule Kelix.Mod.SipServersTest do
              create(%{
                "domain" => "nowhere.net",
                "slug" => "acd",
-               "type" => "sip-application",
+               "type" => "sip-appsrv",
                "primary_uri" => "sip:10.0.0.5"
              })
   end
@@ -357,11 +357,11 @@ defmodule Kelix.Mod.SipServersTest do
       on_exit(fn -> Kelix.Control.Registry.deregister("sip_servers") end)
     end
 
-    test "server.list shows the first URI and counts the others; server.show tabulates them" do
+    test "server.list shows the primary URI, more Y/N and reachable Y/N; server.show tabulates the URIs" do
       {:ok, _} =
         create(%{
           "slug" => "hub",
-          "type" => "sip-application",
+          "type" => "sip-appsrv",
           "primary_uri" => "sip:sip.pstnhub.microsoft.com:5061;transport=tls",
           "backup_uri" => "sip:sip2.pstnhub.microsoft.com:5061;transport=tls",
           "tertiary_uri" => "sip:sip3.pstnhub.microsoft.com:5061;transport=tls",
@@ -370,11 +370,27 @@ defmodule Kelix.Mod.SipServersTest do
 
       {:ok, _} = app("acd", "sip:10.0.0.5")
 
+      {:ok, _} = app("far", "sip:this.user.part.is.longer.than.the.column.example.net:5060")
+
       {0, out} = Kelix.Control.CLI.run(["sip_servers", "server.list"], node())
-      [header, acd, hub] = String.split(out, "\n")
-      assert header =~ ~r/^domain\s+slug\s+type\s+uris\s+ha_mode$/
-      assert acd =~ ~r/acd\s+sip-application\s+sip:10\.0\.0\.5\s+failover$/
-      assert hub =~ ~r/sip:sip\.pstnhub\.microsoft\.com:5061;transport=tls \(\+2\)\s+failover$/
+      [header, acd, far, hub] = String.split(out, "\n")
+
+      assert header =~
+               ~r/^domain\s+slug\s+type\s+primary_uri\s+additional_uris\s+reachable\s+ha_mode$/
+
+      assert acd =~ ~r/acd\s+sip-appsrv\s+sip:10\.0\.0\.5\s+N\s+Y\s+failover$/
+
+      assert far =~
+               ~r/far\s+sip-appsrv\s+sip:this\.user\.part\.is\.longer\.than\.the\.column\.ex…\s+N\s+Y\s+failover$/
+
+      assert hub =~
+               ~r/hub\s+sip-appsrv\s+sip:sip\.pstnhub\.microsoft\.com:5061;transport=tls\s+Y\s+Y\s+failover$/
+
+      refute out =~ "sip2.pstnhub"
+
+      assert {:ok, rows} = control("server.list", %{"domain" => @domain})
+      assert %{reachable: true, additional_uris: true} = Enum.find(rows, &(&1.slug == "hub"))
+      assert %{reachable: true, additional_uris: false} = Enum.find(rows, &(&1.slug == "acd"))
 
       {0, out} =
         Kelix.Control.CLI.run(
@@ -421,10 +437,17 @@ defmodule Kelix.Mod.SipServersTest do
     end
 
     @tag content: ~s({"version": 1, "servers": [
-             {"domain": "example.com", "slug": "acd", "type": "sip-application", "primary_uri": "sip:10.0.0.5"},
-             {"domain": "example.com", "slug": "bad", "type": "sip-application"}]})
+             {"domain": "example.com", "slug": "acd", "type": "sip-appsrv", "primary_uri": "sip:10.0.0.5"},
+             {"domain": "example.com", "slug": "bad", "type": "sip-appsrv"}]})
     test "one bad row does not cost the others" do
       assert [%Server{slug: "acd"}] = SipServers.servers(@domain)
+    end
+
+    @tag content:
+           ~s({"version": 1, "servers": [
+             {"domain": "example.com", "slug": "acd", "type": "sip-application", "primary_uri": "sip:10.0.0.5"}]})
+    test "a file written with the former type name loads, under the current one" do
+      assert [%Server{slug: "acd", type: "sip-appsrv"}] = SipServers.servers(@domain)
     end
 
     test "store round trip, field by field", %{path: path} do

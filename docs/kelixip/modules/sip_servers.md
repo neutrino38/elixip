@@ -9,13 +9,13 @@ A server belongs to one domain and is one of three types:
 
 | Type | The remote host is | Example |
 |---|---|---|
-| `sip-application` | an application server that sends and takes calls for our users | an ACD, an IVR |
+| `sip-appsrv` | an application server that sends and takes calls for our users | an ACD, an IVR |
 | `sip-proxy` | a proxy/registrar with users of its own | a partner PBX |
 | `sip-trunk` | an account at an operator | a SIP trunk |
 
 What each type changes on a call forwarded to it:
 
-| | `sip-application` | `sip-proxy` | `sip-trunk` |
+| | `sip-appsrv` | `sip-proxy` | `sip-trunk` |
 |---|---|---|---|
 | Request-URI | rewritten: the dialled user at the server | kept; its host becomes `ext_domain` when it names our domain | rewritten: the dialled user at `ext_domain`, else at the trunk host |
 | To | kept | follows the Request-URI | follows the Request-URI |
@@ -95,7 +95,7 @@ aliases = ["203.0.113.10"]
 
 ```console
 $ kelictl sip_servers server.create domain=example.com slug=acd \
-    type=sip-application primary_uri=sip:10.0.0.5:5060
+    type=sip-appsrv primary_uri=sip:10.0.0.5:5060
 $ kelictl sip_servers server.create domain=example.com slug=operator \
     type=sip-trunk primary_uri=sip:0123456789@sbc.operator.net \
     backup_uri=sip:0123456789@sbc2.operator.net ext_domain=operator.net \
@@ -105,7 +105,7 @@ $ kelictl sip_servers server.create domain=example.com slug=partner-pbx \
     probe_remote_aors=true
 $ kelictl sip_servers aor.add example.com partner-pbx alice@partner.net
 $ kelictl sip_servers server.create domain=example.com slug=teams \
-    type=sip-application \
+    type=sip-appsrv \
     'primary_uri=sip:sip.pstnhub.microsoft.com:5061;transport=tls' \
     'backup_uri=sip:sip2.pstnhub.microsoft.com:5061;transport=tls' \
     'tertiary_uri=sip:sip3.pstnhub.microsoft.com:5061;transport=tls' \
@@ -142,7 +142,7 @@ value clears an optional one (`backup_uri=` drops the backup).
 |---|---|---|---|
 | `domain` | all | **required** | The kelixip domain the server belongs to |
 | `slug` | all | **required** | Its name, hostname-shaped, unique within the domain |
-| `type` | all | **required** | `sip-application`, `sip-proxy` or `sip-trunk` |
+| `type` | all | **required** | `sip-appsrv`, `sip-proxy` or `sip-trunk`. `sip-application`, the former name, is read as `sip-appsrv` |
 | `primary_uri` | all | **required** | `sip:` or `sips:` URI. A trunk's carries the account's user part; the others' have none |
 | `backup_uri` | all | — | Tried when the primary fails or is down |
 | `tertiary_uri` | all | — | Tried when the backup fails or is down too |
@@ -175,7 +175,7 @@ fails, and an alarm names both realms. Entering the password again with the righ
 realm clears it.
 
 A remote host that authenticates the node by its address alone, with no account,
-is a `sip-application`, not a trunk.
+is a `sip-appsrv`, not a trunk.
 
 ## Facades
 
@@ -204,7 +204,7 @@ Kelix.Mod.SipServers.find_server(sip_ctx, req) :: slug | :no_match
 ```
 
 The server `req` is addressed to, from the host of its Request-URI: a `sip-proxy` by
-its `ext_domain` and aliases, a `sip-application` by the hosts of its URIs. A trunk
+its `ext_domain` and aliases, a `sip-appsrv` by the hosts of its URIs. A trunk
 is never found this way, and `source_networks` play no part.
 
 ### `forward/3`
@@ -236,7 +236,7 @@ fails: `call/1` ends with `{:call, :failed, %{reason: :forward_failed, cause:
 | Command | REST | Description |
 |---|---|---|
 | `kelictl sip_servers server.create …` | `POST /modules/sip_servers/servers` | Declares a server (`201`). `409` when its name, host, address or remote domain is taken; `400` for a domain the node does not serve |
-| `kelictl sip_servers server.list [domain]` | `GET /modules/sip_servers/servers` | The servers, optionally of one domain. kelictl shows the first URI and counts the others (`sip:a (+2)`) |
+| `kelictl sip_servers server.list [domain]` | `GET /modules/sip_servers/servers` | The servers, optionally of one domain. Each carries `reachable` (no URI is known `down`; `unknown` counts as reachable) and `additional_uris` (a backup or tertiary URI exists). kelictl shows the primary URI, cut at 48 characters, and the two flags as `Y`/`N` |
 | `kelictl sip_servers server.show <server>` | `GET /modules/sip_servers/servers/<server>` | One server: its fields (never the password; `auth` says `set` or `none`), `uris`, `reachability`, `registration`, `aor_states`, `metrics`, `alarms`. kelictl lays the URIs out as a table, role, URI and state |
 | `kelictl sip_servers server.update <server> …` | `PUT` or `PATCH /modules/sip_servers/servers/<server>` | Changes the fields given |
 | `kelictl sip_servers server.delete <server>` | `DELETE /modules/sip_servers/servers/<server>` | Deletes it; a registered trunk is un-registered |

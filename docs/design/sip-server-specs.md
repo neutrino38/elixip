@@ -170,7 +170,7 @@ server.
 
 
 Il est typé :
-- sip-application 
+- sip-appsrv 
 - sip-proxy
 - sip-trunk
 
@@ -202,7 +202,7 @@ Il est attaché à un domaine. Ce n'est pas un objet global.
 
 ## Différences de comportements en fonction du type
 
-| | sip-application | sip-proxy | sip-trunk |
+| | sip-appsrv | sip-proxy | sip-trunk |
 |---|---|---|---|
 | R-URI to the remote host | rewritten (`:peer`) | kept (`:keep`) | rewritten (`:peer`) |
 | Users belong to | our domain | either side (`ext_domain`, `ext_domain_aliases` when remote) | the operator (`ext_domain` optional) |
@@ -210,7 +210,7 @@ Il est attaché à un domaine. Ce n'est pas un objet global.
 | From rewritten | no | no | yes, to the trunk account's identity |
 | REGISTER, answers challenges | no | no | yes |
 
-### sip-application
+### sip-appsrv
 
 Dans ce cas, le serveur agit comme un 'trusted' kamailio / un peer asterisk.
 Attention, c'est le script du domaine qui va déterminer le comportement.
@@ -308,7 +308,7 @@ reports `registration` (`state`: `unregistered`, `registering`, `registered`,
 `register = false` is a trunk that does not register but answers the challenges of
 the requests it sends (an INVITE challenged by the operator); its `registration` is
 `null`. A remote host that authenticates us by our address alone, with no account,
-is declared as a `sip-application`, not as a trunk.
+is declared as a `sip-appsrv`, not as a trunk.
 
 
 # Module et fonctions
@@ -343,7 +343,7 @@ The R-URI the remote host receives depends on the type:
 
 - `sip-proxy`: `ruri: :keep`. The request goes to the proxy unchanged; the proxy
   routes it on its own R-URI.
-- `sip-application` and `sip-trunk`: `ruri: :peer`. The R-URI is rewritten to what
+- `sip-appsrv` and `sip-trunk`: `ruri: :peer`. The R-URI is rewritten to what
   the remote host expects: the user part of the request, the host, port and transport
   of the server (for a trunk, `ext_domain` as host when it is set). `forward/2` builds
   this target per call, so the dialled number is never lost to a server URI that has
@@ -401,7 +401,7 @@ the script names the server it forwards to.
 
 Finds the server a request is addressed to, from the host of its R-URI, so a script can
 name it to `forward/2` without hard-coding it. Candidates are the `sip-proxy` servers
-(their `ext_domain` and `ext_domain_aliases`) and the `sip-application` servers (the
+(their `ext_domain` and `ext_domain_aliases`) and the `sip-appsrv` servers (the
 host of their URIs); a `sip-trunk` is never found this way.
 
 Returns the server slug or `:no_match`. A host designates at most one server of a
@@ -529,7 +529,7 @@ and are the names kelictl and the API use; an absent field takes its default.
 |---|---|---|
 | `slug` | all | hostname-shaped, unique within the domain |
 | `domain` | all | slug of the kelixip domain the server belongs to |
-| `type` | all | `sip-application` \| `sip-proxy` \| `sip-trunk` |
+| `type` | all | `sip-appsrv` \| `sip-proxy` \| `sip-trunk` |
 | `primary_uri`, `backup_uri`, `tertiary_uri` | all | tried in this order; a trunk's URIs carry the account's user part |
 | `source_networks` | all | CIDR networks a request may come from, besides the resolved URIs; the transport must be one the URIs name |
 | `use_dns_srv` | all | resolve each URI through SRV (default `false`) |
@@ -544,7 +544,7 @@ and are the names kelictl and the API use; an absent field takes its default.
 | `auth_username`, `auth_realm`, `auth_ha1` | trunk | credentials; `auth_ha1` is `[{algorithm, hex}]` |
 
 ```json
-{ "slug": "acd", "domain": "kelix.example.com", "type": "sip-application",
+{ "slug": "acd", "domain": "kelix.example.com", "type": "sip-appsrv",
   "primary_uri": "sip:10.0.0.5:5060;transport=tcp",
   "send_keepalive": true, "initiate_connection": true }
 ```
