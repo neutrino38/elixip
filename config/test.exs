@@ -26,13 +26,13 @@ config :ex_unit, capture_log: true
 # then fails with :eaddrinuse and every `:live` test that needs a real socket dies
 # on it, for a reason that has nothing to do with the code under test.
 #
-# Override when 5070 is busy too — notably while a manually-run kelixip is holding
-# it, since that is the port its documented dev config uses:
+# 5080 rather than 5070: a manually-run kelixip holds 5070, the port its documented
+# dev config uses. Override when 5080 is busy too:
 #
-#     ELIXIP_TEST_UDP_PORT=5075 mix test --include live
+#     ELIXIP_TEST_UDP_PORT=5085 mix test --include live
 config :elixip2,
        :udp_local_port,
-       String.to_integer(System.get_env("ELIXIP_TEST_UDP_PORT", "5070"))
+       String.to_integer(System.get_env("ELIXIP_TEST_UDP_PORT", "5080"))
 
 # Centralized SIP account used across the test suite.
 # Read in tests via: Application.compile_env(:elixip2, :test_account)
