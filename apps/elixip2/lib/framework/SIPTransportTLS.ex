@@ -180,6 +180,16 @@ defmodule SIP.Transport.TLS do
     {:stop, :normal, state}
   end
 
+  def handle_info({:ssl_error, _socket, reason}, state) do
+    Logger.info(
+      module: __MODULE__,
+      dest: "#{SIP.NetUtils.ip2string(state.destip)}:#{state.destport}",
+      message: "TLS connection failed: #{inspect(reason)}, stopping transport instance"
+    )
+
+    {:stop, :normal, state}
+  end
+
   # See SIP.Transport.TCP.terminate/2: announced here so a crash says as much as
   # a clean close (design §14.4, R4).
   @impl true

@@ -173,6 +173,16 @@ defmodule SIP.Transport.TCP do
     {:stop, :normal, state}
   end
 
+  def handle_info({:tcp_error, _socket, reason}, state) do
+    Logger.info(
+      module: __MODULE__,
+      dest: "#{SIP.NetUtils.ip2string(state.destip)}:#{state.destport}",
+      message: "TCP connection failed: #{inspect(reason)}, stopping transport instance"
+    )
+
+    {:stop, :normal, state}
+  end
+
   # The dialogs riding this connection are told from here rather than from the
   # close handler above, so that a transport dying of a CRASH says as much as one
   # closing cleanly (design §14.4, R4).
