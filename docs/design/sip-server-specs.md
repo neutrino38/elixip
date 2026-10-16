@@ -144,10 +144,23 @@ slug, and the node's configuration files never describe one.
 - send_keepalive
 - ha_mode = failover | loadsharing
 - initiate_connection = true | false # Qui initie la connexion dans le cas d'un transport connecté ?
+- use_fqdn_contact = true | false # Le Contact des requêtes envoyées au serveur porte le domaine (Teams Direct Routing)
 
 `use_dns_srv` and `backup_uri` do not overlap. SRV is failover *within* one provider
 (each URI is resolved, its records become a serial list, as `%SIP.B2bua.Peer{use_srv:}`
 already does); `backup_uri` is failover *across* providers. Both can be set.
+
+`use_fqdn_contact` is for a server that identifies its peers by name: Teams Direct
+Routing finds the SBC from the FQDN in the Contact, and drops the connection when it
+reads an address. The name travels with the request as `%SIP.Uri{contact_host:}` on
+the R-URI, and `SIP.Transport.add_contact_header/3` publishes it. It is set on the
+OPTIONS and REGISTER of the server's process, and on the outbound leg of `forward/3`
+through `%SIP.B2bua.Peer{contact_host:}`. The dialog copies it to the requests it
+sends on that leg. The port is left out: the bound port of an outbound connection is
+ephemeral, and the peer resolves a portless name to the port we listen on (RFC 3263).
+
+Not covered: the responses to a request the server sent us, and the requests we send
+in a dialog the server opened. Their Contact still names the address.
 
 `ha_mode = loadsharing` in v1 is a round-robin: `forward/2` rotates the order of
 `uris` on every call, so each call starts on the next server and still fails over to
@@ -536,6 +549,7 @@ and are the names kelictl and the API use; an absent field takes its default.
 | `send_keepalive` | all | OPTIONS liveness (default `true`) |
 | `initiate_connection` | all | who opens a connected transport (default `true`) |
 | `ha_mode` | all | `failover` (default) \| `loadsharing` |
+| `use_fqdn_contact` | all | the Contact of the requests sent to the server names the server's `domain` instead of the bound address, without a port (default `false`) |
 | `ext_domain`, `ext_domain_aliases` | proxy, trunk | the remote domain (aliases: proxy only) |
 | `probe_remote_aors`, `probe_interval` | proxy | AOR probing, interval in seconds |
 | `aors` | proxy | remote AORs, managed by `kelictl server … aor` |

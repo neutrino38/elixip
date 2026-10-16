@@ -78,8 +78,14 @@ defmodule Kelix.Mod.SipServers.Route do
 
   defp credentials(_server, _link), do: nil
 
-  defp peer(_server, targets, ruri, use_srv) do
-    %Peer{uris: targets, fork: :serial, ruri: ruri, use_srv: use_srv}
+  defp peer(server, targets, ruri, use_srv) do
+    %Peer{
+      uris: targets,
+      fork: :serial,
+      ruri: ruri,
+      use_srv: use_srv,
+      contact_host: Server.contact_host(server)
+    }
   end
 
   defp rotate(uris, "loadsharing", turn) when uris != [] do

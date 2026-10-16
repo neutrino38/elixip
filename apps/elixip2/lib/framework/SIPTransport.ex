@@ -1055,8 +1055,21 @@ defmodule SIP.Transport do
 
   # Add /fix contact header to a SIP message given the transport
   def add_contact_header(tmod, tid, msg) when is_pid(tid) and is_map(msg) do
-    add_contact_header(build_contact_uri(tmod, tid, peer_of(msg)), msg)
+    tmod
+    |> build_contact_uri(tid, peer_of(msg))
+    |> publish_host(msg)
+    |> add_contact_header(msg)
   end
+
+  # A destination that knows us by name gets the name, without a port: the
+  # bound port of an outbound connection is ephemeral, and a portless name is
+  # resolved by the peer (RFC 3263 §4.2) to the port we listen on.
+  defp publish_host(%SIP.Uri{} = contact, %{ruri: %SIP.Uri{contact_host: host}})
+       when is_binary(host) and host != "" do
+    %SIP.Uri{contact | domain: host, port: nil}
+  end
+
+  defp publish_host(contact, _msg), do: contact
 
   # No local address to advertise: leave the message as it stands rather than
   # stamp a Contact we cannot fill in. The send that follows will fail on its own,

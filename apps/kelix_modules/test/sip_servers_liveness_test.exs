@@ -110,6 +110,22 @@ defmodule Kelix.Mod.SipServersLivenessTest do
     assert shown.reachability == %{uri("live1") => "up"}
   end
 
+  test "the OPTIONS Contact publishes the bound address by default" do
+    _tp = peer!("addr1")
+    :ok = app("addr1")
+
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, options}}, 3_000
+    refute options.contact.domain == @domain
+  end
+
+  test "use_fqdn_contact: the OPTIONS Contact names the server's domain, without a port" do
+    _tp = peer!("fqdn1")
+    :ok = app("fqdn1", %{"use_fqdn_contact" => "true"})
+
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, options}}, 3_000
+    assert SIP.Uri.serialize(options.contact) == {:ok, "<sip:example.com;transport=udp>"}
+  end
+
   test "a 503 takes it down: the B2BUA is told to skip it, not its backup" do
     _primary = peer!("live2", options_code: 503)
     _backup = peer!("live2b")

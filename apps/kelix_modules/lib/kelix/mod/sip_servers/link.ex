@@ -643,7 +643,13 @@ defmodule Kelix.Mod.SipServers.Link do
   defp stamp_resolved(state, uri, %SIP.Uri{} = target) do
     case Map.get(state.resolved, uri, []) do
       [{transport, ip, port} | _] ->
-        %SIP.Uri{target | destip: ip, destport: port, destproto: transport}
+        %SIP.Uri{
+          target
+          | destip: ip,
+            destport: port,
+            destproto: transport,
+            contact_host: Server.contact_host(state.server)
+        }
 
       [] ->
         nil
@@ -753,7 +759,10 @@ defmodule Kelix.Mod.SipServers.Link do
         state
 
       via ->
-        ruri = SIP.Session.B2bua.stamp_destination(target, via)
+        ruri = %SIP.Uri{
+          SIP.Session.B2bua.stamp_destination(target, via)
+          | contact_host: Server.contact_host(state.server)
+        }
 
         case SIP.Transac.start_uac_transaction(
                options_msg(state.server, ruri, target),

@@ -30,7 +30,7 @@ defmodule Kelix.Mod.SipServers.Server do
   @ext_domain_types ~w(sip-proxy sip-trunk)
 
   @fields ~w(domain slug type primary_uri backup_uri tertiary_uri source_networks use_dns_srv
-             send_keepalive initiate_connection ha_mode ext_domain ext_domain_aliases
+             send_keepalive initiate_connection use_fqdn_contact ha_mode ext_domain ext_domain_aliases
              probe_remote_aors probe_interval aors register register_expires register_retry
              auth_username auth_realm auth_password)
 
@@ -48,6 +48,7 @@ defmodule Kelix.Mod.SipServers.Server do
             use_dns_srv: false,
             send_keepalive: true,
             initiate_connection: true,
+            use_fqdn_contact: false,
             ha_mode: "failover",
             ext_domain: nil,
             ext_domain_aliases: [],
@@ -95,6 +96,7 @@ defmodule Kelix.Mod.SipServers.Server do
          {:ok, s} <- put_bool(s, args, "use_dns_srv"),
          {:ok, s} <- put_bool(s, args, "send_keepalive"),
          {:ok, s} <- put_bool(s, args, "initiate_connection"),
+         {:ok, s} <- put_bool(s, args, "use_fqdn_contact"),
          {:ok, s} <- put_enum(s, args, "ha_mode", @ha_modes),
          {:ok, s} <- put_string(s, args, "ext_domain", &String.downcase/1),
          {:ok, s} <- put_list(s, args, "ext_domain_aliases", &String.downcase/1),
@@ -124,6 +126,14 @@ defmodule Kelix.Mod.SipServers.Server do
   def roles(%__MODULE__{} = s) do
     for {field, role} <- @roles, uri = Map.get(s, field), uri != nil, do: {role, uri}
   end
+
+  @doc """
+  The host name our Contact publishes towards the server: its domain when
+  `use_fqdn_contact` is on, else nil (the bound address is published).
+  """
+  @spec contact_host(t()) :: String.t() | nil
+  def contact_host(%__MODULE__{use_fqdn_contact: true, domain: domain}), do: domain
+  def contact_host(%__MODULE__{}), do: nil
 
   @doc """
   Whether a request from `ip` over `transport` falls in one of the server's

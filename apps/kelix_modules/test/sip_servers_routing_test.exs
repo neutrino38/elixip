@@ -252,6 +252,15 @@ defmodule Kelix.Mod.SipServersRoutingTest do
       assert SIP.Uri.get_transport(target) == "TCP"
     end
 
+    test "use_fqdn_contact: the leg publishes the server's domain as its Contact host" do
+      :ok = app("teams", "sip:10.0.0.7:5061;transport=tls", %{"use_fqdn_contact" => "true"})
+      :ok = app("plain", "sip:10.0.0.8:5060")
+      req = request(uri("3000", @domain))
+
+      assert {_, %Peer{contact_host: @domain}} = SipServers.forward(@domain, req, "teams")
+      assert {_, %Peer{contact_host: nil}} = SipServers.forward(@domain, req, "plain")
+    end
+
     test "a proxy keeps the R-URI, moved to its remote domain when it was ours" do
       :ok = proxy("pbx", %{})
       req = request(uri("bob", @domain))

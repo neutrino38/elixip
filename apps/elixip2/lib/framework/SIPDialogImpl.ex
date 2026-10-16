@@ -337,7 +337,8 @@ defmodule SIP.DialogImpl do
           | destip: o_ruri.destip,
             destport: o_ruri.destport,
             tp_module: o_ruri.tp_module,
-            tp_pid: o_ruri.tp_pid
+            tp_pid: o_ruri.tp_pid,
+            contact_host: o_ruri.contact_host
         }
 
         req = %{req | ruri: ruri}

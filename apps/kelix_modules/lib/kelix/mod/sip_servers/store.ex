@@ -72,6 +72,7 @@ defmodule Kelix.Mod.SipServers.Store do
       "use_dns_srv" => s.use_dns_srv,
       "send_keepalive" => s.send_keepalive,
       "initiate_connection" => s.initiate_connection,
+      "use_fqdn_contact" => s.use_fqdn_contact,
       "ha_mode" => s.ha_mode,
       "ext_domain" => s.ext_domain,
       "ext_domain_aliases" => s.ext_domain_aliases,

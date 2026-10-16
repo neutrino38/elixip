@@ -21,6 +21,7 @@ defmodule SIP.Uri do
           destproto: String.t() | nil,
           tp_module: module() | nil,
           tp_pid: pid() | nil,
+          contact_host: String.t() | nil,
           params: %{optional(String.t()) => String.t() | true},
           hparams: %{optional(String.t()) => String.t() | true}
         }
@@ -95,6 +96,11 @@ defmodule SIP.Uri do
             # keeps paying for. Only the side is stored, because only the side
             # depends on the node's topology rather than on the address.
             net_side: nil,
+            # The host name this node publishes in its Contact towards the
+            # destination, in place of its bound address: the domain of a SIP
+            # server that identifies its peers by name (Teams Direct Routing).
+            # Read by `SIP.Transport.add_contact_header/3`; never serialized.
+            contact_host: nil,
             # URI parameters: inside the <>
             params: %{},
             # header field parameters: after the >

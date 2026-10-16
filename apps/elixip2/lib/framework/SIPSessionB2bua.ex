@@ -68,6 +68,10 @@ defmodule SIP.B2bua.Peer do
       and `nil` for every other peer. The outbound leg is stamped with it at
       creation (`SIP.Dialog.set_remote_aor/2`), so the call state of that AOR
       is pushed to whoever watches it (docs/design/dialog-state-plan.md §1).
+    * `contact_host` — the host name the Contact of this leg publishes instead
+      of the bound address, for a far end that identifies us by name (a SIP
+      server with `use_fqdn_contact`). Carried by the leg's requests, in-dialog
+      ones included; `nil` (the default) publishes the address.
   """
   defstruct uris: [],
             use_srv: false,
@@ -82,6 +86,7 @@ defmodule SIP.B2bua.Peer do
             trunk_pid: nil,
             credentials: nil,
             aor: nil,
+            contact_host: nil,
             # The rungs this peer's `uris` expand to, each target already carrying
             # its address and its `net_side` — what `b2bua_resolve/1` produced.
             # `nil` means "not resolved yet", and the forward path then resolves as
@@ -1572,8 +1577,9 @@ defmodule SIP.Session.B2bua do
   # it has one). They are orthogonal, which is the whole reason %SIP.Uri{} keeps
   # its routing next to its identity.
   defp apply_target(req, target, %Peer{} = peer) do
-    with {:ok, req} <- apply_ruri_policy(req, target, peer.ruri) do
-      route_via(req, peer.outbound_proxy)
+    with {:ok, req} <- apply_ruri_policy(req, target, peer.ruri),
+         {:ok, req} <- route_via(req, peer.outbound_proxy) do
+      {:ok, %{req | ruri: %SIP.Uri{req.ruri | contact_host: peer.contact_host}}}
     end
   end
 

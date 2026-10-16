@@ -160,7 +160,7 @@ defmodule Kelix.Mod.SipServers do
         render: %{
           kind: :detail,
           fields: ~w(domain slug type uris source_networks use_dns_srv send_keepalive
-               initiate_connection ha_mode ext_domain ext_domain_aliases probe_remote_aors
+               initiate_connection use_fqdn_contact ha_mode ext_domain ext_domain_aliases probe_remote_aors
                probe_interval aors register register_expires register_retry auth_username auth_realm
                auth registration aor_states metrics alarms),
           nested: %{"uris" => %{columns: ~w(role uri state)}},
