@@ -1,3 +1,13 @@
+kelixip (1.6.4-5) stable; urgency=low
+
+  * sip_servers: use_fqdn_contact, the Contact of the requests sent to a
+    server names its domain instead of the bound address, without a port.
+    Teams Direct Routing finds the SBC by that name.
+  * TLS/TCP transports: a socket error stops the connection cleanly instead
+    of crashing its process.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Fri, 16 Oct 2026 14:00:00 +0200
+
 kelixip (1.6.4-4) stable; urgency=low
 
   * sip_servers: a third URI (tertiary_uri), tried after the backup, and

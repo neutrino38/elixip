@@ -1,5 +1,38 @@
 # Release 1.6.4
 
+## 1.6.4-5
+
+2026-10-16 — package revision 5 of 1.6.4. Theme: talking to the Microsoft
+Teams Direct Routing hub.
+
+### SIP servers
+
+- **`use_fqdn_contact`** (`true` | `false`, default `false`): the Contact of the
+  requests sent to the server names the server's `domain` instead of the bound
+  address, and carries no port. It applies to the OPTIONS and REGISTER of the
+  server, to the INVITE `forward/3` sends it, and to the requests that follow
+  on that leg. Teams Direct Routing finds the SBC by this name.
+- Not covered yet: the responses to a request the server sends us, and the
+  requests of a dialog it opened. Their Contact still names the address.
+
+### Transports
+
+- A socket error on a TLS or TCP connection, such as a fatal TLS alert from the
+  peer, stops the connection cleanly. It used to crash the transport process.
+
+### Upgrading
+
+- Upgrade **every installed kelixip package together**: `dnf upgrade 'kelixip*'`,
+  then restart the service. `%SIP.Uri{}` gains a field, and a module built
+  against 1.6.4-4 makes URIs without it: the 1.6.4-5 core then fails with a
+  `KeyError` when it forwards a call to one of them, for example to a user the
+  1.6.4-4 registrar returns. rpm does not prevent the mix, since a module only
+  requires the core's version, not its release. Check with
+  `rpm -qa 'kelixip*'` that every package is at `-5`.
+- No configuration change. A `server_file` from 1.6.4-4 is read as is, with
+  `use_fqdn_contact` off. elixipp 1.6.4-5 is rebuilt alongside; upgrading it is
+  optional.
+
 ## 1.6.4-4
 
 2026-10-12 — package revision 4 of 1.6.4. Theme: a SIP server with three

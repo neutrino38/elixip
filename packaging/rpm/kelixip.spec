@@ -32,7 +32,7 @@ Version:        1.6.4
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        4%{?dist}
+Release:        5%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,13 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Fri Oct 16 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-5
+- sip_servers: use_fqdn_contact, the Contact of the requests sent to a server
+  names its domain instead of the bound address, without a port. Teams Direct
+  Routing finds the SBC by that name.
+- TLS/TCP transports: a socket error (a fatal TLS alert from the peer) stops
+  the connection cleanly instead of crashing its process.
+
 * Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-4
 - sip_servers: a third URI (tertiary_uri), tried after the backup, and
   source_networks, CIDR ranges a server's requests are recognised from on the
