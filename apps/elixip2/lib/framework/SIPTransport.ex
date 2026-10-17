@@ -1063,8 +1063,15 @@ defmodule SIP.Transport do
 
   # A destination that knows us by name gets the name, without a port: the
   # bound port of an outbound connection is ephemeral, and a portless name is
-  # resolved by the peer (RFC 3263 §4.2) to the port we listen on.
+  # resolved by the peer (RFC 3263 §4.2) to the port we listen on. A request
+  # carries the name on its R-URI; a response, which has none, as a field of its
+  # own that its dialog set (SIP.Dialog.set_contact_host/2).
   defp publish_host(%SIP.Uri{} = contact, %{ruri: %SIP.Uri{contact_host: host}})
+       when is_binary(host) and host != "" do
+    %SIP.Uri{contact | domain: host, port: nil}
+  end
+
+  defp publish_host(%SIP.Uri{} = contact, %{contact_host: host})
        when is_binary(host) and host != "" do
     %SIP.Uri{contact | domain: host, port: nil}
   end

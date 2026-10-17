@@ -367,6 +367,18 @@ defmodule SIP.Session.CallUAS do
       # in through SIP.Scenario; the guard makes the second use a no-op).
       use SIP.Session.CallInDialog
 
+      # Publish `host` in our Contact on this leg instead of the bound address:
+      # the 2xx and every request of the dialog name it. For a far end that knows
+      # us by name — `peer.contact_host` of a recognised SIP server
+      # (Kelix.Mod.SipServers.matches_server/2), `nil` when it has none. Must
+      # precede the 2xx. Verdict in sip_ctx.lasterr.
+      defmacro publish_contact_host(host) do
+        quote do
+          var!(sip_ctx) =
+            SIP.Session.CallUAS.do_publish_contact_host(var!(sip_ctx), unquote(host))
+        end
+      end
+
       # 3xx redirect to one or more contacts. `contacts` is a String, a
       # %SIP.Uri{} or a list of either.
       defmacro redirect_invite(contacts, code \\ 302, reason \\ nil) do
@@ -494,6 +506,22 @@ defmodule SIP.Session.CallUAS do
     |> SIP.Context.appdata_set(:last_uas_req, req)
     |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
   end
+
+  @doc """
+  Make the dialog of this instance publish `host` in its Contact
+  (`SIP.Dialog.set_contact_host/2`). `nil` is accepted and changes nothing a
+  dialog would not already do: it is what a server without `use_fqdn_contact`
+  hands over. Backs the `publish_contact_host` macro.
+  """
+  def do_publish_contact_host(sip_ctx = %SIP.Context{dialogpid: dlg}, host) when is_pid(dlg) do
+    SIP.Context.set(sip_ctx, :lasterr, SIP.Dialog.set_contact_host(dlg, host))
+  catch
+    # a dialog that died under us: the reply that follows meets the same fate
+    :exit, _ -> SIP.Context.set(sip_ctx, :lasterr, {:error, :no_dialog})
+  end
+
+  def do_publish_contact_host(sip_ctx = %SIP.Context{}, _host),
+    do: SIP.Context.set(sip_ctx, :lasterr, {:error, :no_dialog})
 
   @doc """
   Reply to the stored INVITE/UPDATE with a code that carries NO SDP. Raises for

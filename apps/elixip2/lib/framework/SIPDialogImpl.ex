@@ -1033,6 +1033,19 @@ defmodule SIP.DialogImpl do
 
   defp bind_app(state, _app_pid), do: state
 
+  # A response has no R-URI to carry the name in — reply_to_request/5 keeps only
+  # the headers that identify the transaction — so the dialog hands it over as a
+  # non-serialized field, which SIP.Transport.add_contact_header/3 reads.
+  defp with_contact_host(fields, %SIP.DialogImpl{msg: %{ruri: %SIP.Uri{contact_host: host}}})
+       when is_binary(host) and host != "" do
+    case fields do
+      %{} -> Map.put(fields, :contact_host, host)
+      _ -> (fields || []) ++ [contact_host: host]
+    end
+  end
+
+  defp with_contact_host(fields, _state), do: fields
+
   defp invite_dialog?(%SIP.DialogImpl{msg: %{method: :INVITE}}), do: true
   defp invite_dialog?(_state), do: false
 
@@ -1611,6 +1624,19 @@ defmodule SIP.DialogImpl do
     {:reply, :ok, SIP.Dialog.Events.stamp(state, aor)}
   end
 
+  # The name our Contact publishes on this leg, kept where every send of the dialog
+  # already reads it: the R-URI routing of the request that created the dialog
+  # (send_in_dialog_request/2 copies it onto each request) — and from there onto
+  # each response, through with_contact_host/2.
+  def handle_call({:set_contact_host, host}, _from, %{msg: %{ruri: %SIP.Uri{} = ruri}} = state) do
+    {:reply, :ok,
+     %SIP.DialogImpl{state | msg: %{state.msg | ruri: %SIP.Uri{ruri | contact_host: host}}}}
+  end
+
+  def handle_call({:set_contact_host, _host}, _from, state) do
+    {:reply, {:error, :no_initial_request}, state}
+  end
+
   def handle_call(:info, _from, state) do
     {:reply, SIP.Dialog.Events.info(state), state}
   end
@@ -1683,6 +1709,7 @@ defmodule SIP.DialogImpl do
     # Whoever composed this 2xx — a scenario, a B2BUA relaying the far end's — the
     # session timer of THIS leg is the dialog's to state (RFC 4028 §9).
     {upd_field, negotiated} = SessionTimer.decorate_reply(state, req, resp_code, upd_field)
+    upd_field = with_contact_host(upd_field, state)
 
     {ret, uas_t} =
       SIP.Transac.reply_req(

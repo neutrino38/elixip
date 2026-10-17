@@ -1197,7 +1197,10 @@ defmodule SIPMsg do
       :reason,
       :ruri,
       :response_code,
-      :decoded_from
+      :decoded_from,
+      # what our Contact publishes in place of the bound address, on a response
+      # (SIP.Transport.add_contact_header/3): routing, not a header
+      :contact_host
     ]
 
     remaining_headers =

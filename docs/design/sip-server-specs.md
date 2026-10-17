@@ -159,8 +159,15 @@ through `%SIP.B2bua.Peer{contact_host:}`. The dialog copies it to the requests i
 sends on that leg. The port is left out: the bound port of an outbound connection is
 ephemeral, and the peer resolves a portless name to the port we listen on (RFC 3263).
 
-Not covered: the responses to a request the server sent us, and the requests we send
-in a dialog the server opened. Their Contact still names the address.
+A dialog the server opened is the other direction: nothing we sent chose the name,
+so the script that recognised the server hands it over —
+`publish_contact_host(peer.contact_host)`, the peer being what `matches_server/2`
+answered, before the 2xx (`apps/kelixip/scripts/mcu-from-sfu.exs` does it for Teams).
+The macro calls `SIP.Dialog.set_contact_host/2`, which writes the name on the R-URI of
+the dialog's initial request, where its in-dialog requests already read it. A response
+has no R-URI, so the dialog passes the name to each response it answers as a
+non-serialized `contact_host` field, read by the same `add_contact_header/3`. Without
+the call, the Contact of such a dialog still names the address.
 
 `ha_mode = loadsharing` in v1 is a round-robin: `forward/2` rotates the order of
 `uris` on every call, so each call starts on the next server and still fails over to

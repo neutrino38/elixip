@@ -530,6 +530,22 @@ defmodule SIP.Dialog do
     GenServer.call(dialog_pid, {:set_remote_aor, aor})
   end
 
+  @doc """
+  Publish `host` in our Contact on this dialog, in place of the bound address and
+  without a port — for a far end that identifies us by name (Teams Direct Routing
+  finds the SBC by the FQDN of the Contact). From then on every 2xx the dialog
+  answers and every request it sends carry it; `nil` goes back to the address.
+
+  The inbound counterpart of `%SIP.B2bua.Peer{contact_host:}`: on a dialog the far
+  end opened, nothing we sent chose the name, so whoever recognised the far end
+  sets it here — before the 2xx, which is what the far end reads it from.
+  """
+  @spec set_contact_host(pid(), String.t() | nil) :: :ok | {:error, :no_initial_request}
+  def set_contact_host(dialog_pid, host)
+      when is_pid(dialog_pid) and (is_binary(host) or is_nil(host)) do
+    GenServer.call(dialog_pid, {:set_contact_host, host})
+  end
+
   @doc "The dialog's call state as `SIP.Dialog.Events` pushes it, read on demand."
   @spec info(pid()) :: map()
   def info(dialog_pid) when is_pid(dialog_pid), do: GenServer.call(dialog_pid, :info)
