@@ -1,5 +1,33 @@
 # Release 1.6.4
 
+## 1.6.4-7
+
+2026-10-17 — package revision 7 of 1.6.4. Theme: the calls Microsoft Teams
+Direct Routing places to the node.
+
+### SIP servers
+
+- **A dialog the server opened** now names the server's `domain` in our Contact
+  as well, without a port: the 2xx we answer and the requests we send in it
+  (BYE, re-INVITE). 1.6.4-5 covered only the requests we send to the server, so
+  a call from Teams was answered with a Contact naming the bound address.
+- The script decides it, since it is the one that recognised the server:
+  `publish_contact_host(peer.contact_host)`, before the 2xx, `peer` being what
+  `Kelix.Mod.SipServers.matches_server/2` answered. It is `nil`, and the
+  address is kept, when the server does not have `use_fqdn_contact = true`.
+- The reference script **`mcu-from-sfu.exs`** (kelixip-mod-mcu) does it: a
+  conference entered from Teams, the INVITE accepted only from the server
+  `microsoft-pstnhub`.
+
+### Upgrading
+
+- `dnf upgrade 'kelixip*'` replaces 1.6.4-6, then restart the service. Upgrade
+  every installed kelixip package together, as for 1.6.4-5. elixipp 1.6.4-7 is
+  rebuilt alongside.
+- A script copied from `mcu-from-sfu.exs` before this release does not call
+  `publish_contact_host`: add the line, and set `use_fqdn_contact=true` on the
+  server.
+
 ## 1.6.4-6
 
 2026-10-17 — package revision 6 of 1.6.4. Theme: the client certificate that

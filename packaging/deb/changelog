@@ -1,3 +1,12 @@
+kelixip (1.6.4-7) stable; urgency=low
+
+  * sip_servers: a dialog the server opened names its domain in our Contact
+    too (the 2xx and the in-dialog requests), when the script calls
+    publish_contact_host(peer.contact_host). Reference script mcu-from-sfu.exs,
+    a conference entered from Teams Direct Routing.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 17 Oct 2026 22:00:00 +0200
+
 kelixip (1.6.4-6) stable; urgency=low
 
   * config.toml [tls] takes cert and key: the client certificate presented

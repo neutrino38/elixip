@@ -32,7 +32,7 @@ Version:        1.6.4
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        6%{?dist}
+Release:        7%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,12 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Sat Oct 17 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-7
+- sip_servers: a dialog the server opened names its domain in our Contact too
+  (the 2xx and the in-dialog requests), when the script calls
+  publish_contact_host(peer.contact_host). Reference script mcu-from-sfu.exs, a
+  conference entered from Teams Direct Routing.
+
 * Sat Oct 17 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-6
 - config.toml [tls] takes cert and key: the client certificate presented when a
   called TLS or WSS peer demands one (mutual TLS, Teams Direct Routing). cert
