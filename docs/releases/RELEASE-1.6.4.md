@@ -1,5 +1,28 @@
 # Release 1.6.4
 
+## 1.6.4-6
+
+2026-10-17 — package revision 6 of 1.6.4. Theme: the client certificate that
+Microsoft Teams Direct Routing demands.
+
+### Configuration
+
+- **`[tls] cert` and `key`**: the client certificate the node presents when a
+  TLS or WSS peer it calls demands one (mutual TLS). Both go together, and both
+  must be readable, or the boot fails. Without them the node presents no
+  certificate, and Teams Direct Routing closes the connection.
+- `cert` holds the certificate **followed by its intermediate authorities**: the
+  node sends the chain that file contains, and a peer that knows only the root
+  refuses a certificate whose intermediate is missing.
+- 1.6.4-5 refused these two keys and stopped at boot with
+  `[tls]: unknown key(s): cert, key`.
+
+### Upgrading
+
+- `dnf upgrade 'kelixip*'` replaces 1.6.4-5, then restart the service. Upgrade
+  every installed kelixip package together, as for 1.6.4-5. elixipp 1.6.4-6 is
+  the same tool as 1.6.4-5, rebuilt alongside.
+
 ## 1.6.4-5
 
 2026-10-16 — package revision 5 of 1.6.4. Theme: talking to the Microsoft
