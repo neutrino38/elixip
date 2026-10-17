@@ -676,7 +676,7 @@ defmodule Kelix.ConfigTest do
   describe "[tls] — the outbound leg's policy" do
     test "absent means no check: verifying a peer is an interconnect decision" do
       assert {:ok, cfg} = Config.parse("")
-      assert cfg.tls == %{verify: false, ca: nil}
+      assert cfg.tls == %{verify: false, ca: nil, cert: nil, key: nil}
     end
 
     test "verify = true is the deliberate act, and it is explicit" do
@@ -693,6 +693,20 @@ defmodule Kelix.ConfigTest do
       path = Path.expand("../../elixip2/certs/certificate.pem", __DIR__)
       assert {:ok, cfg} = Config.parse(~s([tls]\nca = "#{path}"))
       assert cfg.tls.ca == path
+    end
+
+    test "a client certificate is a cert and its key, both readable" do
+      cert = Path.expand("../../elixip2/certs/certificate.pem", __DIR__)
+      key = Path.expand("../../elixip2/certs/private_key.pem", __DIR__)
+
+      assert {:ok, cfg} = Config.parse(~s([tls]\ncert = "#{cert}"\nkey = "#{key}"))
+      assert cfg.tls.cert == cert and cfg.tls.key == key
+
+      assert {:error, msg} = Config.parse(~s([tls]\ncert = "#{cert}"))
+      assert msg =~ "go together"
+
+      assert {:error, msg} = Config.parse(~s([tls]\ncert = "#{cert}"\nkey = "/no/such.key"))
+      assert msg =~ "not a readable file"
     end
 
     test "an unknown key is refused, like everywhere else" do
@@ -720,6 +734,8 @@ defmodule Kelix.ConfigTest do
         end
 
         Application.delete_env(:elixip2, :tls_cacertfile)
+        Application.delete_env(:elixip2, :tls_certfile)
+        Application.delete_env(:elixip2, :tls_keyfile)
       end)
 
       {:ok, cfg} = Config.parse(~s([tls]\nverify = true))
@@ -727,6 +743,15 @@ defmodule Kelix.ConfigTest do
 
       assert Application.get_env(:elixip2, :tls_verify) == true
       refute Application.get_env(:elixip2, :tls_cacertfile)
+      refute Application.get_env(:elixip2, :tls_certfile)
+
+      cert = Path.expand("../../elixip2/certs/certificate.pem", __DIR__)
+      key = Path.expand("../../elixip2/certs/private_key.pem", __DIR__)
+      {:ok, cfg} = Config.parse(~s([tls]\ncert = "#{cert}"\nkey = "#{key}"))
+      :ok = Config.apply_app_env(cfg)
+
+      assert Application.get_env(:elixip2, :tls_certfile) == cert
+      assert Application.get_env(:elixip2, :tls_keyfile) == key
     end
   end
 

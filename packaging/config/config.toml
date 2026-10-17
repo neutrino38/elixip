@@ -87,6 +87,10 @@ port  = 5060
 verify = false
 #verify = true
 #ca = "/etc/kelixip/tls/interco-ca.pem"
+# Client certificate for a peer that demands one (mutual TLS, Teams Direct
+# Routing): the certificate followed by its intermediates, and its key.
+#cert = "/etc/kelixip/tls/fullchain.pem"
+#key = "/etc/kelixip/tls/privkey.pem"
 
 # RFC 4028 session timers, ON by default: every call leg negotiates one with its
 # own peer and is hung up when that peer stops refreshing it — a browser tab gone,

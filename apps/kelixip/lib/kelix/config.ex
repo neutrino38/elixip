@@ -106,8 +106,10 @@ defmodule Kelix.Config do
             # The OUTBOUND TLS/WSS leg's policy: whether the certificate a peer we
             # DIAL presents is checked, and against which authority. Node-wide,
             # because it is about who we are willing to talk to, not about one
-            # socket. `[[listen]] cert`/`key` is the inbound side and stays there.
-            tls: %{verify: false, ca: nil},
+            # socket. `[[listen]] cert`/`key` is the inbound side and stays there;
+            # `cert`/`key` here are what we present when a peer we dial asks for a
+            # client certificate (mutual TLS).
+            tls: %{verify: false, ca: nil, cert: nil, key: nil},
             mediaserver_pool: [],
             # The node's video encoding bitrate (kb/s): what a leg is encoded at and
             # the cap on the `b=AS:` it is answered with. One statement for both
@@ -293,13 +295,23 @@ defmodule Kelix.Config do
     # place a correspondent is classified.
     Application.put_env(:elixip2, :internal_networks, internal_networks(cfg))
 
-    # `[tls]` reaches the outbound leg here: SIP.Transport.ImplHelpers reads both
+    # `[tls]` reaches the outbound leg here: SIP.Transport.ImplHelpers reads these
     # keys when it dials a TLS or WSS peer.
     Application.put_env(:elixip2, :tls_verify, cfg.tls.verify)
 
     case cfg.tls.ca do
       nil -> Application.delete_env(:elixip2, :tls_cacertfile)
       path -> Application.put_env(:elixip2, :tls_cacertfile, path)
+    end
+
+    case cfg.tls do
+      %{cert: nil} ->
+        Application.delete_env(:elixip2, :tls_certfile)
+        Application.delete_env(:elixip2, :tls_keyfile)
+
+      %{cert: cert, key: key} ->
+        Application.put_env(:elixip2, :tls_certfile, cert)
+        Application.put_env(:elixip2, :tls_keyfile, key)
     end
 
     # `[mediaserver] video_bitrate` reaches the point-to-point media path here: the
@@ -635,12 +647,20 @@ defmodule Kelix.Config do
   defp parse_tls(nil), do: {:ok, %__MODULE__{}.tls}
 
   defp parse_tls(%{} = t) do
-    with :ok <- reject_keys(t, ~w(verify ca), "[tls]"),
+    with :ok <- reject_keys(t, ~w(verify ca cert key), "[tls]"),
          {:ok, verify} <- opt_bool(t, "verify", false, "[tls]"),
-         {:ok, ca} <- opt_readable_file(t, "ca", "[tls]") do
-      {:ok, %{verify: verify, ca: ca}}
+         {:ok, ca} <- opt_readable_file(t, "ca", "[tls]"),
+         {:ok, cert} <- opt_readable_file(t, "cert", "[tls]"),
+         {:ok, key} <- opt_readable_file(t, "key", "[tls]"),
+         :ok <- client_cert_pair(cert, key) do
+      {:ok, %{verify: verify, ca: ca, cert: cert, key: key}}
     end
   end
+
+  # One without the other would be dropped in silence by the framework, which
+  # presents a client certificate only when it has both.
+  defp client_cert_pair(cert, key) when is_nil(cert) == is_nil(key), do: :ok
+  defp client_cert_pair(_cert, _key), do: {:error, "[tls]: `cert` and `key` go together"}
 
   defp parse_tls(_), do: {:error, "[tls] must be a table"}
 

@@ -548,6 +548,8 @@ receives: the inbound side is the `cert` and `key` of a `[[listen]]`.
 |---|---|---|---|
 | `verify` | bool | `false` | Verify the called peer's certificate |
 | `ca` | path | — | Trust this authority only; absent, the public store is used |
+| `cert` | path | — | Client certificate presented when a called peer asks for one (mutual TLS) |
+| `key` | path | — | Private key of `cert` |
 
 Verifying a peer supposes an authority both sides have accepted: that is an
 interconnection agreement, not a socket setting. `verify` is therefore turned on
@@ -562,7 +564,15 @@ the address DNS returned. A target named by a bare address therefore has no name
 to verify: its certificate must carry that address in an `iPAddress` SAN, which
 almost no SIP certificate does.
 
-A `ca` that cannot be read fails the boot. That is deliberate: otherwise every
+`cert` and `key` go together. Without them the node presents no certificate,
+and a peer that demands one closes the connection: Microsoft Teams Direct Routing
+is such a peer. `cert` holds the certificate **followed by its intermediate
+authorities**. The node sends the chain that file contains, and a peer that knows
+only the root refuses a certificate whose intermediate is missing. The certificate
+of a `tls` `[[listen]]` usually fits, since it is the one the same peer checks when
+it calls us.
+
+A `ca`, `cert` or `key` that cannot be read fails the boot. That is deliberate: otherwise every
 outbound call fails at the handshake, with a TLS alert saying nothing about the
 wrong path.
 
