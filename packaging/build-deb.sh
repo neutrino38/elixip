@@ -170,6 +170,7 @@ for toml in config domains; do
       -e 's,kelixip-mod-auth_db,kelixip-mod-auth-db,g' \
       -e 's,kelixip-mod-mcu_presence,kelixip-mod-mcu-presence,g' \
       -e 's,kelixip-mod-dialog_state,kelixip-mod-dialog-state,g' \
+      -e 's,kelixip-mod-sip_servers,kelixip-mod-sip-servers,g' \
       "$stage/config/$toml.toml" > "$root/etc/kelixip/$toml.toml"
   chmod 0640 "$root/etc/kelixip/$toml.toml"
 done
@@ -188,6 +189,15 @@ install -D -m 0644 "$stage/systemd/kelixip.service" "$root/lib/systemd/system/ke
 # weak dependency only: the file is data, loaded by basename when the operator types.
 install -D -m 0644 "$stage/completion/kelictl" \
   "$root/usr/share/bash-completion/completions/kelictl"
+
+# The fail2ban filters and the jail example, as data the operator links into
+# /etc/fail2ban (doc/running.md, "fail2ban"); and the rotation of the security log,
+# a conffile like the rest of /etc.
+install -d -m 0755 "$root/usr/share/kelixip/fail2ban/filter.d" \
+  "$root/usr/share/kelixip/fail2ban/jail.d"
+install -m 0644 "$stage"/fail2ban/filter.d/*.conf "$root/usr/share/kelixip/fail2ban/filter.d/"
+install -m 0644 "$stage"/fail2ban/jail.d/*.conf "$root/usr/share/kelixip/fail2ban/jail.d/"
+install -D -m 0644 "$stage/logrotate/kelixip" "$root/etc/logrotate.d/kelixip"
 
 # Mutable state (future usrloc persistence, operator-installed scripts) and the log
 # directory used when stdout is redirected; postinst chowns both to the service.
@@ -269,6 +279,8 @@ build_module kelixip-mod-silo 'Elixir.Kelix.Mod.Silo*.beam' \
   "$DEBDIR/control-mod-silo.in" 'silo.md' '*-chat.exs' silo
 build_module kelixip-mod-conversation 'Elixir.Kelix.Mod.Conversation*.beam' \
   "$DEBDIR/control-mod-conversation.in" 'conversation.md' '' conversation
+build_module kelixip-mod-sip-servers 'Elixir.Kelix.Mod.SipServers*.beam' \
+  "$DEBDIR/control-mod-sip-servers.in" 'sip_servers.md'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

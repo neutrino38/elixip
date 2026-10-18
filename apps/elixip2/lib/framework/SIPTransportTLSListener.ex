@@ -230,6 +230,10 @@ defmodule SIP.Transport.TLSListener do
   defp accept_loop(listen_socket, listener_pid) do
     case Socket.SSL.transport_accept(listen_socket) do
       {:ok, tls_transport_socket} ->
+        # Read before the handshake: a socket whose handshake failed has no peer
+        # to give any more, and the peer is the whole point of the report.
+        {peer_ip, peer_port} = SIP.Transport.ImplHelpers.peer_of(tls_transport_socket)
+
         case Socket.SSL.handshake(tls_transport_socket, timeout: @handshake_timeout) do
           {:ok, ssl_socket} ->
             case GenServer.call(listener_pid, {:spawn_connection, ssl_socket}) do
@@ -247,7 +251,16 @@ defmodule SIP.Transport.TLSListener do
           {:error, reason} ->
             Logger.warning(
               module: __MODULE__,
-              message: "TLS handshake failed: #{inspect(reason)}"
+              message:
+                "TLS handshake failed with #{inspect(peer_ip)}:#{peer_port}: #{inspect(reason)}"
+            )
+
+            SIP.Transport.ImplHelpers.report_incident(
+              :transport_error,
+              "TLS",
+              peer_ip,
+              peer_port,
+              :tls_handshake
             )
         end
 

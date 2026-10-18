@@ -210,6 +210,8 @@ happens *below* the leg, inside its dialog (§5.5). Generalizing to N legs
 | `retry_on` | which final codes advance the hunt (408 included — a dead branch is reported as a synthetic 408) |
 | `outbound_proxy`, `use_srv` | next hop and SRV expansion / failover |
 | `profile`, `fallback_on` | the offer ladder (§5.8) |
+| `trunk_pid` | a process asked `{:reachable?, uri}` before each static target; `false` skips the target unsent. It is also cast `{:call_result, target, code}` at the end of each attempt: `200` when answered, else the final code or `:transport_error` |
+| `credentials` | a process asked `{:authorize, code, challenge, method, digest_uri}` on a 401/407 from the outbound leg; the request is re-sent once with the answer |
 
 ### 5.5 Forking — the kamailio TM model
 
@@ -508,6 +510,67 @@ that would have failed:
 `a=sctp-port` and `a=max-message-size` come from the media server
 (`SetupDataChannel`), never from a constant on this side — the same rule as the
 announced address.
+
+#### Several video streams, and BUNDLE
+
+A browser sharing its screen next to its camera offers **two `m=video`
+sections**. The media server speaks in `(media, role)`: role 0 is the camera,
+and every further video section is a stream it creates on demand
+(`EndpointCreateVideoStream`) and names by the role it returns. The adapter
+keeps that role under the section's key — its `a=mid`, or its position — for
+the life of the leg, so a re-offer finds the stream again, a section withdrawn
+deletes it, and a role is never reused. Withdrawn means port 0, nothing
+else. A browser that stops sharing keeps the section and turns it `recvonly`
+or `inactive`: the stream is then **paused**, not withdrawn — answered
+`inactive` on its port and kept under its role — so the peer's transceiver
+stays usable and a later share on the same section resumes it as it is.
+Declining it with port 0 stops the transceiver (RFC 9429 §5.10), after which
+Trix could share no more. Browser to browser, with no media server between
+them, the answer to a stop is `inactive` and to the next share `recvonly`, on
+the same section — never port 0 (reference traffic of 2026-10-08, in
+`docs/conception/UNIFIED-PLAN/SPEC.md` §7). Through a B2BUA the relayed section follows its
+source: `inactive` while paused, port 0 once withdrawn; a browser mutes the
+remote track on `inactive` and drops it on port 0. Everything keyed by media type
+in the leg describes the role-0 sections, on the path every call takes; the
+role is appended **last** to the RPCs aimed at a stream, after every optional
+parameter, and only when it is not 0 — a role-0 call is byte for byte the one a
+media server predating the parameter accepts.
+
+A stream other than the camera is **received only**: its section is answered
+`a=recvonly` whatever the offer said, nothing of ours is ever sent on it, and
+its connectivity events are logged and nothing else — the call's connectivity
+is the role-0 sections' business.
+
+With a browser's default `bundlePolicy`, the second video is `a=bundle-only` on
+port 0, so it exists only inside the `a=group:BUNDLE` of the offer. The server
+groups an endpoint **at creation**: the adapter re-creates the endpoint with
+`bundle` on the first bundled offer — the new one before the old is deleted, so
+a server refusing it leaves the call unbundled, its bundle-only sections
+declined. On a bundled leg every section is pushed its `mid`, the
+`sdes:mid` extension id and its `a=ssrc` before `StartReceiving`, the answer
+states the group and the MID extension, one port and one transport for all
+sections, and an RTP or data channel section left out of the group is
+declined. Port 0 is a withdrawal **only** when the section is not
+`bundle-only`.
+
+A re-offer **keeps the leg's ICE credentials**: minting new ones is an ICE
+restart asked for by nothing, and on a bundled leg it restarts the whole call.
+A trickled candidate is taken with the `sdpMid` of its section
+(`add_remote_candidate/2`), which says which stream it is for; on a bundled
+leg every candidate is the carrier's.
+
+Through a **B2BUA**, the leg we offer on creates one stream per stream the
+other leg receives — same keys, same order, hence the same roles on both
+endpoints, which `EndpointAttachToEndpoint(…, role)` requires — and offers
+each as a `sendonly` section carrying exactly the codecs the received stream
+carries. The streams relay as they are, there is no transcoder behind them:
+the caller's rebuilt answer restricts each one to what the callee took, and
+declines it when the callee declined. It works in both directions: a leg
+that answered re-offers every section it answered, in the peer's order and
+under the peer's mids — the live ones, the declined ones at port 0, the
+streams it receives as `recvonly` — and appends the streams it relays; the
+peer's answer is then read by mid, since its sections mix its own streams
+and ours.
 
 ### 6.6 Media connectivity — when may a scenario send?
 

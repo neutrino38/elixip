@@ -120,6 +120,17 @@ defmodule SIP.Transport.TLS do
           :ping ->
             nil
 
+          # Not SIP at all: a scanner, another protocol on our port. Nothing to
+          # answer, but somebody to name.
+          :garbage ->
+            SIP.Transport.ImplHelpers.report_incident(
+              :invalid_packet,
+              "TLS",
+              state.destip,
+              state.destport,
+              :garbage
+            )
+
           :msg ->
             SIP.Transport.ImplHelpers.process_incoming_message(
               state,
@@ -164,6 +175,16 @@ defmodule SIP.Transport.TLS do
     Logger.debug(
       module: __MODULE__,
       message: "TLS connection closed, stopping transport instance"
+    )
+
+    {:stop, :normal, state}
+  end
+
+  def handle_info({:ssl_error, _socket, reason}, state) do
+    Logger.info(
+      module: __MODULE__,
+      dest: "#{SIP.NetUtils.ip2string(state.destip)}:#{state.destport}",
+      message: "TLS connection failed: #{inspect(reason)}, stopping transport instance"
     )
 
     {:stop, :normal, state}

@@ -434,6 +434,80 @@ defmodule Kelix.RouterTest do
   # capture. Each line must name the request AND the domains.toml block that is
   # missing: a bare "404" sends the operator back to reading the TOML by hand.
   describe "reject logs" do
+    defmodule Sink do
+      def take(incident), do: send(:router_security_test, {:incident, incident})
+    end
+
+    setup do
+      prev = Application.get_env(:elixip2, :security_sink)
+      Process.register(self(), :router_security_test)
+      Application.put_env(:elixip2, :security_sink, {Sink, :take})
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:elixip2, :security_sink, prev),
+          else: Application.delete_env(:elixip2, :security_sink)
+      end)
+
+      :ok
+    end
+
+    # An INVITE as the transport hands it up: its R-URI carries where it came from.
+    defp req_from(method, user, host) do
+      ruri = %SIP.Uri{
+        userpart: user,
+        domain: host,
+        destip: {203, 0, 113, 7},
+        destport: 5060,
+        tp_module: SIP.Transport.TCP
+      }
+
+      %{method: method, ruri: ruri}
+    end
+
+    # A domain this node does not serve is what a scanner asks for first: one
+    # `invalid-domain` incident from the request's source. An OPTIONS to one is a
+    # load balancer's ping and reports nothing.
+    test "an unknown domain is one unknown_domain incident from the request's source", %{
+      snap: snap
+    } do
+      capture_log(fn -> Router.resolve(snap, req_from(:INVITE, "bob", "nope.net")) end)
+
+      assert_received {:incident,
+                       %Elixip.Security.Incident{
+                         type: :invalid_domain,
+                         src: {203, 0, 113, 7},
+                         port: 5060,
+                         proto: "TCP",
+                         method: :INVITE,
+                         reason: :unknown_domain
+                       }}
+
+      refute_received {:incident, _}
+    end
+
+    test "a request with no host anywhere is one no_domain incident", %{snap: snap} do
+      req = Map.put(req_from(:INVITE, "bob", nil), :to, %SIP.Uri{userpart: "bob"})
+      capture_log(fn -> Router.resolve(snap, req) end)
+
+      assert_received {:incident,
+                       %Elixip.Security.Incident{type: :invalid_domain, reason: :no_domain}}
+
+      refute_received {:incident, _}
+    end
+
+    test "an OPTIONS to an unknown host is the core's and not an incident", %{snap: snap} do
+      assert :core = Router.resolve_options(snap, req_from(:OPTIONS, nil, "nope.net"))
+      capture_log(fn -> Router.resolve(snap, req_from(:OPTIONS, nil, "nope.net")) end)
+
+      refute_received {:incident, _}
+    end
+
+    test "a known domain refusing for another reason is not an incident", %{snap: snap} do
+      capture_log(fn -> Router.resolve(snap, req_from(:INVITE, "1234", "example.com")) end)
+      refute_received {:incident, _}
+    end
+
     test "unknown domain names the domain and the file", %{snap: snap} do
       log = capture_log(fn -> Router.resolve(snap, req(:INVITE, "bob", "nope.net")) end)
 

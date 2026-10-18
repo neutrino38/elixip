@@ -803,21 +803,28 @@ defmodule Kelix.Mod.McuAdminTest do
 
       stop_supervised!(:client_mcu1)
 
-      start_supervised!(
-        {Client,
-         name: "mcu1",
-         base_url: "http://127.0.0.1:18080",
-         transport:
-           TestStub.transport(self(), %{
-             "GetConferences" => {:ok, [[ours, "c", 0], [99, "c", 0]]}
-           }),
-         register: {Mcu, "mcu1"},
-         reconnect_ms: 0},
-        id: :client_mcu3
-      )
+      client =
+        start_supervised!(
+          {Client,
+           name: "mcu1",
+           base_url: "http://127.0.0.1:18080",
+           transport:
+             TestStub.transport(self(), %{
+               "GetConferences" => {:ok, [[ours, "c", 0], [99, "c", 0]]}
+             }),
+           register: {Mcu, "mcu1"},
+           reconnect_ms: 0},
+          id: :client_mcu3
+        )
 
-      assert until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
-      {:ok, entry} = {:ok, %{entry | client: elem(Mcu.mediaserver("mcu1"), 1).client}}
+      # Wait for the registry to hold *this* client: it never learns the previous one
+      # died, so its entry still reads `:up` with the dead pid until the new channel
+      # announces itself — and a sweep through that pid answers `:mcu_down`.
+      assert until(fn ->
+               match?({:ok, %{status: :up, client: ^client}}, Mcu.mediaserver("mcu1"))
+             end)
+
+      entry = %{entry | client: client}
 
       assert :ok = Mcu.gc_orphans(config, entry)
 

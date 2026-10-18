@@ -228,7 +228,10 @@ defmodule Kelix.ControlTest do
               flow_module: SIP.Transport.UDP,
               instance: "<urn:uuid:f81d4fae>",
               reg_id: "1",
-              methods: nil
+              methods: nil,
+              user_agent: "Linphone/6.2.0 (Windows)",
+              callid: "1dae1ac7-0503-1240-45af-60189533c4e1",
+              cseq: 118_060_286
             }
           ]
         }
@@ -263,6 +266,9 @@ defmodule Kelix.ControlTest do
       assert c.instance == "<urn:uuid:f81d4fae>"
       assert c.reg_id == "1"
       assert c.methods == nil
+      assert c.user_agent == "Linphone/6.2.0 (Windows)"
+      assert c.callid == "1dae1ac7-0503-1240-45af-60189533c4e1"
+      assert c.cseq == 118_060_286
     end
 
     test "registrations/0 lists every served domain, empty ones included" do

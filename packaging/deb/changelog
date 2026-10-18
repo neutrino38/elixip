@@ -1,3 +1,101 @@
+kelixip (1.6.4-8) stable; urgency=low
+
+  * sip_servers: with an ext_domain, the keepalive OPTIONS asks for
+    sip:<ext_domain>, sent where the URI resolved, as the REGISTER and the
+    calls are. The REGISTER and the calls to a trunk keep the URI's parameters
+    (;transport=tls) when its host is replaced by ext_domain.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 18 Oct 2026 12:00:00 +0200
+
+kelixip (1.6.4-7) stable; urgency=low
+
+  * sip_servers: a dialog the server opened names its domain in our Contact
+    too (the 2xx and the in-dialog requests), when the script calls
+    publish_contact_host(peer.contact_host). Reference script mcu-from-sfu.exs,
+    a conference entered from Teams Direct Routing.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 17 Oct 2026 22:00:00 +0200
+
+kelixip (1.6.4-6) stable; urgency=low
+
+  * config.toml [tls] takes cert and key: the client certificate presented
+    when a called TLS or WSS peer demands one (mutual TLS, Teams Direct
+    Routing). cert holds the certificate followed by its intermediates.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 17 Oct 2026 18:00:00 +0200
+
+kelixip (1.6.4-5) stable; urgency=low
+
+  * sip_servers: use_fqdn_contact, the Contact of the requests sent to a
+    server names its domain instead of the bound address, without a port.
+    Teams Direct Routing finds the SBC by that name.
+  * TLS/TCP transports: a socket error stops the connection cleanly instead
+    of crashing its process.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Fri, 16 Oct 2026 14:00:00 +0200
+
+kelixip (1.6.4-4) stable; urgency=low
+
+  * sip_servers: a third URI (tertiary_uri), tried after the backup, and
+    source_networks, CIDR ranges a server's requests are recognised from on
+    the transports its URIs name. Microsoft Teams Direct Routing needs both.
+  * kelictl: server.list shows the first URI and counts the others,
+    server.show lays the URIs out as a table with their role and state.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 18:10:00 +0200
+
+kelixip (1.6.4-3) stable; urgency=low
+
+  * A registration binding keeps the REGISTER's User-Agent, Call-ID and CSeq:
+    kelictl registration show, the REST API and kelescope's live registrations
+    carry them (user_agent, callid, cseq).
+  * A published presence state reports received_time, the instant the PUBLISH
+    was accepted, in epoch seconds like kamailio's column.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 19:00:00 +0200
+
+kelixip (1.6.4-2) stable; urgency=low
+
+  * New package kelixip-mod-sip-servers: the remote SIP servers of a domain
+    (sip-appsrv, sip-proxy, sip-trunk), declared with kelictl sip_servers,
+    the REST API or kelescope and kept in server_file. Scripts call
+    matches_server/2, find_server/2 and forward/3; a [module.sip_servers] block
+    in config.toml enables it.
+  * Each server's URIs are probed by OPTIONS; a call skips a URI known to be
+    down. A request from a server that a script recognises proves it alive:
+    its OPTIONS reach a script through a [[domain.options]] rule.
+  * A sip-trunk registers its account (register = true by default) and answers
+    the operator's 401/407 on INVITE, re-INVITE, UPDATE, BYE and MESSAGE with
+    its HA1; the password is never stored.
+  * A sip-proxy's remote AORs are probed through it and reported to presence.
+  * kelescope 0.7.0 shows a domain's servers live: subscribe_sip_servers/2
+    pushes each server's state, counters and alarms (realm mismatch, address
+    shared by two servers).
+  * A script can keep an inbound P-Asserted-Identity: trust_asserted_identity/1.
+  * Digest: a challenge naming SHA-256, the RFC 8760 spelling, is answered.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 18:00:00 +0200
+
+kelixip (1.6.4-1) stable; urgency=low
+
+  * Screen sharing through the B2BUA. A leg carries several video streams
+    and BUNDLE: the second m=video of a browser sharing its screen is a stream
+    of its own, relayed to the other leg under its mid; a share that stops is
+    paused (inactive), not withdrawn, so sharing again resumes it; a re-offer
+    keeps the peer's section order and the leg's ICE credentials.
+  * Security incidents for fail2ban. A refused credential, an unknown domain,
+    a refused API token, a packet that is not SIP or a failed handshake is one
+    line in [security] log_file (default /var/log/kelixip/security.log) and
+    in the journal. Filters and a jail example are installed under
+    /usr/share/kelixip/fail2ban/; /etc/logrotate.d/kelixip rotates the file.
+    [security] ignore drops incident types.
+  * The SIP parser accepts header names in any case, the compact forms and a
+    colon without a space after it (RFC 3261 section 7.3).
+  * The reference media call script carries text too (T.140 data channel).
+  * User-Agent is now Kelixip/1.6.4.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Thu, 08 Oct 2026 18:00:00 +0200
+
 kelixip (1.6.3-2) stable; urgency=low
 
   * RFC 4028 session timers, one per call leg. A long call relayed between two

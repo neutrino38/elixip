@@ -117,6 +117,17 @@ defmodule SIP.Transport.TCP do
           :ping ->
             nil
 
+          # Not SIP at all: a scanner, another protocol on our port. Nothing to
+          # answer, but somebody to name.
+          :garbage ->
+            SIP.Transport.ImplHelpers.report_incident(
+              :invalid_packet,
+              "TCP",
+              state.destip,
+              state.destport,
+              :garbage
+            )
+
           :msg ->
             SIP.Transport.ImplHelpers.process_incoming_message(
               state,
@@ -159,6 +170,16 @@ defmodule SIP.Transport.TCP do
 
   def handle_info({:tcp_closed, _socket}, state) do
     Logger.debug(module: __MODULE__, message: "Cnx disconnected. stopping transport instance")
+    {:stop, :normal, state}
+  end
+
+  def handle_info({:tcp_error, _socket, reason}, state) do
+    Logger.info(
+      module: __MODULE__,
+      dest: "#{SIP.NetUtils.ip2string(state.destip)}:#{state.destport}",
+      message: "TCP connection failed: #{inspect(reason)}, stopping transport instance"
+    )
+
     {:stop, :normal, state}
   end
 

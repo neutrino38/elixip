@@ -44,7 +44,10 @@ defmodule Kelix.Control.CLITest do
               flow_module: SIP.Transport.UDP,
               instance: "<urn:uuid:f81d4fae>",
               reg_id: "1",
-              methods: nil
+              methods: nil,
+              user_agent: "Linphone/6.2.0 (Windows)",
+              callid: "1dae1ac7-0503-1240-45af-60189533c4e1",
+              cseq: 118_060_286
             }
           ]
         }
@@ -88,14 +91,17 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "aor:          bob@cli.reg.example.com"
       assert out =~ "contacts:     1"
       assert out =~ "1. sip:bob@10.0.0.9:5062"
-      assert out =~ ~r/expires:   in 5m\d+s \(20/
+      assert out =~ ~r/expires:    in 5m\d+s \(20/
       # where the REGISTER came from, which behind a NAT the contact URI does not say
-      assert out =~ "source:    udp 192.168.1.4:45112"
-      assert out =~ "transport: udp"
-      assert out =~ "instance:  <urn:uuid:f81d4fae>"
-      assert out =~ "reg-id:    1"
+      assert out =~ "source:     udp 192.168.1.4:45112"
+      assert out =~ "transport:  udp"
+      assert out =~ "instance:   <urn:uuid:f81d4fae>"
+      assert out =~ "reg-id:     1"
       # the handset sent no `methods` param: no line rather than a dash
       refute out =~ "methods:"
+      assert out =~ "user-agent: Linphone/6.2.0 (Windows)"
+      assert out =~ "call-id:    1dae1ac7-0503-1240-45af-60189533c4e1"
+      assert out =~ "cseq:       118060286"
     end
 
     test "registration show on an unregistered AOR → exit 1" do
@@ -985,6 +991,30 @@ defmodule Kelix.Control.CLITest do
             rw: :r,
             args: [],
             help: "A command with no render hint"
+          },
+          %{
+            name: "thing.heads",
+            rest: {:get, "/things/heads"},
+            rw: :r,
+            args: [],
+            render: %{kind: :table, columns: ~w(name members), first: %{"members" => "name"}},
+            help: "A table whose column shows the first entry of a list and counts the rest"
+          },
+          %{
+            name: "thing.clipped",
+            rest: {:get, "/things/clipped"},
+            rw: :r,
+            args: [],
+            render: %{kind: :table, columns: ~w(name uri), truncate: %{"uri" => 12}},
+            help: "A table whose column is cut at a width"
+          },
+          %{
+            name: "thing.brief",
+            rest: {:get, "/things/brief"},
+            rw: :r,
+            args: [],
+            render: %{kind: :detail, fields: ~w(name), hide: ~w(domain)},
+            help: "A detail view that hides a field of the result"
           }
         ]
       end
@@ -1029,6 +1059,27 @@ defmodule Kelix.Control.CLITest do
         do: {:ok, %{members: [%{name: "alice", state: :connected}]}}
 
       def handle_control("thing.raw", _args), do: {:ok, %{name: "raw"}}
+
+      def handle_control("thing.heads", _args) do
+        {:ok,
+         [
+           %{name: "trio", members: [%{name: "alice"}, %{name: "bob"}, %{name: "carol"}]},
+           %{name: "solo", members: [%{name: "dave"}]},
+           %{name: "empty", members: []}
+         ]}
+      end
+
+      def handle_control("thing.clipped", _args) do
+        {:ok,
+         [
+           %{name: "long", uri: "sip:alice@example.com"},
+           %{name: "exact", uri: "sip:bob@ex.o"},
+           %{name: "none", uri: nil}
+         ]}
+      end
+
+      def handle_control("thing.brief", _args),
+        do: {:ok, %{name: "brief", domain: "example.com", stale: false}}
     end
 
     setup do
@@ -1111,6 +1162,31 @@ defmodule Kelix.Control.CLITest do
     test "a command without a render hint keeps the raw term" do
       {0, out} = run(["rmod", "thing.raw"])
       assert out =~ "%{name: \"raw\"}"
+    end
+
+    test "a `first:` column shows the first entry's key and counts the others" do
+      {0, out} = run(["rmod", "thing.heads"])
+      [header, trio, solo, empty] = String.split(out, "\n")
+
+      assert header =~ ~r/^name\s+members$/
+      assert trio =~ ~r/^trio\s+alice \(\+2\)$/
+      assert solo =~ ~r/^solo\s+dave$/
+      assert empty =~ ~r/^empty\s+-$/
+    end
+
+    test "a `truncate:` column is cut at its width and ends with an ellipsis" do
+      {0, out} = run(["rmod", "thing.clipped"])
+      [header, long, exact, none] = String.split(out, "\n")
+
+      assert header =~ ~r/^name\s+uri$/
+      assert long == "long   sip:alice@e…"
+      assert exact == "exact  sip:bob@ex.o"
+      assert none == "none   -"
+    end
+
+    test "a `hide:` field is left out of the detail view, the others still print" do
+      {0, out} = run(["rmod", "thing.brief"])
+      assert out == "Name:  brief\nStale: false"
     end
   end
 

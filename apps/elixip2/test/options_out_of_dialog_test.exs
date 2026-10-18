@@ -188,7 +188,8 @@ defmodule SIP.Test.OptionsOutOfDialog do
       SIP.Dialog.reply(dlg, req1, 407, "Proxy Authentication Required", [])
       assert_receive {:sip_mockup, {:response_sent, 407, %{callid: ^cid}}}, 2_000
 
-      first = :erlang.read_timer(:sys.get_state(dlg).expirationtimer)
+      first_timer = :sys.get_state(dlg).expirationtimer
+      first = :erlang.read_timer(first_timer)
       assert is_integer(first) and first <= 32_000
       Process.sleep(50)
 
@@ -196,8 +197,11 @@ defmodule SIP.Test.OptionsOutOfDialog do
       assert_receive {:OPTIONS, %{cseq: [2, :OPTIONS]} = req2, _trans, ^dlg}, 2_000
       refute_received {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}
 
-      second = :erlang.read_timer(:sys.get_state(dlg).expirationtimer)
-      assert second > first
+      # Re-armed means a new timer, not a larger remainder: read_timer counts whole
+      # milliseconds, so two reads each taken just after their arming both say 31999.
+      second_timer = :sys.get_state(dlg).expirationtimer
+      refute second_timer == first_timer
+      assert :erlang.read_timer(second_timer) >= first
 
       SIP.Dialog.reply(dlg, req2, 200, "OK", [])
       assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000

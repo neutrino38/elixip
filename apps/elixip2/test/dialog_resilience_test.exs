@@ -665,7 +665,7 @@ defmodule SIP.Test.DialogResilience do
     {:ok, raw} = File.read("test/SIP-REGISTER-LVP.txt")
     {:ok, req} = SIPMsg.parse(raw, fn _, _, _, _ -> :ok end)
     ruri = SIP.Uri.set_uri_param(req.ruri, "unittest", "regsession")
-    req = SIP.Msg.Ops.update_sip_msg(req, {:ruri, ruri})
+    req = SIP.Msg.Ops.update_sip_msg(req, {:ruri, ruri}) |> unique_transaction()
     Mockup.inject(SIP.Transport.Selector.select_transport(ruri).tp_pid, req)
 
     assert_receive {:bound, dlg, session}, 2_000
@@ -673,5 +673,15 @@ defmodule SIP.Test.DialogResilience do
 
     send(session, :die)
     assert_dies(dlg)
+  end
+
+  # The sample file carries a fixed branch and Call-ID, and other test files inject
+  # the same REGISTER: a server transaction they leave behind would absorb this one
+  # as a retransmission, and no dialog would ever be created.
+  defp unique_transaction(req) do
+    n = System.unique_integer([:positive])
+    [top | rest] = req.via
+    top = String.replace(top, ~r/branch=[^;]+/, "branch=z9hG4bK#{n}")
+    %{req | via: [top | rest], callid: "#{__MODULE__}-#{n}"}
   end
 end

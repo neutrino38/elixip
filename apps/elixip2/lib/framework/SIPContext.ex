@@ -123,6 +123,15 @@ defmodule SIP.Context do
             SIP.Context.assert_identity(var!(sip_ctx), unquote(identity))
         end
       end
+
+      # Keep the P-Asserted-Identity of a request from a peer the script has
+      # decided to trust. See SIP.Context.trust_asserted_identity/2.
+      defmacro trust_asserted_identity(req) do
+        quote do
+          var!(sip_ctx) =
+            SIP.Context.trust_asserted_identity(var!(sip_ctx), unquote(req))
+        end
+      end
     end
   end
 
@@ -342,6 +351,32 @@ defmodule SIP.Context do
         domain: to_string(realm)
       })
     )
+  end
+
+  @doc """
+  Record the `P-Asserted-Identity` of `req` as the identity to assert, because the
+  script has decided to trust the peer that sent it — a trunk or an application
+  server it recognised and chose to believe.
+
+  The inbound header itself still never crosses a leg:
+  `SIP.Msg.Ops.prepare_forwarded_request/2` drops it and writes back only what the
+  context holds. This verb is how a trusted peer's assertion reaches the context,
+  read once by `SIP.Msg.Ops.asserted_identity/1` (display name kept).
+
+  The decision to trust is the script's, never configuration's. Calling this on a
+  request from an unverified peer relays a claim under our name, which RFC 3325
+  §5 forbids.
+
+  A request with no usable `sip:` PAI leaves the context unchanged: an identity
+  proved earlier (a digest verdict) is not withdrawn by an absence.
+  `assert_identity(nil)` remains the explicit withdrawal.
+  """
+  @spec trust_asserted_identity(%SIP.Context{}, map()) :: %SIP.Context{}
+  def trust_asserted_identity(context = %SIP.Context{}, req) when is_map(req) do
+    case SIP.Msg.Ops.asserted_identity(req) do
+      %SIP.Uri{} = uri -> assert_identity(context, uri)
+      nil -> context
+    end
   end
 
   def from(context) do

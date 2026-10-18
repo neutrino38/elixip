@@ -440,23 +440,26 @@ Activity:       away
 Note:           -
 Calls:          -
 States:
-  event     source     status  activity  ruid          etag              expires  sender                       content_type
-  presence  publish    open    away      5e6951922044  3743925564391211  3525     "Bob" <sip:bob@weshwesh.eu>  application/pidf+xml
-  presence  registrar  open    -         rd77570d604b1 -                 -        sip:bob@192.0.2.10           -
+  event     source     status  activity  ruid          etag              expires  received_time  sender                       content_type
+  presence  publish    open    away      5e6951922044  3743925564391211  3525     1760263200     "Bob" <sip:bob@weshwesh.eu>  application/pidf+xml
+  presence  registrar  open    -         rd77570d604b1 -                 -        -              sip:bob@192.0.2.10           -
 Watchers:
   watcher                     event     status  expires  callid
   sip:magali.buu@weshwesh.eu  presence  active  3364     7spik6itdff9ode3hi13
 ```
 
 `show` and `watchers` give the detail, under kamailio's column names —
-`presentity_uri`, `event`, `etag`, `expires`, `status`, `callid`.
+`presentity_uri`, `event`, `etag`, `expires`, `received_time`, `status`, `callid`.
+`expires` is the remaining lifetime in seconds; `received_time` is the instant the
+PUBLISH was accepted, in epoch seconds.
 
 A state has a `source`: `publish` for a PUBLISH, `registrar` for a registration
 reported by the registrar script (see
 [Registrations as presence](#registrations-as-presence)), and the name a module
 reported it under — `mcu` for a conference room. A `registrar` state is one row per
 registered device, its tuple key as `ruid` and its contact as `sender`; a module
-state has no `ruid` nor `sender`. Neither has an `etag` nor `expires`. A `publish`
+state has no `ruid` nor `sender`. Neither has an `etag`, `expires` nor
+`received_time`. A `publish`
 row's `ruid` is the stable key its tuples are named after.
 
 `activity` is the RPID activity of a `presence` document (`on_the_phone`, `away`…),

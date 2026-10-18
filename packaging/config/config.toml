@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.6.3"
+# user_agent = "Kelixip/1.6.4"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 # max_message_size = 64000   # biggest inbound SIP message, in bytes; 513 beyond it
 
@@ -24,6 +24,16 @@ module_dir = "/usr/lib/kelixip/modules"
 target = "stdout"
 level  = "info"
 # facility = "local0"
+
+[security]
+# One line per security incident (a refused credential, an unknown domain, a packet
+# that is not SIP, a refused API call), for fail2ban: the filters and a jail example
+# are under /usr/share/kelixip/fail2ban/. The same lines also go to the journal as
+# warnings; this file is the copy that survives [log] level = "error". Rotated by
+# /etc/logrotate.d/kelixip.
+log_file = "/var/log/kelixip/security.log"
+# Incident types not written, e.g. a UA whose messages the parser refuses:
+# ignore = ["invalid-packet"]
 
 # One [[listen]] block per inbound socket. UDP is one socket per node: extra udp
 # entries are ignored with a warning. tls/wss require `cert` + `key`.
@@ -77,6 +87,10 @@ port  = 5060
 verify = false
 #verify = true
 #ca = "/etc/kelixip/tls/interco-ca.pem"
+# Client certificate for a peer that demands one (mutual TLS, Teams Direct
+# Routing): the certificate followed by its intermediates, and its key.
+#cert = "/etc/kelixip/tls/fullchain.pem"
+#key = "/etc/kelixip/tls/privkey.pem"
 
 # RFC 4028 session timers, ON by default: every call leg negotiates one with its
 # own peer and is hung up when that peer stops refreshing it — a browser tab gone,
@@ -267,6 +281,14 @@ port = 9095
 # lights while the user rings or talks, presence shows on-the-phone while a call
 # is up. Needs the [module.presence] block: without it, it refuses to start.
 #domains = ["example.com"]          # absent: every served domain
+
+#[module.sip_servers]               # dnf install kelixip-mod-sip_servers
+# The remote SIP servers a domain talks to (application servers, proxies, trunks).
+# They are declared with `kelictl sip_servers server.create`, the REST API or
+# kelescope, never in this file, and kept in server_file (trunk HA1s included,
+# hence mode 0600). Without server_file a restart forgets them.
+#server_file        = "/var/lib/kelixip/sip_servers.json"
+#keepalive_interval = 30            # seconds between two OPTIONS to a server's URI
 
 # The media servers, declared here and nowhere else: point-to-point calls take one
 # per call (round-robin + health-check), and the mcu module opens one control channel

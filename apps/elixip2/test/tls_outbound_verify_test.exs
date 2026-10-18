@@ -130,4 +130,81 @@ defmodule SIP.Test.TLSOutboundVerify do
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
     end
   end
+
+  describe "the client certificate, against a server that demands one" do
+    setup do
+      previous = [
+        cert: Application.fetch_env(:elixip2, :tls_certfile),
+        key: Application.fetch_env(:elixip2, :tls_keyfile)
+      ]
+
+      Application.delete_env(:elixip2, :tls_verify)
+
+      on_exit(fn ->
+        restore(:tls_certfile, previous[:cert])
+        restore(:tls_keyfile, previous[:key])
+      end)
+
+      :ok
+    end
+
+    # Mutual TLS as Teams Direct Routing does it: no certificate, no connection.
+    # The acceptor reports its own handshake, since a client that offers nothing
+    # may still believe it connected. It accepts any certificate presented: the
+    # repository's own cannot be verified, and the question here is whether one
+    # is presented at all.
+    defp mtls_server() do
+      {:ok, listener} =
+        :ssl.listen(0, [
+          :binary,
+          {:active, false},
+          {:reuseaddr, true},
+          {:ip, {127, 0, 0, 1}},
+          {:certfile, Path.join(@certs, "certificate.pem")},
+          {:keyfile, Path.join(@certs, "private_key.pem")},
+          {:cacertfile, Path.join(@certs, "certificate.pem")},
+          {:verify, :verify_peer},
+          {:verify_fun, {fn _cert, _event, state -> {:valid, state} end, nil}},
+          {:fail_if_no_peer_cert, true},
+          {:versions, [:"tlsv1.2"]}
+        ])
+
+      {:ok, {_ip, port}} = :ssl.sockname(listener)
+      test = self()
+
+      spawn(fn ->
+        with {:ok, t} <- :ssl.transport_accept(listener, 3_000) do
+          send(test, {:server_handshake, :ssl.handshake(t, 3_000)})
+        end
+
+        Process.sleep(5_000)
+      end)
+
+      on_exit(fn -> :ssl.close(listener) end)
+      port
+    end
+
+    test "configured, it is presented" do
+      Application.put_env(:elixip2, :tls_certfile, Path.join(@certs, "certificate.pem"))
+      Application.put_env(:elixip2, :tls_keyfile, Path.join(@certs, "private_key.pem"))
+      port = mtls_server()
+
+      _ = GenServer.start(SIP.Transport.TLS, {{127, 0, 0, 1}, port, "unit.test"})
+
+      assert_receive {:server_handshake, {:ok, _socket}}, 5_000
+    end
+
+    test "absent, the server refuses the connection" do
+      Application.delete_env(:elixip2, :tls_certfile)
+      Application.delete_env(:elixip2, :tls_keyfile)
+      port = mtls_server()
+
+      _ = GenServer.start(SIP.Transport.TLS, {{127, 0, 0, 1}, port, "unit.test"})
+
+      assert_receive {:server_handshake, {:error, {:tls_alert, {:handshake_failure, why}}}},
+                     5_000
+
+      assert to_string(why) =~ "no_client_certificate_provided"
+    end
+  end
 end

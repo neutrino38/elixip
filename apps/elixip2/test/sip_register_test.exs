@@ -124,6 +124,16 @@ defmodule SIP.Test.Register do
     end
   end
 
+  # The sample file carries a fixed branch and Call-ID, and other test files inject
+  # the same REGISTER: a server transaction they leave behind would absorb this one
+  # as a retransmission, and no dialog would ever be created.
+  defp unique_transaction(req) do
+    n = System.unique_integer([:positive])
+    [top | rest] = req.via
+    top = String.replace(top, ~r/branch=[^;]+/, "branch=z9hG4bK#{n}")
+    %{req | via: [top | rest], callid: "#{__MODULE__}-#{n}"}
+  end
+
   defp test_context do
     %SIP.Context{
       username: @username,
@@ -156,7 +166,9 @@ defmodule SIP.Test.Register do
 
     # Add unittest param to RURI to trigger UDP mockeup transport selection
     upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "sip_register")
-    parsed_msg = SIP.Msg.Ops.update_sip_msg(parsed_msg, {:ruri, upd_uri})
+
+    parsed_msg =
+      SIP.Msg.Ops.update_sip_msg(parsed_msg, {:ruri, upd_uri}) |> unique_transaction()
 
     upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
 

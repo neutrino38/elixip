@@ -955,13 +955,14 @@ defmodule Kelix.Control.CLI do
 
   defp render_hinted(rows, %{kind: :table} = hint) when is_list(rows) do
     labels = Map.get(hint, :labels, %{})
-    table_of(rows, Map.get(hint, :columns) || derived_columns(rows), labels, [])
+    columns = Map.get(hint, :columns) || derived_columns(rows)
+    table_of(rows, columns, labels, [], Map.get(hint, :first, %{}), Map.get(hint, :truncate, %{}))
   end
 
   defp render_hinted(map, %{kind: :detail} = hint) when is_map(map) do
     labels = Map.get(hint, :labels, %{})
     nested = Map.get(hint, :nested, %{})
-    fields = detail_fields(map, Map.get(hint, :fields, []))
+    fields = detail_fields(map, Map.get(hint, :fields, [])) -- Map.get(hint, :hide, [])
     width = fields |> Enum.map(&String.length(humanize(&1))) |> Enum.max(fn -> 0 end)
 
     Enum.map_join(fields, "\n", fn name ->
@@ -999,12 +1000,34 @@ defmodule Kelix.Control.CLI do
   end
 
   # `path` prefixes the label lookup, so a nested table's columns are declared the
-  # way every other field is — `"participants.state"`.
-  defp table_of(rows, columns, labels, path) do
+  # way every other field is — `"participants.state"`. `first` names, for a column
+  # holding a list of maps, the key to show from its first entry; the rest of the
+  # list is counted, not printed. `truncate` caps a column's width: a longer cell is
+  # cut and ends with an ellipsis.
+  defp table_of(rows, columns, labels, path, first \\ %{}, truncate \\ %{}) do
     table(columns, rows, fn row ->
-      Enum.map(columns, &dash(cell(field(row, &1), path ++ [&1], labels)))
+      Enum.map(columns, fn column ->
+        field(row, column)
+        |> column_cell(column, path, labels, Map.get(first, column))
+        |> dash()
+        |> clip(Map.get(truncate, column))
+      end)
     end)
   end
+
+  defp clip(text, width) when is_integer(width) and width > 0 do
+    if String.length(text) > width, do: String.slice(text, 0, width - 1) <> "…", else: text
+  end
+
+  defp clip(text, _width), do: text
+
+  defp column_cell([head | rest], column, path, labels, key)
+       when is_map(head) and is_binary(key) do
+    text = cell(field(head, key), path ++ [column, key], labels)
+    if rest == [], do: text, else: "#{text} (+#{length(rest)})"
+  end
+
+  defp column_cell(value, column, path, labels, _key), do: cell(value, path ++ [column], labels)
 
   # Columns a hint did not declare: every key the rows carry, sorted. A module gets a
   # readable table without declaring one; declaring `columns:` is how it says *which*
@@ -1321,10 +1344,13 @@ defmodule Kelix.Control.CLI do
             {"transport", c.transport},
             {"instance", c.instance},
             {"reg-id", c.reg_id},
-            {"methods", c.methods}
+            {"methods", c.methods},
+            {"user-agent", c.user_agent},
+            {"call-id", c.callid},
+            {"cseq", c.cseq}
           ],
           value not in [nil, ""],
-          do: "     " <> String.pad_trailing(label <> ":", 11) <> to_string(value)
+          do: "     " <> String.pad_trailing(label <> ":", 12) <> to_string(value)
   end
 
   # "in 5m40s (2026-08-02T12:34:56Z)": the remaining time is the operator question,

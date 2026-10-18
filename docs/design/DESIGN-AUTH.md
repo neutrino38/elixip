@@ -291,11 +291,15 @@ whatever it sends next. That is already what the 32 s timer produced;
 writing down, because it is what someone will rediscover in a capture and mistake
 for a regression. `max_attempts: :infinity` restores the earlier behaviour.
 
-Brute-force *visibility* is deliberately not here: it is a core observer, for
-every script and every backend
-([integration-fail2ban.md](integration-fail2ban.md) §4). `:refused` bounds the
-work one unauthenticated dialog can extract — a scanner fits dozens of attempts
-into 32 s, each one a query against the subscriber table — and raises no alarm.
+Brute-force *visibility* is deliberately not here either. The backend reports it:
+every 403 `Kelix.Mod.AuthDb` answers goes through one `reject/5`, which names the
+cause (`bad_password`, `unknown_user`, `bad_realm`) and the request's source in an
+`Elixip.Security.Incident` handed to `Elixip.Security.report/1` — the line
+fail2ban reads ([fail2ban-plan.md](fail2ban-plan.md) §3). What is counted there is
+exactly what is counted here: the 403s, never the first challenge, `stale`, or a
+500. `:refused` bounds the work one unauthenticated dialog can extract — a scanner
+fits dozens of attempts into 32 s, each one a query against the subscriber table —
+and raises no alarm of its own.
 
 ### 3.4 The verbs it answers with
 
@@ -376,11 +380,26 @@ The drop and the re-add are **in the same function**, and that is the guarantee:
 the only PAI that can leave this node is one that function wrote. Nothing to
 compare, nothing to trust at the call site.
 
-The cost is that a deployment putting kelixip behind a trusted proxy — where RFC
-3325 §5 would let an inbound assertion through — cannot say so. That is a
-trust-domain policy needing configuration to be stated safely, and the safe
-default is the one that does not launder. When a cascaded deployment needs it, it
-arrives as `[domain] trusted_peers`, not as a hole in the denylist.
+A deployment behind a trusted peer — where RFC 3325 §5 lets an inbound assertion
+through — says so in its script, not in configuration:
+
+```elixir
+case Kelix.Mod.SipServers.matches_server(sip_ctx, req) do
+  {_slug, _peer} ->
+    trust_asserted_identity(req)
+    goto(place_call, "from a trusted server")
+
+  :no_match ->
+    goto(authenticate, "from a user")
+end
+```
+
+`SIP.Context.trust_asserted_identity/2` records the inbound PAI in the context,
+display name kept; the forward then asserts it like any other. The guarantee holds:
+the inbound header still never crosses a leg, and the only PAI that leaves is one
+recorded in the context. Recognising a peer and trusting it are two steps, and the
+second is always the script's. A request with no `sip:` PAI leaves the context
+unchanged; `assert_identity(nil)` remains the explicit withdrawal.
 
 ### 4.3 Where the assertion comes from
 

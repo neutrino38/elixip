@@ -270,7 +270,8 @@ defmodule Kelix.Mod.Presence do
           fields: ~w(presentity_uri status activity note calls states watchers),
           nested: %{
             "states" => %{
-              columns: ~w(event source status activity ruid etag expires sender content_type)
+              columns:
+                ~w(event source status activity ruid etag expires received_time sender content_type)
             },
             "watchers" => %{columns: ~w(watcher event status expires callid)}
           }
@@ -1696,6 +1697,7 @@ defmodule Kelix.Mod.Presence do
       ruid: pub.ruid,
       etag: pub.etag,
       expires: SIP.Publication.remaining(pub),
+      received_time: pub.received_time,
       sender: pub.sender,
       content_type: pub.content_type
     }
@@ -1719,6 +1721,7 @@ defmodule Kelix.Mod.Presence do
         ruid: device.key,
         etag: nil,
         expires: nil,
+        received_time: nil,
         sender: device.contact,
         content_type: nil
       }
@@ -1740,6 +1743,7 @@ defmodule Kelix.Mod.Presence do
         ruid: nil,
         etag: nil,
         expires: nil,
+        received_time: nil,
         sender: nil,
         content_type: nil
       }

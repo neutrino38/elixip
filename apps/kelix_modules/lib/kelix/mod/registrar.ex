@@ -10,6 +10,9 @@ defmodule Kelix.Mod.Registrar.Contact do
           instance: String.t() | nil,
           reg_id: String.t() | nil,
           methods: String.t() | nil,
+          user_agent: String.t() | nil,
+          callid: String.t() | nil,
+          cseq: non_neg_integer | nil,
           info: term,
           expires_at: DateTime.t()
         }
@@ -21,7 +24,9 @@ defmodule Kelix.Mod.Registrar.Contact do
   # `instance` + `reg_id` are the RFC 5626 (outbound) identity of the registering
   # device, `methods` its RFC 3840 callee capabilities. Kept because they say things
   # the contact URI cannot: which physical device this is (across an address change),
-  # and which methods it is willing to receive.
+  # and which methods it is willing to receive. `user_agent`, `callid` and `cseq`
+  # are the REGISTER's own: the software behind the binding, and the registration
+  # dialog a refresh continues (same Call-ID, higher CSeq — RFC 3261 §10.2).
   defstruct contact: nil,
             received: nil,
             flow_pid: nil,
@@ -30,6 +35,9 @@ defmodule Kelix.Mod.Registrar.Contact do
             instance: nil,
             reg_id: nil,
             methods: nil,
+            user_agent: nil,
+            callid: nil,
+            cseq: nil,
             info: nil,
             expires_at: nil
 end
@@ -640,6 +648,9 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
+  defp cseq_number([number, _method]) when is_integer(number), do: number
+  defp cseq_number(_cseq), do: nil
+
   defp wildcard?(:*), do: true
   defp wildcard?("*"), do: true
   defp wildcard?(_), do: false
@@ -687,6 +698,9 @@ defmodule Kelix.Mod.Registrar do
           instance: contact_param(c, "+sip.instance"),
           reg_id: contact_param(c, "reg-id"),
           methods: contact_param(c, "methods"),
+          user_agent: Map.get(req, :useragent),
+          callid: Map.get(req, :callid),
+          cseq: cseq_number(Map.get(req, :cseq)),
           info: info,
           expires_at: DateTime.add(now(), exp, :second)
         }
@@ -1150,7 +1164,10 @@ defmodule Kelix.Mod.Registrar do
       transport: transport_string(c.flow_module),
       instance: c.instance,
       reg_id: c.reg_id,
-      methods: c.methods
+      methods: c.methods,
+      user_agent: c.user_agent,
+      callid: c.callid,
+      cseq: c.cseq
     }
   end
 

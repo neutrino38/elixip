@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.3
+Version:        1.6.4
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        2%{?dist}
+Release:        8%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -63,7 +63,7 @@ The core ships NO SIP function. The registrar, the authentication back-end, the
 conference mixer and the presence collection are loadable modules delivered as
 separate packages (kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu,
 kelixip-mod-presence, kelixip-mod-mcu_presence, kelixip-mod-dialog_state,
-kelixip-mod-silo, kelixip-mod-conversation) which
+kelixip-mod-silo, kelixip-mod-conversation, kelixip-mod-sip_servers) which
 drop their bytecode into the
 root-owned module directory; a deployment installs only what it uses.
 
@@ -168,6 +168,18 @@ whichever node it reaches. The schema ships under
 /usr/share/kelixip/sql/conversation/ and is the operator's to create. Enable it
 with a [module.conversation] block in config.toml.
 
+%package mod-sip_servers
+Summary:        Remote SIP servers of a domain, for kelixip
+Requires:       %{name} = %{version}
+
+%description mod-sip_servers
+The remote SIP servers a domain exchanges calls with: application servers,
+proxies and trunks. Each server's URIs are probed by OPTIONS, and a call skips
+one known to be down; a trunk registers its account and answers the operator's
+challenges; a proxy's remote AORs are probed and reported to presence. Servers
+are declared with kelictl, the REST API or kelescope, and kept in the module's
+file. Enable it with a [module.sip_servers] block in config.toml.
+
 %prep
 %setup -q
 
@@ -222,6 +234,17 @@ install -D -m 0644 systemd/kelixip.service %{buildroot}%{_unitdir}/%{name}.servi
 # weak dependency only: the file is data, loaded by basename when the operator types.
 install -D -m 0644 completion/kelictl \
     %{buildroot}%{_datadir}/bash-completion/completions/kelictl
+
+# The fail2ban filters and the jail example, as data: the operator links them into
+# /etc/fail2ban (doc/running.md, "fail2ban"). Not required: fail2ban is optional.
+install -d -m 0755 %{buildroot}%{_datadir}/%{name}/fail2ban/filter.d
+install -d -m 0755 %{buildroot}%{_datadir}/%{name}/fail2ban/jail.d
+install -m 0644 fail2ban/filter.d/*.conf %{buildroot}%{_datadir}/%{name}/fail2ban/filter.d/
+install -m 0644 fail2ban/jail.d/*.conf %{buildroot}%{_datadir}/%{name}/fail2ban/jail.d/
+
+# Rotation of the security log ([security] log_file). Inert while the file does
+# not exist (missingok).
+install -D -m 0644 logrotate/kelixip %{buildroot}%{_sysconfdir}/logrotate.d/%{name}
 
 # Mutable state (future usrloc persistence, operator-installed scripts) and the log
 # directory used when stdout is redirected. The unit also declares them, so a
@@ -283,6 +306,7 @@ fi
 %config(noreplace) %attr(0640,root,kelixip) %{_sysconfdir}/%{name}/config.toml
 %config(noreplace) %attr(0640,root,kelixip) %{_sysconfdir}/%{name}/domains.toml
 %config(noreplace) %attr(0644,root,root) %{_sysconfdir}/sysconfig/%{name}
+%config(noreplace) %attr(0644,root,root) %{_sysconfdir}/logrotate.d/%{name}
 %{_unitdir}/%{name}.service
 %{_sbindir}/kelictl
 %{_sbindir}/kelixip
@@ -301,6 +325,7 @@ fi
 %exclude %{_datadir}/%{name}/registrar-presence.exs
 %exclude %{_datadir}/%{name}/*-chat.exs
 %dir %{_datadir}/%{name}/sql
+%{_datadir}/%{name}/fail2ban
 %dir %attr(0755,root,root) %{kelixdir}
 %{kelixdir}/bin
 %{kelixdir}/erts-*
@@ -364,7 +389,86 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Conversation*.beam
 %{_datadir}/%{name}/sql/conversation
 
+%files mod-sip_servers
+%doc doc/modules/sip_servers.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
+
 %changelog
+* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-8
+- sip_servers: with an ext_domain, the keepalive OPTIONS asks for
+  sip:<ext_domain>, sent where the URI resolved, as the REGISTER and the calls
+  are. The REGISTER and the calls to a trunk keep the URI's parameters
+  (;transport=tls) when its host is replaced by ext_domain.
+
+* Sat Oct 17 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-7
+- sip_servers: a dialog the server opened names its domain in our Contact too
+  (the 2xx and the in-dialog requests), when the script calls
+  publish_contact_host(peer.contact_host). Reference script mcu-from-sfu.exs, a
+  conference entered from Teams Direct Routing.
+
+* Sat Oct 17 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-6
+- config.toml [tls] takes cert and key: the client certificate presented when a
+  called TLS or WSS peer demands one (mutual TLS, Teams Direct Routing). cert
+  holds the certificate followed by its intermediates.
+
+* Fri Oct 16 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-5
+- sip_servers: use_fqdn_contact, the Contact of the requests sent to a server
+  names its domain instead of the bound address, without a port. Teams Direct
+  Routing finds the SBC by that name.
+- TLS/TCP transports: a socket error (a fatal TLS alert from the peer) stops
+  the connection cleanly instead of crashing its process.
+
+* Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-4
+- sip_servers: a third URI (tertiary_uri), tried after the backup, and
+  source_networks, CIDR ranges a server's requests are recognised from on the
+  transports its URIs name. Microsoft Teams Direct Routing needs both: three
+  names each resolving to one datacenter, traffic from two /14 ranges.
+- kelictl: server.list shows the first URI and counts the others, server.show
+  lays the URIs out as a table with their role and state.
+
+* Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-3
+- A registration binding keeps the REGISTER's User-Agent, Call-ID and CSeq:
+  kelictl registration show, the REST API and kelescope's live registrations
+  carry them (user_agent, callid, cseq).
+- A published presence state reports received_time, the instant the PUBLISH
+  was accepted, in epoch seconds like kamailio's column.
+
+* Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-2
+- New subpackage kelixip-mod-sip_servers: the remote SIP servers of a domain
+  (sip-appsrv, sip-proxy, sip-trunk), declared with kelictl sip_servers,
+  the REST API or kelescope and kept in server_file. Scripts call
+  matches_server/2, find_server/2 and forward/3; a [module.sip_servers] block
+  in config.toml enables it.
+- Each server's URIs are probed by OPTIONS; a call skips a URI known to be
+  down. A request from a server that a script recognises proves it alive:
+  its OPTIONS reach a script through a [[domain.options]] rule.
+- A sip-trunk registers its account (register = true by default) and answers
+  the operator's 401/407 on INVITE, re-INVITE, UPDATE, BYE and MESSAGE with
+  its HA1; the password is never stored.
+- A sip-proxy's remote AORs are probed through it and reported to presence.
+- kelescope 0.7.0 shows a domain's servers live: subscribe_sip_servers/2
+  pushes each server's state, counters and alarms (realm mismatch, address
+  shared by two servers).
+- A script can keep an inbound P-Asserted-Identity: trust_asserted_identity/1.
+- Digest: a challenge naming SHA-256, the RFC 8760 spelling, is answered.
+
+* Thu Oct 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-1
+- Screen sharing through the B2BUA. A leg carries several video streams and
+  BUNDLE: the second m=video of a browser sharing its screen is a stream of
+  its own, relayed to the other leg under its mid; a share that stops is
+  paused (inactive), not withdrawn, so sharing again resumes it; a re-offer
+  keeps the peer's section order and the leg's ICE credentials.
+- Security incidents for fail2ban. A refused credential, an unknown domain, a
+  refused API token, a packet that is not SIP or a failed handshake is one
+  line in [security] log_file (default /var/log/kelixip/security.log) and in
+  the journal. Filters and a jail example are installed under
+  /usr/share/kelixip/fail2ban/; /etc/logrotate.d/kelixip rotates the file.
+  [security] ignore drops incident types.
+- The SIP parser accepts header names in any case, the compact forms and a
+  colon without a space after it (RFC 3261 section 7.3).
+- The reference media call script carries text too (T.140 data channel).
+- User-Agent is now Kelixip/1.6.4.
+
 * Tue Oct 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-2
 - RFC 4028 session timers, one per call leg. A long call relayed between two
   browsers was cut after 90 s: the caller's Session-Expires was relayed to the

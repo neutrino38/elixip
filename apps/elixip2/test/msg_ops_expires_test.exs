@@ -129,4 +129,29 @@ defmodule SIP.Test.MsgOpsExpires do
       assert Ops.contact_lifetimes(req) == [300]
     end
   end
+
+  describe "granted_expires/3 — what a registrar gave the binding we asked for" do
+    defp ok(fields), do: Map.merge(%{response: 200}, Map.new(fields))
+
+    test "our Contact's own lifetime, among the other bindings of the AOR" do
+      ours = uri("sip:0123@192.0.2.1:5060")
+
+      resp =
+        ok(
+          contact: [
+            SIP.Uri.set_header_param(uri("sip:0123@198.51.100.7"), "expires", "3600"),
+            SIP.Uri.set_header_param(uri("sip:0123@192.0.2.1:5060"), "expires", "120")
+          ],
+          expires: 900
+        )
+
+      assert Ops.granted_expires(resp, ours, 600) == 120
+    end
+
+    test "the Expires header when our Contact is not echoed, else what we asked" do
+      ours = uri("sip:0123@192.0.2.1")
+      assert Ops.granted_expires(ok(expires: 300), ours, 600) == 300
+      assert Ops.granted_expires(ok([]), ours, 600) == 600
+    end
+  end
 end

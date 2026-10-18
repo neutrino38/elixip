@@ -1,0 +1,21 @@
+Package: kelixip-mod-sip-servers
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@)
+Description: Remote SIP servers of a domain, for kelixip
+ The remote SIP servers a domain exchanges calls with: application servers,
+ proxies and trunks. Each server's URIs are probed by OPTIONS, and a call skips
+ one known to be down; a trunk registers its account and answers the
+ operator's challenges; a proxy's remote AORs are probed and reported to
+ presence. Servers are declared with kelictl, the REST API or kelescope, and
+ kept in the module's file. Enable it with a [module.sip_servers] block in
+ config.toml.
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

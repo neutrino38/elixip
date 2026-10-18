@@ -454,8 +454,28 @@ defmodule Kelix.Router do
           )
         )
 
+        report_invalid_domain(req, if(host, do: :unknown_domain, else: :no_domain))
         {:reject, 404, "Not Found"}
     end
+  end
+
+  # A request for a domain this node does not serve is what a scanner sends first
+  # (docs/design/fail2ban-plan.md). An OPTIONS is not one: a load balancer pinging
+  # an address asks whether the node is up, and `resolve_options/2` answers it
+  # from the core without coming here.
+  defp report_invalid_domain(%{method: :OPTIONS}, _reason), do: :ok
+
+  defp report_invalid_domain(req, reason) do
+    {proto, ip, port} = SIP.Msg.Ops.source_flow(req) || {nil, nil, nil}
+
+    Elixip.Security.report(%Elixip.Security.Incident{
+      type: :invalid_domain,
+      src: ip,
+      port: port,
+      proto: proto,
+      method: Map.get(req, :method),
+      reason: reason
+    })
   end
 
   defp req_host(req) do

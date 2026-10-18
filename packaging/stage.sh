@@ -11,7 +11,8 @@
 #   rel/        the assembled `mix release kelixip` tree (embedded ERTS)
 #   modules/    the loadable modules' .beam, compiled from apps/kelix_modules
 #   scripts/    the reference scenario scripts (script_dir)
-#   config/, sysconfig/, systemd/, completion/, doc/   the packaging inputs
+#   config/, sysconfig/, systemd/, completion/, fail2ban/, logrotate/, doc/
+#               the packaging inputs
 #   doc/modules/  the per-module documents, shipped by the module subpackages
 #
 # The embedded ERTS is native code linked against THIS host's glibc/OpenSSL/ncurses,
@@ -96,7 +97,8 @@ mkdir -p "$stage/scripts"
 cp "$REPO"/apps/kelixip/scripts/*.exs "$stage/scripts/"
 
 cp -a "$REPO/packaging/config" "$REPO/packaging/sysconfig" "$REPO/packaging/systemd" \
-   "$REPO/packaging/completion" "$REPO/packaging/sql" "$stage/"
+   "$REPO/packaging/completion" "$REPO/packaging/sql" "$REPO/packaging/fail2ban" \
+   "$REPO/packaging/logrotate" "$stage/"
 
 mkdir -p "$stage/doc"
 cp "$REPO"/docs/kelixip/*.md "$stage/doc/"

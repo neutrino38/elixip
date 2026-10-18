@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.6.3
-Release:        2%{?dist}
+Version:        1.6.4
+Release:        8%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,47 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-8
+- Released together with kelixip 1.6.4-8; nothing changes in the tool.
+
+* Sat Oct 17 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-7
+- Released together with kelixip 1.6.4-7; the SIP stack it shares can name a
+  host in the Contact of a dialog the far end opened.
+
+* Sat Oct 17 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-6
+- Released together with kelixip 1.6.4-6; nothing changes in the tool.
+
+* Fri Oct 16 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-5
+- Released together with kelixip 1.6.4-5; a TLS or TCP socket error no longer
+  crashes the transport process.
+
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-4
+- Released together with kelixip 1.6.4-4; nothing changes in the tool.
+
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-3
+- Released together with kelixip 1.6.4-3; nothing changes in the tool.
+
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-2
+- Released together with kelixip 1.6.4-2.
+- B2BUA: a peer's trunk_pid is asked {:reachable?, uri} before each target,
+  and a target reported down is skipped unsent; it is told each attempt's
+  outcome ({:call_result, target, code}).
+- B2BUA: a peer's credentials answer a 401/407 on the outbound leg; the
+  request is sent again once with the digest.
+- trust_asserted_identity/1 records an inbound P-Asserted-Identity as the
+  identity a forward asserts.
+- Digest: a challenge naming SHA-256, the RFC 8760 spelling, is answered.
+
+* Thu Oct 08 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-1
+- Released together with kelixip 1.6.4-1.
+- Several video streams and BUNDLE on a WebRTC leg; a stream the peer stops
+  sending on is paused, not withdrawn.
+- The SIP parser accepts header names in any case, the compact forms and a
+  colon without a space after it.
+- Elixip.Security.report/1: a no-op without a sink, so the tool reports
+  nothing and needs nothing.
+- User-Agent is now Elixipp-1.6.4.
+
 * Tue Oct 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-2
 - Released together with kelixip 1.6.3-2.
 - RFC 4028 session timers in the dialog layer, off by default
@@ -92,15 +133,15 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 * Sat Sep 26 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-6
 - Rebuild, released together with kelixip 1.6.0-6.
 
+* Sat Sep 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.5-2
+- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
+  before the rest of the release landed. No code change.
+
 * Fri Sep 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-1
 - The Finite State Language leaves the tree: it is now the separate package
   finite_state_language (OTP app :fsl, Apache-2.0). Scenarios keep the names they
   use: SIP.Scenario stays the facade a scenario uses.
 - User-Agent is now Elixipp-1.6.0.
-
-* Sat Sep 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.5-2
-- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
-  before the rest of the release landed. No code change.
 
 * Tue Sep 15 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.5-1
 - sip: an INVITE server transaction no longer carries timer F, which ended every

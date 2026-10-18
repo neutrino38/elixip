@@ -379,6 +379,29 @@ defmodule SIP.Test.B2bua.Session do
       assert B2bua.outbound_leg(ctx) == nil
     end
 
+    test "a peer's contact_host is the Contact host of the leg, in-dialog requests included",
+         %{ctx: ctx} do
+      tp_pid = arm_peer!()
+
+      peer = mockup_peer(contact_host: "sbc.example.org")
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+      leg = B2bua.outbound_leg(ctx)
+      dlg = leg.dialogpid
+
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
+      assert {:ok, "<sip:" <> rest} = SIP.Uri.serialize(fwd.contact)
+      assert rest =~ ~r/^([^@]+@)?sbc\.example\.org;transport=udp>$/
+
+      Manual.simulate(tp_pid, 200, 100)
+      assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 5_000
+      ctx = B2bua.drop_pending(ctx, leg.initial_trans)
+
+      _ctx = B2bua.release_legs(ctx)
+
+      assert_receive {:sip_mockup, {:request_sent, :BYE, bye}}, 2_000
+      assert bye.contact.domain == "sbc.example.org"
+    end
+
     # The trap this guards: "the initial transaction is over" is NOT "the call
     # is up". An INVITE answered 486 leaves a dialog with no remote target, and
     # the BYE built for it goes out with an empty Request-URI.

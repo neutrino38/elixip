@@ -247,8 +247,10 @@ remaining time is the operator's question, the instant is what a log line carrie
 `source` — where the REGISTER actually came from, which behind a NAT is **not** what
 the contact URI says, and the usual reason a call to a registered phone never
 arrives — the transport it is reachable over, and the identity the handset sent
-(`instance`, `reg-id`, `methods`, RFC 5626/3840). A field the handset did not send
-gets no line at all in the CLI, and `null` in JSON.
+(`instance`, `reg-id`, `methods`, RFC 5626/3840), and the REGISTER's own
+`user-agent`, `call-id` and `cseq` — the software behind the binding, and the
+registration dialog its refreshes continue (same Call-ID, higher CSeq). A field the
+handset did not send gets no line at all in the CLI, and `null` in JSON.
 
 ```console
 $ kelictl registration list
@@ -268,15 +270,18 @@ $ kelictl registration show example.com alice
 aor:          alice@example.com
 contacts:     2
   1. sip:alice@10.0.0.9:5060
-     expires:   in 4m58s (2026-08-02T12:34:56Z)
-     source:    udp 203.0.113.7:45112
-     transport: udp
-     instance:  <urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>
-     reg-id:    1
+     expires:    in 4m58s (2026-08-02T12:34:56Z)
+     source:     udp 203.0.113.7:45112
+     transport:  udp
+     instance:   <urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>
+     reg-id:     1
+     user-agent: Linphone/6.2.0 (Windows)
+     call-id:    1dae1ac7-0503-1240-45af-60189533c4e1
+     cseq:       118060286
   2. sip:alice@10.0.0.9:5062
-     expires:   in 9m40s (2026-08-02T12:39:38Z)
-     source:    tls 203.0.113.7:51044
-     transport: tls
+     expires:    in 9m40s (2026-08-02T12:39:38Z)
+     source:     tls 203.0.113.7:51044
+     transport:  tls
 
 $ kelictl registration remove example.com alice
 ok
@@ -307,7 +312,10 @@ no such domain
           "transport": "udp",
           "instance": "<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>",
           "reg_id": "1",
-          "methods": null
+          "methods": null,
+          "user_agent": "Linphone/6.2.0 (Windows)",
+          "callid": "1dae1ac7-0503-1240-45af-60189533c4e1",
+          "cseq": 118060286
         }
       ]
     }

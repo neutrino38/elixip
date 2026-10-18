@@ -1,0 +1,14 @@
+# The security incident log kelixip writes when config.toml names it:
+#   [security] log_file = "/var/log/kelixip/security.log"
+# kelixip opens the file for every batch of incidents and closes it again, so a
+# rotation needs no signal and no copytruncate: the next incident lands in the new
+# file. fail2ban follows the rotation on its own.
+/var/log/kelixip/security.log {
+    weekly
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 kelixip kelixip
+}

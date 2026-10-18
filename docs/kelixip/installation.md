@@ -68,7 +68,9 @@ and [§ Building the deb packages](../../BUILD.md#building-the-deb-packages-ubun
 | `/usr/sbin/kelictl` | Admin CLI (a command inside the release) |
 | `/usr/sbin/kelixip` | The release's own control script (`start`, `rpc`, …) |
 | `/usr/share/bash-completion/completions/kelictl` | Shell completion for the CLI ([administration](administration.md#shell-completion)); inert without the `bash-completion` package |
-| `/var/lib/kelixip/`, `/var/log/kelixip/` | Mutable state; logs when stdout is redirected |
+| `/usr/share/kelixip/fail2ban/` | The fail2ban filters (`filter.d/`) and the jail example (`jail.d/`), to link into `/etc/fail2ban` ([running](running.md#fail2ban)) |
+| `/etc/logrotate.d/kelixip` | Weekly rotation of the security log (kept on upgrade) |
+| `/var/lib/kelixip/`, `/var/log/kelixip/` | Mutable state; the security incident log (`[security] log_file`), and logs when stdout is redirected |
 
 `module_dir` is root-owned and **not writable by the service** on purpose: loading
 a `.beam` is executing code.
@@ -185,7 +187,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `node_name` | string | `kelixip@127.0.0.1` | Erlang node name (`kelictl` reaches the node with it) |
 | `script_dir` | string | `/usr/share/kelixip` | Where scenario scripts are resolved from |
 | `module_dir` | string | `/usr/lib/kelixip/modules` | Where module `.beam` files are loaded from |
-| `user_agent` | string | `Kelixip/1.6.0` | `User-Agent` / `Server` header value |
+| `user_agent` | string | `Kelixip/1.6.4` | `User-Agent` / `Server` header value |
 | `max_calls` | int > 0 | *unlimited* | Node-wide concurrent-instance cap; beyond it, new requests get `503` |
 | `max_message_size` | int > 0 | `64000` | Biggest inbound SIP message, in bytes. A memory bound, not a protocol one: keep it well above a WebRTC offer, which weighs about 13 kB. Beyond it a request is answered `513 Message too large`; a response or an ACK, which are never answered, is dropped with a log line. On **TCP and TLS** the bound also applies to what the framing layer accumulates — an announced `Content-Length` past it, or a header block that never ends — and there the connection is **closed** after the answer: refusing means not reading the octets `Content-Length` announced, so no later point in the stream is a message boundary any more. An unusable `Content-Length` is answered `400 Bad request`, then closed the same way |
 
@@ -196,6 +198,13 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `target` | `stdout` \| `syslog` | `stdout` | `syslog` adds an RFC 3164 sink over the local `/dev/log` socket (journald and rsyslog both listen there). It **adds** a sink: stdout stays live, since systemd captures it |
 | `facility` | `kern`, `user`, `daemon`, `local0`…`local7`, … | `local0` | Syslog facility. Validated against the RFC 3164 list; unused while `target = "stdout"` |
 | `level` | `debug` \| `info` \| `warning` \| `error` | `info` | Also changeable at runtime with `kelictl log-level` |
+
+#### `[security]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `log_file` | path | *none* | Where the security incident lines go, one per line, UTC timestamp first — the file the shipped fail2ban filters read ([running.md](running.md#fail2ban)). The same lines always go to the journal as warnings; absent, that copy is all there is. The packaged `config.toml` sets `/var/log/kelixip/security.log`, rotated by `/etc/logrotate.d/kelixip` |
+| `ignore` | list of `auth-failure`, `invalid-domain`, `invalid-packet`, `transport-error`, `api-auth` | `[]` | Incident types dropped on arrival, written nowhere. For a UA whose messages the parser refuses: `["invalid-packet"]` keeps the other jails working |
 
 #### `[[listen]]` — one entry per inbound socket
 
@@ -539,6 +548,8 @@ receives: the inbound side is the `cert` and `key` of a `[[listen]]`.
 |---|---|---|---|
 | `verify` | bool | `false` | Verify the called peer's certificate |
 | `ca` | path | — | Trust this authority only; absent, the public store is used |
+| `cert` | path | — | Client certificate presented when a called peer asks for one (mutual TLS) |
+| `key` | path | — | Private key of `cert` |
 
 Verifying a peer supposes an authority both sides have accepted: that is an
 interconnection agreement, not a socket setting. `verify` is therefore turned on
@@ -553,7 +564,15 @@ the address DNS returned. A target named by a bare address therefore has no name
 to verify: its certificate must carry that address in an `iPAddress` SAN, which
 almost no SIP certificate does.
 
-A `ca` that cannot be read fails the boot. That is deliberate: otherwise every
+`cert` and `key` go together. Without them the node presents no certificate,
+and a peer that demands one closes the connection: Microsoft Teams Direct Routing
+is such a peer. `cert` holds the certificate **followed by its intermediate
+authorities**. The node sends the chain that file contains, and a peer that knows
+only the root refuses a certificate whose intermediate is missing. The certificate
+of a `tls` `[[listen]]` usually fits, since it is the one the same peer checks when
+it calls us.
+
+A `ca`, `cert` or `key` that cannot be read fails the boot. That is deliberate: otherwise every
 outbound call fails at the handshake, with a TLS alert saying nothing about the
 wrong path.
 

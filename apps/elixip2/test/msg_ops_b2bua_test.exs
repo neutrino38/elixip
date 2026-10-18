@@ -421,4 +421,48 @@ defmodule SIP.Test.MsgOpsB2bua do
       end
     end
   end
+
+  describe "SIP.Context.trust_asserted_identity/2" do
+    # The LVP sample carries a PAI of its own.
+    defp without_pai(req) do
+      req
+      |> Enum.reject(fn
+        {k, _} when is_binary(k) -> String.downcase(k) == "p-asserted-identity"
+        _ -> false
+      end)
+      |> Map.new()
+    end
+
+    test "takes the inbound PAI, display name kept" do
+      req =
+        parse!("SIP-INVITE-LVP.txt")
+        |> Map.put("P-Asserted-Identity", "\"Boss\" <sip:boss@example.com>")
+
+      ctx = SIP.Context.trust_asserted_identity(%SIP.Context{}, req)
+
+      assert ctx.asserted_identity.userpart == "boss"
+      assert ctx.asserted_identity.domain == "example.com"
+      assert ctx.asserted_identity.displayname == "Boss"
+    end
+
+    test "the forward then asserts it" do
+      req =
+        parse!("SIP-INVITE-LVP.txt")
+        |> Map.put("P-Asserted-Identity", "<sip:boss@example.com>")
+
+      ctx = SIP.Context.trust_asserted_identity(%SIP.Context{}, req)
+      fwd = forwarded!(req, asserted_identity: ctx.asserted_identity)
+
+      assert Map.get(fwd, "P-Asserted-Identity") == "<sip:boss@example.com>"
+    end
+
+    test "no PAI keeps an identity proved earlier" do
+      ctx =
+        %SIP.Context{}
+        |> SIP.Context.assert_identity(%{user: "alice", realm: "example.com"})
+        |> SIP.Context.trust_asserted_identity(without_pai(parse!("SIP-INVITE-LVP.txt")))
+
+      assert ctx.asserted_identity.userpart == "alice"
+    end
+  end
 end

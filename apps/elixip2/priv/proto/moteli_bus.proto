@@ -138,6 +138,10 @@ message ControlRequest {
     StopDocSharingReq stop_doc_sharing = 72;
     SetDocSharingMosaicReq set_doc_sharing_mosaic = 73;
     UploadImageReq upload_image = 74;
+    CreateVideoStreamReq create_video_stream = 75;
+    DeleteVideoStreamReq delete_video_stream = 76;
+    SetVideoStreamMosaicReq set_video_stream_mosaic = 77;
+    GetVideoStreamSourceReq get_video_stream_source = 78;
 
     // JSR-309 plane (200-299) — point-to-point legs
     MediaSessionCreateReq media_session_create = 200;
@@ -219,6 +223,8 @@ message ControlRequest {
     GetMediaCandidatesReq get_media_candidates = 276;
     ConfigureMediaConnectionReq configure_media_connection = 277;
     ConnectMediaConnectionReq connect_media_connection = 278;
+    EndpointCreateVideoStreamReq endpoint_create_video_stream = 279;
+    EndpointDeleteVideoStreamReq endpoint_delete_video_stream = 280;
   }
 }
 
@@ -252,6 +258,8 @@ message ControlResponse {
     CreatedResp create_player = 58;
     CreatedResp start_broadcaster = 66;
     CreatedResp start_publishing = 68;
+    CreateVideoStreamResp create_video_stream = 75;
+    GetVideoStreamSourceResp get_video_stream_source = 78;
 
     // JSR-309 plane (tags mirror the request's)
     CreatedResp media_session_create = 200;
@@ -269,6 +277,7 @@ message ControlResponse {
     CreatedResp audio_transcoder_create = 265;
     CreatedResp video_transcoder_create = 270;
     StringResp get_media_candidates = 276;
+    EndpointCreateVideoStreamResp endpoint_create_video_stream = 279;
   }
 }
 

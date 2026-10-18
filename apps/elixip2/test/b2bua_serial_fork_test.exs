@@ -305,6 +305,116 @@ defmodule SIP.Test.B2bua.SerialFork do
     end
   end
 
+  describe "trunk_pid reachability" do
+    # The process a peer's `trunk_pid` names: answers `{:reachable?, uri}` from a
+    # set of domains it holds down, changeable while a hunt runs, and hands the
+    # `{:call_result, …}` it is told to `listener`.
+    defmodule Reachability do
+      use GenServer
+
+      def start_link(down, listener \\ nil),
+        do: GenServer.start_link(__MODULE__, {MapSet.new(down), listener})
+
+      def set_down(pid, down), do: GenServer.call(pid, {:set_down, MapSet.new(down)})
+
+      @impl true
+      def init(state), do: {:ok, state}
+
+      @impl true
+      def handle_call({:reachable?, uri}, _from, {down, _} = state),
+        do: {:reply, not MapSet.member?(down, uri.domain), state}
+
+      def handle_call({:set_down, down}, _from, {_old, listener}),
+        do: {:reply, :ok, {down, listener}}
+
+      @impl true
+      def handle_cast({:call_result, _target, _code} = result, {_down, listener} = state) do
+        if listener, do: send(listener, result)
+        {:noreply, state}
+      end
+    end
+
+    test "each attempt's outcome is told to the trunk_pid", %{ctx: ctx} do
+      _a = peer!("rcr1a")
+      _b = peer!("rcr1b")
+      {:ok, trunk} = Reachability.start_link([], self())
+
+      peer = serial_peer(["rcr1a", "rcr1b"], trunk_pid: trunk)
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
+
+      _ctx = relay_final(ctx, 486)
+      assert_receive {:call_result, %SIP.Uri{domain: "rcr1a.example.com"}, 486}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 2_000
+      assert second.ruri.domain == "rcr1b.example.com"
+    end
+
+    test "a target known to be down is skipped without an INVITE", %{ctx: ctx} do
+      _a = peer!("rch1a")
+      _b = peer!("rch1b")
+      {:ok, trunk} = Reachability.start_link(["rch1a.example.com"])
+
+      peer = serial_peer(["rch1a", "rch1b"], trunk_pid: trunk, notify_progress: true)
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+      assert ctx.lasterr == :ok
+
+      assert_receive {:outbound, {:serial_not_reachable, skipped, :down, _at}}, 2_000
+      assert skipped.domain == "rch1a.example.com"
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, first}}, 2_000
+      assert first.ruri.domain == "rch1b.example.com"
+      refute_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 200
+    end
+
+    test "every target down ends the hunt before anything is sent", %{ctx: ctx} do
+      _a = peer!("rch2a")
+      _b = peer!("rch2b")
+      {:ok, trunk} = Reachability.start_link(["rch2a.example.com", "rch2b.example.com"])
+
+      peer = serial_peer(["rch2a", "rch2b"], trunk_pid: trunk, notify_progress: true)
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+
+      assert ctx.lasterr == {:b2bua, :no_reachable_target}
+      assert_receive {:outbound, {:serial_exhausted, _at}}, 2_000
+      refute_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 200
+    end
+
+    test "a server going down mid-hunt is not tried next", %{ctx: ctx} do
+      _a = peer!("rch3a")
+      _b = peer!("rch3b")
+      {:ok, trunk} = Reachability.start_link([])
+
+      peer = serial_peer(["rch3a", "rch3b"], trunk_pid: trunk)
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
+
+      :ok = Reachability.set_down(trunk, ["rch3b.example.com"])
+      ctx = relay_final(ctx, 486)
+
+      # The caller gets the refusal it would have got with no target left.
+      assert_receive {:replied, 486, _reason, _req, _fields}, 2_000
+      refute_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 300
+      refute B2bua.hunting?(ctx)
+    end
+
+    test "a dead trunk_pid does not block the call", %{ctx: ctx} do
+      _a = peer!("rch4a")
+      {:ok, trunk} = Reachability.start_link(["rch4a.example.com"])
+      GenServer.stop(trunk)
+
+      ctx =
+        B2bua.do_create_leg(
+          ctx,
+          inbound_invite(),
+          serial_peer(["rch4a"], trunk_pid: trunk),
+          false
+        )
+
+      assert ctx.lasterr == :ok
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, first}}, 2_000
+      assert first.ruri.domain == "rch4a.example.com"
+    end
+  end
+
   describe "b2bua_cancel_forward/0 (§3.5)" do
     test "stops the search: nothing more is armed however many targets were left",
          %{ctx: ctx} do

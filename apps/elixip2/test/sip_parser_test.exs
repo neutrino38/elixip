@@ -844,4 +844,115 @@ defmodule SIP.Test.Parser do
     refute SIP.Uri.has_tp_info(uri)
     assert SIP.Uri.has_tp_info(%SIP.Uri{uri | destport: 5060})
   end
+
+  # RFC 3261 §7.3: a header name is case-insensitive, has a compact form, and is
+  # followed by HCOLON — whitespace allowed on both sides of the colon, none
+  # required after it. The parser used to refuse all three as a whole message, and
+  # a refused message is now reported as an invalid packet from its sender.
+  describe "header names (RFC 3261 §7.3)" do
+    @long_register "REGISTER sip:example.com SIP/2.0\r\n" <>
+                     "Via: SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bKcompact\r\n" <>
+                     "From: <sip:alice@example.com>;tag=1928301774\r\n" <>
+                     "To: <sip:alice@example.com>\r\n" <>
+                     "Call-ID: compact@example.com\r\n" <>
+                     "CSeq: 1 REGISTER\r\n" <>
+                     "Contact: <sip:alice@192.168.1.1:5060>\r\n" <>
+                     "Supported: path\r\n" <>
+                     "Subject: compact forms\r\n" <>
+                     "Session-Expires: 1800\r\n" <>
+                     "Max-Forwards: 70\r\n" <>
+                     "Content-Length: 0\r\n\r\n"
+
+    @compact_register "REGISTER sip:example.com SIP/2.0\r\n" <>
+                        "v: SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bKcompact\r\n" <>
+                        "f: <sip:alice@example.com>;tag=1928301774\r\n" <>
+                        "t: <sip:alice@example.com>\r\n" <>
+                        "i: compact@example.com\r\n" <>
+                        "CSeq: 1 REGISTER\r\n" <>
+                        "m: <sip:alice@192.168.1.1:5060>\r\n" <>
+                        "k: path\r\n" <>
+                        "s: compact forms\r\n" <>
+                        "x: 1800\r\n" <>
+                        "max-forwards: 70\r\n" <>
+                        "l: 0\r\n\r\n"
+
+    defp parse_lines(lines) do
+      msg =
+        "REGISTER sip:example.com SIP/2.0\r\n" <>
+          "From: <sip:alice@example.com>;tag=1928301774\r\n" <>
+          "To: <sip:alice@example.com>\r\n" <>
+          "Call-ID: hcolon@example.com\r\n" <>
+          "CSeq: 1 REGISTER\r\n" <>
+          Enum.join(lines, "\r\n") <> "\r\nContent-Length: 0\r\n\r\n"
+
+      SIPMsg.parse(msg, fn _c, _m, _l, _li -> nil end)
+    end
+
+    test "a name is matched whatever its case: allow: and Allow: land on one key" do
+      {:ok, lower} =
+        parse_lines(["Via: SIP/2.0/UDP 192.168.1.1;branch=z9hG4bK1", "allow: INVITE"])
+
+      {:ok, upper} =
+        parse_lines(["Via: SIP/2.0/UDP 192.168.1.1;branch=z9hG4bK1", "Allow: INVITE"])
+
+      {:ok, shout} =
+        parse_lines(["VIA: SIP/2.0/UDP 192.168.1.1;branch=z9hG4bK1", "ALLOW: INVITE"])
+
+      assert lower["Allow"] == "INVITE"
+      assert lower == upper
+      assert upper == shout
+      refute Map.has_key?(lower, "allow")
+    end
+
+    test "an irregular spelling is kept as the RFC registers it" do
+      {:ok, msg} =
+        parse_lines(["Via: SIP/2.0/UDP 192.168.1.1;branch=z9hG4bK1", "min-se: 90", "MIN-SE: 90"])
+
+      assert msg["Min-SE"] == ["90", "90"]
+    end
+
+    test "a REGISTER written in compact forms parses to the same map as its long form" do
+      {:ok, long} = SIPMsg.parse(@long_register, fn _c, _m, _l, _li -> nil end)
+      {:ok, compact} = SIPMsg.parse(@compact_register, fn _c, _m, _l, _li -> nil end)
+
+      assert compact == long
+      assert compact.contentlength == 0
+      assert compact.supported == ["path"]
+      assert compact["Subject"] == "compact forms"
+      assert compact["Session-Expires"] == "1800"
+    end
+
+    test "a message parsed from compact forms serialises with the long names" do
+      {:ok, compact} = SIPMsg.parse(@compact_register, fn _c, _m, _l, _li -> nil end)
+      out = SIPMsg.serialize(compact)
+
+      for name <-
+            ~w(Via From To Call-ID Contact Supported Subject Session-Expires Max-Forwards Content-Length) do
+        assert out =~ "\r\n#{name}: ", "#{name} missing from #{out}"
+      end
+
+      refute out =~ ~r/\r\n[a-z]: /
+      assert {:ok, ^compact} = SIPMsg.parse(out, fn _c, _m, _l, _li -> nil end)
+    end
+
+    test "HCOLON: no space after the colon, whitespace before it" do
+      {:ok, no_space} =
+        parse_lines(["Via:SIP/2.0/UDP 192.168.1.1;branch=z9hG4bK1", "Allow:INVITE"])
+
+      {:ok, before} =
+        parse_lines(["Via : SIP/2.0/UDP 192.168.1.1;branch=z9hG4bK1", "Allow\t: INVITE"])
+
+      assert no_space["Allow"] == "INVITE"
+      assert no_space == before
+      assert [via] = no_space.via
+      assert via =~ "SIP/2.0/UDP 192.168.1.1"
+    end
+
+    test "an invalid header name is still refused" do
+      for bad <- ["1Via: SIP/2.0/UDP 192.168.1.1", "Bad Name: x", ": x", "Al/low: INVITE"] do
+        {code, _} = parse_lines(["Via: SIP/2.0/UDP 192.168.1.1;branch=z9hG4bK1", bad])
+        assert code == :invalid_header_name, "#{inspect(bad)} was accepted"
+      end
+    end
+  end
 end

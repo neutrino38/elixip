@@ -86,15 +86,14 @@ defmodule Kelix.Mod.AuthDb do
   @type auth_verdict ::
           {:ok, identity} | {:requireauth, boolean} | {:reject, integer, String.t()}
 
-  # `password_hash` → { spelling advertised in the challenge, token SIP.Auth
-  # computes with }. The stored HA1 was salted with exactly one hash, so THAT is
-  # the algorithm — not whatever the client puts in its Authorization header.
-  # SIP clients spell it the RFC 8760 way (`SHA-256`); `SIP.Auth` wants `SHA256`.
+  # `password_hash` → the algorithm, as advertised in the challenge and computed by
+  # SIP.Auth. The stored HA1 was salted with exactly one hash, so THAT is the
+  # algorithm — not whatever the client puts in its Authorization header.
   #
   # Anything outside this table must be refused *before* reaching
   # `SIP.Auth.algo2atom/1`, which raises — and an exception in a facade kills the
   # scenario instance, leaving the REGISTER unanswered (§8.2).
-  @hash_algorithms %{"md5" => {"MD5", "MD5"}, "sha256" => {"SHA-256", "SHA256"}}
+  @hash_algorithms %{"md5" => "MD5", "sha256" => "SHA-256"}
 
   # Every key a [module.auth_db] block may carry. `module` is the generic
   # module-resolution key handled by Kelix.ModuleSupervisor.
@@ -300,24 +299,12 @@ defmodule Kelix.Mod.AuthDb do
   """
   @spec challenge_algorithm() :: String.t()
   def challenge_algorithm() do
-    {advertised, _compute} = hash_algorithm(cfg())
-    advertised
+    hash_algorithm(cfg())
   end
 
   defp hash_algorithm(cfg) do
     Map.get(@hash_algorithms, Map.get(cfg, :password_hash) || "md5") ||
       Map.fetch!(@hash_algorithms, "md5")
-  end
-
-  # A client's `algorithm` param → the canonical token, tolerating both spellings
-  # and any case. nil when we cannot compute it at all.
-  defp canonical_algorithm(algorithm) do
-    case String.upcase(algorithm) do
-      "MD5" -> "MD5"
-      "SHA-256" -> "SHA256"
-      "SHA256" -> "SHA256"
-      _ -> nil
-    end
   end
 
   # ── facades ──────────────────────────────────────────────────────────────────
@@ -371,7 +358,7 @@ defmodule Kelix.Mod.AuthDb do
   @spec fetch_credential(String.t() | nil, String.t(), keyword) ::
           {:ok, credential} | :notfound | {:error, term}
   def fetch_credential(username, realm, opts \\ []) do
-    {_advertised, algorithm} = hash_algorithm(cfg())
+    algorithm = hash_algorithm(cfg())
 
     case lookup(username, realm, opts) do
       {:ok, ha1} -> {:ok, {:ha1, algorithm, normalize_hex(ha1)}}
@@ -478,7 +465,9 @@ defmodule Kelix.Mod.AuthDb do
           reject(
             req,
             :bad_realm,
-            "credential minted for realm #{inspect(auth["realm"])}, not #{realm}"
+            "credential minted for realm #{inspect(auth["realm"])}, not #{realm}",
+            auth["username"],
+            realm
           )
         end
     end
@@ -507,9 +496,9 @@ defmodule Kelix.Mod.AuthDb do
   end
 
   defp verify(req, domain, auth, opts) do
-    {_advertised, expected_algorithm} = hash_algorithm(cfg())
+    expected_algorithm = hash_algorithm(cfg())
 
-    if canonical_algorithm(algorithm(auth)) == expected_algorithm do
+    if SIP.Auth.canonical_algorithm(algorithm(auth)) == expected_algorithm do
       case SIP.Auth.Nonce.validate(auth["nonce"] || "", domain, nonce_opts(opts)) do
         :invalid -> {:requireauth, false}
         :stale -> {:requireauth, true}
@@ -552,10 +541,10 @@ defmodule Kelix.Mod.AuthDb do
       # fail2ban jail) can treat 5 wrong passwords and 5 unknown users very
       # differently — nobody mistypes a username five times.
       :notfound ->
-        reject(req, :unknown_user, "no subscriber #{inspect(user)}@#{domain}")
+        reject(req, :unknown_user, "no subscriber #{inspect(user)}@#{domain}", user, domain)
 
       false ->
-        reject(req, :bad_password, "digest mismatch for #{inspect(user)}@#{domain}")
+        reject(req, :bad_password, "digest mismatch for #{inspect(user)}@#{domain}", user, domain)
 
       {:error, reason} ->
         Logger.error(module: __MODULE__, message: "credential lookup failed: #{inspect(reason)}")
@@ -616,14 +605,29 @@ defmodule Kelix.Mod.AuthDb do
     end
   end
 
-  # One 403 on the wire, one named cause in the log. The cause is what tells a
-  # misprovisioned phone from a scanner, and it exists nowhere else: until now a
-  # refused REGISTER produced no log line at all.
-  defp reject(req, cause, detail) do
+  # One 403 on the wire, one named cause in the log, one security incident. The
+  # cause is what tells a misprovisioned phone from a scanner, and it exists
+  # nowhere else: until now a refused REGISTER produced no log line at all. The
+  # incident is the same cause with the source the request came from, which is
+  # what a fail2ban jail reads (docs/design/fail2ban-plan.md).
+  defp reject(req, cause, detail, user, realm) do
     Logger.warning(
       module: __MODULE__,
       message: "#{req_method(req)} refused (#{cause}): #{detail}"
     )
+
+    {proto, ip, port} = SIP.Msg.Ops.source_flow(req) || {nil, nil, nil}
+
+    Elixip.Security.report(%Elixip.Security.Incident{
+      type: :auth_failure,
+      src: ip,
+      port: port,
+      proto: proto,
+      method: req_method(req),
+      realm: realm,
+      user: if(is_binary(user), do: user),
+      reason: cause
+    })
 
     {:reject, 403, "Forbidden"}
   end

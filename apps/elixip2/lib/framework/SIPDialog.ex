@@ -438,12 +438,31 @@ defmodule SIP.Dialog do
   has just been ACKed, so the callee's server transaction is still alive (timer I
   on UDP), which is precisely the window §8.2.2.2 covers.
 
-  Without `body:` nothing is re-stamped and a branch is exactly what it was.
+  ## `authorization:` — the same request, authenticated
+
+  `fork_branch(pid, target, authorization: {:proxyauthorization, params})` re-sends
+  the initial request to `target` with that header, after a 401/407 from it. The
+  CSeq moves on (RFC 3261 §22.2: an authenticated resubmission is a new request),
+  but the header goes on **this branch only**: the next target has its own realm
+  and its own nonce, and an answer meant for another one is noise to it.
+
+  Without `body:` or `authorization:` nothing is re-stamped and a branch is
+  exactly what it was.
   """
   @spec fork_branch(pid(), SIP.Uri.t() | [SIP.Uri.t()], keyword()) ::
           {:ok, pid()} | {:ok, [pid()]} | {:error, any()}
   def fork_branch(dialog_pid, target, opts \\ []) when is_pid(dialog_pid) and is_list(opts) do
     GenServer.call(dialog_pid, {:fork_branch, target, opts})
+  end
+
+  @doc """
+  The Request-URI `req` will carry once this dialog sends it in-dialog: the remote
+  target learnt from the far end's Contact, or the request's own before there is
+  one. What a digest answering a challenge to that request is computed over.
+  """
+  @spec in_dialog_ruri(pid(), map()) :: term()
+  def in_dialog_ruri(dialog_pid, req) when is_pid(dialog_pid) and is_req(req) do
+    GenServer.call(dialog_pid, {:in_dialog_ruri, req})
   end
 
   @spec challenge(pid(), map(), 401 | 407, any()) :: any()
@@ -509,6 +528,22 @@ defmodule SIP.Dialog do
   @spec set_remote_aor(pid(), SIP.Uri.t()) :: :ok
   def set_remote_aor(dialog_pid, %SIP.Uri{} = aor) when is_pid(dialog_pid) do
     GenServer.call(dialog_pid, {:set_remote_aor, aor})
+  end
+
+  @doc """
+  Publish `host` in our Contact on this dialog, in place of the bound address and
+  without a port — for a far end that identifies us by name (Teams Direct Routing
+  finds the SBC by the FQDN of the Contact). From then on every 2xx the dialog
+  answers and every request it sends carry it; `nil` goes back to the address.
+
+  The inbound counterpart of `%SIP.B2bua.Peer{contact_host:}`: on a dialog the far
+  end opened, nothing we sent chose the name, so whoever recognised the far end
+  sets it here — before the 2xx, which is what the far end reads it from.
+  """
+  @spec set_contact_host(pid(), String.t() | nil) :: :ok | {:error, :no_initial_request}
+  def set_contact_host(dialog_pid, host)
+      when is_pid(dialog_pid) and (is_binary(host) or is_nil(host)) do
+    GenServer.call(dialog_pid, {:set_contact_host, host})
   end
 
   @doc "The dialog's call state as `SIP.Dialog.Events` pushes it, read on demand."
