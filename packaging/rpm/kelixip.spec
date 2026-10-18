@@ -32,7 +32,7 @@ Version:        1.6.4
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        7%{?dist}
+Release:        8%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,12 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-8
+- sip_servers: with an ext_domain, the keepalive OPTIONS asks for
+  sip:<ext_domain>, sent where the URI resolved, as the REGISTER and the calls
+  are. The REGISTER and the calls to a trunk keep the URI's parameters
+  (;transport=tls) when its host is replaced by ext_domain.
+
 * Sat Oct 17 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-7
 - sip_servers: a dialog the server opened names its domain in our Contact too
   (the 2xx and the in-dialog requests), when the script calls

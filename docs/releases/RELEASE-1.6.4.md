@@ -1,5 +1,27 @@
 # Release 1.6.4
 
+## 1.6.4-8
+
+2026-10-18 — package revision 8 of 1.6.4. Theme: a SIP server's `ext_domain`,
+applied to everything sent to it.
+
+### SIP servers
+
+- **The keepalive OPTIONS** of a `sip-proxy` or `sip-trunk` with an
+  `ext_domain` now asks for `sip:<ext_domain>` (Request-URI and To), sent where
+  the server's URI resolved. It asked for the host of the URI, while the calls
+  and the trunk's REGISTER were already addressed to `ext_domain`.
+- **The URI's parameters are kept** when `ext_domain` replaces its host: the
+  REGISTER and the calls to a trunk lost a `;transport=tls` on the way. The
+  port is still dropped: it is the server's, not the domain's. Where the
+  request is sent does not change.
+
+### Upgrading
+
+- `dnf upgrade 'kelixip*'` replaces 1.6.4-7, then restart the service. Upgrade
+  every installed kelixip package together, as for 1.6.4-5. elixipp 1.6.4-8 is
+  rebuilt alongside.
+
 ## 1.6.4-7
 
 2026-10-17 — package revision 7 of 1.6.4. Theme: the calls Microsoft Teams
