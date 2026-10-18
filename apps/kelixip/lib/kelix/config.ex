@@ -657,12 +657,12 @@ defmodule Kelix.Config do
     end
   end
 
+  defp parse_tls(_), do: {:error, "[tls] must be a table"}
+
   # One without the other would be dropped in silence by the framework, which
   # presents a client certificate only when it has both.
   defp client_cert_pair(cert, key) when is_nil(cert) == is_nil(key), do: :ok
   defp client_cert_pair(_cert, _key), do: {:error, "[tls]: `cert` and `key` go together"}
-
-  defp parse_tls(_), do: {:error, "[tls] must be a table"}
 
   # A CA that cannot be read is a configuration error, not a runtime surprise: the
   # alternative is every outbound TLS leg failing at handshake time with an alert
