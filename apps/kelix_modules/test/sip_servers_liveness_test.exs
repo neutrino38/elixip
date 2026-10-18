@@ -126,6 +126,24 @@ defmodule Kelix.Mod.SipServersLivenessTest do
     assert SIP.Uri.serialize(options.contact) == {:ok, "<sip:example.com;transport=udp>"}
   end
 
+  test "ext_domain: the OPTIONS asks for the domain, sent where the URI resolved" do
+    _tp = peer!("ext1")
+
+    {:ok, _} =
+      SipServers.handle_control("server.create", %{
+        "domain" => @domain,
+        "slug" => "ext1",
+        "type" => "sip-proxy",
+        "primary_uri" => uri("ext1"),
+        "ext_domain" => "partner-ext1.net"
+      })
+
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, options}}, 3_000
+    assert options.ruri.domain == "partner-ext1.net"
+    assert {:ok, %SIP.Uri{domain: "partner-ext1.net"}} = SIP.Uri.parse(options.to)
+    until!(fn -> state_of("ext1", uri("ext1")) == :up end)
+  end
+
   test "a 503 takes it down: the B2BUA is told to skip it, not its backup" do
     _primary = peer!("live2", options_code: 503)
     _backup = peer!("live2b")

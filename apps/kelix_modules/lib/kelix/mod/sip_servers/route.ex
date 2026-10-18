@@ -124,7 +124,7 @@ defmodule Kelix.Mod.SipServers.Route do
       |> put_header(:from, account, host)
 
     if server.ext_domain do
-      case located_targets(uris, user, server.ext_domain, resolved) do
+      case located_targets(server, uris, user, resolved) do
         [] -> {:error, :not_resolved}
         targets -> {newreq, peer(server, targets, :peer, false)}
       end
@@ -135,15 +135,14 @@ defmodule Kelix.Mod.SipServers.Route do
   end
 
   # `sip:<user>@<ext_domain>`, each sent to where one of the trunk's URIs resolved.
-  defp located_targets(uris, user, ext_domain, resolved) do
+  defp located_targets(server, uris, user, resolved) do
     for uri <- uris, {transport, ip, port} <- Map.get(resolved, uri, []) |> Enum.take(1) do
       %SIP.Uri{
-        scheme: parse!(uri).scheme,
-        userpart: user,
-        domain: ext_domain,
-        destip: ip,
-        destport: port,
-        destproto: transport
+        Server.at_ext_domain(server, parse!(uri))
+        | userpart: user,
+          destip: ip,
+          destport: port,
+          destproto: transport
       }
     end
   end

@@ -27,7 +27,7 @@ What the module does for a server:
 
 | When | What happens |
 |---|---|
-| `send_keepalive` is on | an OPTIONS to each URI every `keepalive_interval` seconds; any final answer but `503` marks the URI up, no answer marks it down |
+| `send_keepalive` is on | an OPTIONS to each URI every `keepalive_interval` seconds (asking for `sip:<ext_domain>` when it is set, sent where the URI resolved); any final answer but `503` marks the URI up, no answer marks it down |
 | a request from the server reaches a script that calls `matches_server/2` | the server is marked up |
 | a call is forwarded to the server | a URI known to be down is skipped without sending anything |
 | the trunk's operator challenges a request (INVITE, re-INVITE, UPDATE, BYE, MESSAGE) | it is sent again once with the trunk's credentials |
@@ -151,7 +151,7 @@ value clears an optional one (`backup_uri=` drops the backup).
 | `send_keepalive` | all | `true` | Send the OPTIONS liveness probe |
 | `initiate_connection` | all | `true` | Over TCP or TLS, the node opens the connection |
 | `ha_mode` | all | `failover` | `failover`: primary first. `loadsharing`: each call starts on the next URI |
-| `ext_domain` | proxy, trunk | — | The remote domain. For a trunk, the host of the Request-URI, To, From and REGISTER |
+| `ext_domain` | proxy, trunk | — | The remote domain. For a trunk, the host of the Request-URI, To, From and REGISTER; for both, the host the keepalive OPTIONS asks for. The URI's parameters are kept, its port is not |
 | `ext_domain_aliases` | proxy | `[]` | Other names of the proxy's domain, comma-separated |
 | `probe_remote_aors` | proxy | `false` | Probe the remote AORs and report them to presence |
 | `probe_interval` | proxy | `60` | Seconds to probe every remote AOR once |

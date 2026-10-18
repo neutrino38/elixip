@@ -132,6 +132,19 @@ defmodule Kelix.Mod.SipServersRegistrationTest do
     until!(fn -> registration("reg1") == %{state: "registered", error: nil} end)
   end
 
+  test "ext_domain: the REGISTER names the domain, sent where the URI resolved" do
+    tp = registrar!("reg6")
+    :ok = trunk("reg6", %{"ext_domain" => "operator.net"})
+
+    req = next_register!()
+    assert {req.ruri.userpart, req.ruri.domain} == {nil, "operator.net"}
+    assert parsed(req.from).domain == "operator.net"
+    assert parsed(req.to).domain == "operator.net"
+
+    :ok = Manual.simulate(tp, 200, 0)
+    until!(fn -> registration("reg6").state == "registered" end)
+  end
+
   test "deleting a registered trunk un-registers it" do
     tp = registrar!("reg2")
     :ok = trunk("reg2", %{})

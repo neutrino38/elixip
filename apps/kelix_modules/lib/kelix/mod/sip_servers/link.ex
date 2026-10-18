@@ -569,11 +569,9 @@ defmodule Kelix.Mod.SipServers.Link do
     uri = Enum.at(Server.uris(server), reg.target) || server.primary_uri
     {:ok, parsed} = SIP.Uri.parse(uri)
 
-    case server.ext_domain do
-      nil -> stamp_resolved(state, uri, %SIP.Uri{parsed | userpart: nil})
-      ext -> stamp_resolved(state, uri, %SIP.Uri{scheme: parsed.scheme, domain: ext})
-    end
-    |> case do
+    target = Server.at_ext_domain(server, %SIP.Uri{parsed | userpart: nil})
+
+    case stamp_resolved(state, uri, target) do
       nil -> nil
       ruri -> register_msg(server, parsed, ruri, reg, expires, auth)
     end
@@ -613,9 +611,11 @@ defmodule Kelix.Mod.SipServers.Link do
 
   # ── probing ─────────────────────────────────────────────────────────────────
 
+  # With an `ext_domain`, the OPTIONS asks for that domain and is sent where `uri`
+  # resolved, as a REGISTER and a call are.
   defp probe(state, uri) do
-    {:ok, target} = SIP.Uri.parse(uri)
-    target = %SIP.Uri{target | userpart: nil}
+    {:ok, parsed} = SIP.Uri.parse(uri)
+    target = Server.at_ext_domain(state.server, %SIP.Uri{parsed | userpart: nil})
 
     case stamp_resolved(state, uri, target) do
       # not resolved yet: probed when it is

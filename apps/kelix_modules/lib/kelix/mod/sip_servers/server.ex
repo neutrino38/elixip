@@ -136,6 +136,20 @@ defmodule Kelix.Mod.SipServers.Server do
   def contact_host(%__MODULE__{}), do: nil
 
   @doc """
+  `uri`, one of the server's, as the remote side must read it: with an
+  `ext_domain`, that domain replaces its host and its port goes (the port is the
+  server's, not the domain's); its URI parameters stay. Unchanged without one.
+
+  What a REGISTER, a keepalive OPTIONS and a call to a trunk ask for — each then
+  sent where `uri` resolved, since the DNS would route the domain elsewhere.
+  """
+  @spec at_ext_domain(t(), %SIP.Uri{}) :: %SIP.Uri{}
+  def at_ext_domain(%__MODULE__{ext_domain: nil}, %SIP.Uri{} = uri), do: uri
+
+  def at_ext_domain(%__MODULE__{ext_domain: ext}, %SIP.Uri{} = uri),
+    do: %SIP.Uri{uri | domain: ext, port: nil}
+
+  @doc """
   Whether a request from `ip` over `transport` falls in one of the server's
   `source_networks`. The transport must be one its URIs name: a network widens
   the addresses a server may come from, not what it speaks.

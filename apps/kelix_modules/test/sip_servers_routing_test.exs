@@ -308,6 +308,24 @@ defmodule Kelix.Mod.SipServersRoutingTest do
       assert newreq.from.domain == "operator.net"
     end
 
+    test "a trunk with ext_domain keeps its URI parameters, not its port" do
+      :ok =
+        trunk("op", %{
+          "primary_uri" => "sip:0123456789@sbc1.operator.net:5080;transport=tcp",
+          "ext_domain" => "operator.net"
+        })
+
+      resolved!("op")
+      req = request(uri("+33970260233", @domain))
+      assert {_newreq, %Peer{uris: [target]}} = SipServers.forward(@domain, req, "op")
+
+      assert {target.userpart, target.domain, target.port} ==
+               {"+33970260233", "operator.net", nil}
+
+      assert SIP.Uri.get_transport(target) == "TCP"
+      assert {target.destip, target.destport} == {{192, 0, 2, 10}, 5080}
+    end
+
     test "the three URIs are tried in order: primary, backup, tertiary" do
       :ok =
         app("acd", "sip:10.0.0.5", %{
