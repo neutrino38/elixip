@@ -492,7 +492,7 @@ defmodule Kelix.ConfigTest do
   test "defaults when sections are absent" do
     assert {:ok, cfg} = Config.parse("")
     assert cfg.node_name == "kelixip@127.0.0.1"
-    assert cfg.user_agent == "Kelixip/1.6.4"
+    assert cfg.user_agent == "Kelixip/1.7.1"
     assert cfg.log.target == "stdout"
     assert cfg.listen == []
   end

@@ -415,7 +415,7 @@ defmodule Kelix.PresenceScriptTest do
 
     # RFC 4235 through the same script: the package is the block's, injected by
     # the router as the domain is. An idle subscriber is an EMPTY document, not
-    # noresource (dialog-state-plan.md, decision 7): the BLF key shows "no call".
+    # noresource (DESIGN-PRESENCE.md, "Call occupancy"): the BLF key shows "no call".
     test "Event: dialog for a subscriber is 200 + an empty dialog-info", %{subscribe: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       req = subscribe(event: "dialog")
@@ -498,7 +498,7 @@ defmodule Kelix.PresenceScriptTest do
     end
   end
 
-  # Decision 2 of mcu-presence-plan.md: a watcher waiting on an explicitly closed
+  # DESIGN-PRESENCE.md, "Reported states": a watcher waiting on an explicitly closed
   # state for a resource that has none waits for nothing.
   describe "presence-subscribe.exs on a domain with no registrar" do
     test "a subscriber with no state is answered noresource", %{subscribe: m} do
@@ -723,7 +723,7 @@ defmodule Kelix.PresenceScriptTest do
     end
   end
 
-  # mcu-presence-plan.md, MP4: a conference room is a presentity. The MCU, the
+  # DESIGN-PRESENCE.md, "Reported states": a conference room is a presentity. The MCU, the
   # link module and the presence collection all run; the watcher is the reference
   # notifier script, alone on the room's DID and through a buddy list.
   describe "a conference room as a presentity" do

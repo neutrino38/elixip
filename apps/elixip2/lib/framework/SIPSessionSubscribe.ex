@@ -1,6 +1,6 @@
 # The subscription layer (RFC 6665): one subscription, seen from the dialog that
 # carries it. See docs/design/DESIGN-PRESENCE.md, "The subscription layer
-# (framework)", and docs/design/presence-basic-plan.md, phase P3.
+# (framework)".
 #
 # Three modules, in the order they are read:
 #

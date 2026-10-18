@@ -133,10 +133,21 @@ written.
 - `--log-file` / `--log-level` — the file log, separate from the console.
 - `--log-sequence` — one PlantUML sequence diagram per instance, rendered from
   the per-process journal at teardown, with every SIP message the instance's
-  dialogs exchanged drawn as it went on the wire ([DESIGN-FSL.md](DESIGN-FSL.md)
-  §7).
+  dialogs exchanged drawn as it went on the wire
+  ([DESIGN-FSL.md](DESIGN-FSL.md#39-journal_started1-and-journal_collect0--the-sip-trace)).
   Rejected together with `--limit > 1`: N interleaved diagrams answer no
-  question, and the option is meant for the single call being debugged.
+  question, and the option is meant for the single call being debugged. The file
+  is written in the working directory.
+
+What a diagram cannot show: a message that crosses no transaction bound to the
+instance — a stateless reply of the dialog layer (a 481 to a request no dialog
+matches), an out-of-dialog OPTIONS — and the peer address of a UAS instance's
+initial request, whose lane takes its label from the next message.
+
+Not built: one diagram per instance under `--limit > 1` (a file per Call-ID, or
+one per campaign), a `--log-sequence-dir` option, and tracing the two kinds of
+message above. Still untried in real traffic: a REGISTER, a B2BUA, and
+`kelictl debug <id> on` on a node.
 
 A bind failure names the posix reason in plain words rather than an atom
 (`eaddrinuse`, `eacces`, `eaddrnotavail`, `enoent`), because a tool that cannot

@@ -6,8 +6,8 @@ defmodule SIP.Test.PublishCollection do
   lifecycle, and the document per resource.
 
   It is here rather than inside the suite because it is the half the framework
-  deliberately does **not** hold (docs/design/presence-basic-plan.md, decision
-  5): one PUBLISH is one transaction, its scenario instance is gone before the
+  deliberately does **not** hold (docs/design/DESIGN-PRESENCE.md, "The verbs
+  and the readings"): one PUBLISH is one transaction, its scenario instance is gone before the
   refresh arrives, and the state therefore lives in a process of the
   application's. A stub that lived inside the instance would prove the opposite
   of what the suite is asserting.

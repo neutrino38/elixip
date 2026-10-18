@@ -1,7 +1,7 @@
 defmodule Kelix.DialogStateEndToEndTest do
   @moduledoc """
-  The call occupancy of two users, end to end (docs/design/dialog-state-plan.md,
-  DS6): a real INVITE from Alice, routed by the kelixip router to the reference
+  The call occupancy of two users, end to end (docs/design/DESIGN-PRESENCE.md, "Call occupancy"):
+  a real INVITE from Alice, routed by the kelixip router to the reference
   `direct-call-with-auth.exs`, authenticated, relayed to Bob's registered
   contact — two real dialogs, each stamped by the module that proves its far
   end — and what `Kelix.Mod.DialogState` makes of them in presence.

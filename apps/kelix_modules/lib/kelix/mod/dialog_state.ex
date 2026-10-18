@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.DialogState do
   @moduledoc """
-  The call occupancy of the served AORs (`docs/design/dialog-state-plan.md`): the
+  The call occupancy of the served AORs (`docs/design/DESIGN-PRESENCE.md`, "Call occupancy"): the
   link between the dialogs that cross this node and `Kelix.Mod.Presence`, which
   is what a BLF key, a presence watcher and the ACD read it through.
 

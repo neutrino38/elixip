@@ -4,7 +4,7 @@ defmodule SIP.Test.PublishLayer do
   document is a line of text — no PIDF, no XML parser, no `presence` package.
 
   Same claim as the subscription suite makes for RFC 6665
-  (docs/design/presence-basic-plan.md, P5): the layer reads a PUBLISH, refuses
+  (docs/design/DESIGN-PRESENCE.md, "The verbs and the readings"): the layer reads a PUBLISH, refuses
   what it cannot serve and answers what it can, knowing nothing about the
   document it carries.
   """

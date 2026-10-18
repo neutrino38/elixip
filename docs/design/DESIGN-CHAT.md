@@ -327,17 +327,10 @@ an identity rewrite, not a dialog with legs. What the term should name is open.
 
 ## Media
 
-Configure a media directory for photo and video, plus a thumbnail. Send the URL
-inside a MESSAGE? Take inspiration from RCS?
-
-Media expiry; download by the client?
-
-Open, and not only as a format question: a download URL that is enough to know is
-a URL that leaks. Whether the link is authenticated, and against which identity,
-is part of this choice. The session-mode alternative is MSRP (RFC 4975), which
-carries the content in-band instead.
-
-And what about RCS, while we are at it?
+Settled in [DESIGN-CHAT-MEDIA.md](DESIGN-CHAT-MEDIA.md): the content travels
+by URL in the GSMA RCS `fthttp` format, the way Linphone does it, through a
+file store of its own behind Apache. The MESSAGE carries a small XML; the relay
+and the Silo transport it verbatim. MSRP is not pursued.
 
 ## Bot
 
@@ -352,7 +345,7 @@ are in [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md#references).
 |---|---|---|
 | [3428](https://www.rfc-editor.org/rfc/rfc3428) | SIP Extension for Instant Messaging | The MESSAGE method: objective 1 |
 | [5438](https://www.rfc-editor.org/rfc/rfc5438) | Instant Message Disposition Notification (IMDN) | Delivery and read receipts — what a modern client expects, and what the Silo must honour when it delivers a stored message late |
-| [4975](https://www.rfc-editor.org/rfc/rfc4975) | MSRP | The session-mode alternative for large content. The "media by URL" idea above is the other branch; both are open |
+| [4975](https://www.rfc-editor.org/rfc/rfc4975) | MSRP | The session-mode alternative for large content, not pursued: [DESIGN-CHAT-MEDIA.md](DESIGN-CHAT-MEDIA.md) chose the URL |
 | [5365](https://www.rfc-editor.org/rfc/rfc5365) | Multiple-Recipient MESSAGE Requests | One route to chatroom fan-out |
 | [4103](https://www.rfc-editor.org/rfc/rfc4103) | RTP Payload for Text Conversation (T.140) | Already carried by the MCU; the real-time-text neighbour of instant messaging |
 | [3261](https://www.rfc-editor.org/rfc/rfc3261) | SIP | §20.19 `Expires` on a non-INVITE request — the retention a sender may ask for |

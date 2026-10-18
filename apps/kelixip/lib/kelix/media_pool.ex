@@ -385,7 +385,7 @@ defmodule Kelix.MediaPool do
   # The addressing profiles come back with it, so the pool re-reads them every
   # cycle: a media server restarted with other addresses (a new `--internal-ip`, an
   # added v6) describes itself, and nothing on this side has to be told
-  # (docs/design/multi-interface.md, step 5).
+  # (docs/design/DESIGN-KELIXIP.md, "Media pool").
   defp default_probe(%{module: module, url: url}) do
     mod = resolve_module_atom(module)
 

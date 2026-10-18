@@ -1,6 +1,6 @@
 defmodule SIP.Test.TLSOutboundVerify do
   @moduledoc """
-  Step 7 of `docs/design/multi-interface.md`: the outbound TLS/WSS leg checks the
+  `docs/design/DESIGN-SIPSTACK.md`, "Addressing": the outbound TLS/WSS leg checks the
   certificate it is offered.
 
   Not `async`: the two keys under test are node-wide application env.

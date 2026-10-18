@@ -5,8 +5,7 @@ kelixip performs — which realm, which identity, which code, which requests. Wh
 is still open is marked **OPEN** in place.
 
 Making the backend replaceable — MariaDB today, LDAP / HTTP / Diameter tomorrow —
-is a separate thread, still unbuilt:
-[evolution-auth-db.md](evolution-auth-db.md).
+is not built: [kelixip_roadmap.md](kelixip_roadmap.md#a-replaceable-authentication-backend).
 
 Reference: [`Kelix.Mod.AuthDb`](../kelixip/modules/auth_db.md) is the module that
 holds the verdict, `Kelix.Auth` the challenge params, `SIP.Auth` the digest and
@@ -143,7 +142,7 @@ the code decides which header carries them.
 | SUBSCRIBE / REFER out of dialog | yes | dialog-creating, same treatment as INVITE. A SUBSCRIBE refresh is challenged too: it is a request of its own, and a subscription authenticated once would otherwise be extended for hours by whoever knows its Call-ID |
 | PUBLISH | yes | 401, like a SUBSCRIBE. It is not dialog-creating, and it is the request that says a user is online or off: unauthenticated, a stranger declares someone's state |
 | MESSAGE | **OPEN** | answered 405 until `[[domain.chat]]` lands ([DESIGN-CHAT.md](DESIGN-CHAT.md)); the decision belongs with that function |
-| OPTIONS | yes, when a script serves it | a probe relayed to a registered UA names its sender. The liveness ping is protected by the routing, not by its method: it reaches the `keepalive` rule or the node itself (`Kelix.Options`), never a script that authenticates ([options-plan.md](options-plan.md)) |
+| OPTIONS | yes, when a script serves it | a probe relayed to a registered UA names its sender. The liveness ping is protected by the routing, not by its method: it reaches the `keepalive` rule or the node itself (`Kelix.Options`), never a script that authenticates ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md#4-dispatch)) |
 
 So the rule is not "creates a dialog" but **"is an initial request other than ACK
 and CANCEL"**. The code that applies it is method-agnostic accordingly:

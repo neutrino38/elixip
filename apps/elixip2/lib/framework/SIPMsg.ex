@@ -367,6 +367,15 @@ defmodule SIPMsg do
     {:ok, value}
   end
 
+  @doc """
+  Read one digest challenge — the value of a `WWW-Authenticate` header, SIP's or
+  HTTP's, the grammar being the same (RFC 3261 §25.1, RFC 7616) — into the
+  string-keyed map an `Authorization` is computed from, `:authproc` included.
+  """
+  @spec parse_challenge(binary()) :: {:ok, map()} | {atom(), binary()}
+  def parse_challenge(value) when is_binary(value),
+    do: parse_header_content(:wwwauthenticate, String.trim(value))
+
   defp auth_param_value(header, key, value) do
     cond do
       key in @unquoted_auth_params -> value
@@ -735,18 +744,34 @@ defmodule SIPMsg do
     |> Map.new()
   end
 
-  # Parse RFC 2046 mime, multipart sub body and put it in a map
+  # Parse one RFC 2046 body part — what lies between two delimiters, the line
+  # break that ends the delimiter line already taken off — into a map.
+  #
+  # The data is kept exactly: not trimmed. A part's content may end in a space
+  # or a line break of its own (a caption, an XML document ending in CRLF), and
+  # it is the sender's; the line break the next delimiter starts with was never
+  # part of it (parse_multi_part_body/2).
   defp parse_sub_body(subbody) do
     [headers, data] =
-      case String.split(String.trim(subbody), "\r\n\r\n", parts: 2) do
-        [h, d] ->
-          [h, d]
+      case skip_blank_lines_before_headers(subbody) do
+        # No MIME header at all: the part starts with the blank line.
+        "\r\n" <> data ->
+          ["", data]
 
-        [_one] ->
-          raise "mixed/multipart: Invalid body part. Missing empty line between MIME headers and data"
+        "\n" <> data ->
+          ["", data]
+
+        part ->
+          case String.split(part, ~r/\r?\n\r?\n/, parts: 2) do
+            [h, d] ->
+              [h, d]
+
+            [_one] ->
+              raise "mixed/multipart: Invalid body part. Missing empty line between MIME headers and data"
+          end
       end
 
-    hlist = String.split(headers, "\r\n")
+    hlist = if headers == "", do: [], else: String.split(headers, ~r/\r?\n/)
 
     # Parse headers of subbody
     {code, _rest, dstmap} =
@@ -772,27 +797,35 @@ defmodule SIPMsg do
   # Every multipart subtype, not `mixed` alone: a list NOTIFY (RFC 4662) is
   # `multipart/related`, and its parameters come in whatever order the sender
   # wrote them — `type=` and `start=` sit beside `boundary=`.
+  #
+  # RFC 2046 §5.1.1: a delimiter is a line break, then `--boundary`, then
+  # optional transport padding and a line break. The line break BEFORE the
+  # dashes belongs to the delimiter, not to the part it ends — so the body is
+  # split on it, and nothing has to be trimmed afterwards. Splitting on the
+  # dashes alone left that line break on the data, and the trim that removed it
+  # took the sender's own trailing whitespace too. A bare LF is accepted where
+  # CRLF is due: some stacks write one.
   def parse_multi_part_body(ctype, body) do
     case multipart_boundary(ctype) do
       boundary when is_binary(boundary) ->
-        # We do have a multipart body
-        # Spilt into the parts according to the boundaries
-        bodies = String.split(body, "--" <> boundary)
-        # prologue, bodies, last boundary
-        if Kernel.length(bodies) < 3 do
-          raise "Invalid MIME multipart SIP message body. Missing boundaries."
-        else
-          # Remove everything before the first boundary
-          bodies = List.delete_at(bodies, 0)
+        # The first delimiter may open the body, with no line break before it.
+        delimiter = ~r/\r?\n--#{Regex.escape(boundary)}/
+        chunks = Regex.split(delimiter, "\r\n" <> body)
 
-          # Remove last boundary
-          bodies = List.delete_at(bodies, -1)
+        # prologue, parts, close delimiter (and epilogue)
+        case chunks do
+          [_preamble | rest] when length(rest) >= 2 ->
+            rest
+            |> Enum.take_while(&(not String.starts_with?(&1, "--")))
+            |> Enum.map(fn chunk ->
+              chunk
+              |> drop_delimiter_line_end()
+              |> parse_sub_body()
+              |> Map.put(:boundary, boundary)
+            end)
 
-          # Parse all sub bodies and return them as a list of maps
-          Enum.map(
-            bodies,
-            fn v -> Map.put(parse_sub_body(v), :boundary, boundary) end
-          )
+          _ ->
+            raise "Invalid MIME multipart SIP message body. Missing boundaries."
         end
 
       _ ->
@@ -800,6 +833,23 @@ defmodule SIPMsg do
         [%{contenttype: ctype, data: body}]
     end
   end
+
+  # Blank lines between a delimiter and the part's MIME headers. Not RFC 2046 —
+  # there, a blank line right after the delimiter means "no headers" — but the
+  # examples of RFC 6442 (location conveyance) are printed that way and were
+  # copied by implementations. Skipped only when a `Content-*` field follows, the
+  # only header fields a body part carries (RFC 2045 §9): a part with no header
+  # whose text happens to begin like one is the price, and an improbable one.
+  defp skip_blank_lines_before_headers(part) do
+    case Regex.run(~r/\A(?:\r?\n)+(?=content-[a-z0-9-]*:)/i, part) do
+      [blank] -> binary_part(part, byte_size(blank), byte_size(part) - byte_size(blank))
+      nil -> part
+    end
+  end
+
+  # What follows `--boundary` on its line: transport padding, then the line break.
+  defp drop_delimiter_line_end(chunk),
+    do: Regex.replace(~r/\A[ \t]*\r?\n/, chunk, "", global: false)
 
   @doc false
   # The boundary of a multipart Content-Type, or nil when the type is not one.
@@ -1200,7 +1250,9 @@ defmodule SIPMsg do
       :decoded_from,
       # what our Contact publishes in place of the bound address, on a response
       # (SIP.Transport.add_contact_header/3): routing, not a header
-      :contact_host
+      :contact_host,
+      # SIP.Msg.BodyCoding.send_in_clear/1: a mark for the sender, not a header
+      :send_in_clear
     ]
 
     remaining_headers =
@@ -1219,34 +1271,31 @@ defmodule SIPMsg do
       serialize_headers(sipmsg, header_order2, false)
   end
 
-  defp serialize_body([]) do
-    "\r\n"
-  end
+  defp serialize_body(body), do: "\r\n" <> body_octets(body)
 
-  defp serialize_body(body) when is_binary(body) do
-    "\r\n" <> body
-  end
+  @doc """
+  The body of a message as it goes on the wire: everything `Content-Length`
+  counts, before any `Content-Encoding` is applied.
 
-  # A single part that carries a boundary is a MULTIPART of one, not a bare body:
-  # its Content-Type announces the boundary, and Content-Length was computed over
-  # the delimiters (SIP.Msg.Ops.update_sip_msg/2). Writing the payload alone here
-  # announced a length nobody could match and a boundary that was nowhere in the
-  # message. A list NOTIFY naming one buddy with no published state is exactly
-  # that message.
-  defp serialize_body([%{boundary: _} = body]) do
-    "\r\n" <> multipart_body([body])
-  end
+  `SIP.Msg.Ops.body_string/1` is the body *to read*, and of a multipart it
+  answers the first part; this is the body *to carry*. Whoever keeps a message
+  to send it again later — the Silo — keeps these octets, under the message's
+  own Content-Type, and the boundary that type names is the one they use.
 
-  defp serialize_body([body]) do
-    "\r\n" <> body.data
-  end
-
-  # Serialize a list of two or more sub bodies as a multipart/mixed body. The
-  # leading CRLF is the blank line separating the SIP headers from the body;
-  # multipart_body/1 returns the octets counted by Content-Length.
-  defp serialize_body(bodies) when is_list(bodies) do
-    "\r\n" <> multipart_body(bodies)
-  end
+  A single part that carries a boundary is a **multipart of one**, not a bare
+  body: its Content-Type announces the boundary, and Content-Length was
+  computed over the delimiters (`SIP.Msg.Ops.update_sip_msg/2`). Writing the
+  payload alone announced a length nobody could match and a boundary that was
+  nowhere in the message — a list NOTIFY naming one buddy with no published
+  state is exactly that message. No body at all is `""`.
+  """
+  @spec body_octets(binary() | [map()] | nil) :: binary()
+  def body_octets(body) when is_binary(body), do: body
+  def body_octets([]), do: ""
+  def body_octets([%{boundary: _} = part]), do: multipart_body([part])
+  def body_octets([%{data: data}]) when is_binary(data), do: data
+  def body_octets(parts) when is_list(parts), do: multipart_body(parts)
+  def body_octets(_none), do: ""
 
   @doc false
   # Build the octets of a multipart/mixed body (RFC 2046) from a list of sub-body
@@ -1428,11 +1477,6 @@ defmodule SIPMsg do
 
   defp placeholder(type, octets),
     do: "<content not recorded: #{type || "no type"}, #{octets} octets>"
-
-  defp body_octets(body) when is_binary(body), do: body
-  defp body_octets([%{data: data}]) when is_binary(data), do: data
-  defp body_octets(parts) when is_list(parts), do: multipart_body(parts)
-  defp body_octets(_none), do: ""
 
   defp safe_serialize(msg) do
     serialize(msg)

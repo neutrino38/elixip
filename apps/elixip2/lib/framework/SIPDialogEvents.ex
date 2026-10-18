@@ -4,7 +4,7 @@ defmodule SIP.Dialog.Events do
 
   A dialog talks to one process: the application it was created for. Nothing
   else can learn that a call rang, was answered or ended — and the modules that
-  want to (call occupancy of an AOR, `docs/design/dialog-state-plan.md`) are not
+  want to (call occupancy of an AOR, `docs/design/DESIGN-PRESENCE.md`, "Call occupancy") are not
   the application and must not become it.
 
   So a dialog **stamped** with a `remote_aor` — the AOR of a served domain its

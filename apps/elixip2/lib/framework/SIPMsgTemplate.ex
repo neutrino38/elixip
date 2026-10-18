@@ -94,8 +94,8 @@ defmodule SIP.MsgTemplate do
     |> put_page_body(page_body(source), Map.get(source, :contenttype))
   end
 
-  # A multipart body is carried whole (its Content-Type and boundary are
-  # recomputed from the parts); anything else as the string it is.
+  # A multipart body is carried whole, as its parsed parts under the sender's
+  # Content-Type and boundary; anything else as the string it is.
   defp page_body(source) do
     case Map.get(source, :body) do
       [_first, _second | _] = parts -> parts
@@ -157,8 +157,14 @@ defmodule SIP.MsgTemplate do
   defp put_page_body(req, nil, _content_type), do: req
   defp put_page_body(req, "", _content_type), do: req
 
-  defp put_page_body(req, parts, _content_type) when is_list(parts),
-    do: SIP.Msg.Ops.update_sip_msg(req, {:body, parts})
+  # The parsed parts keep their boundary, and the sender's Content-Type names it:
+  # stamped first, `update_sip_msg/2` keeps it rather than recomposing a
+  # `multipart/mixed` that would rename a `related` and re-spell the type.
+  defp put_page_body(req, parts, content_type) when is_list(parts) do
+    req
+    |> then(&if(content_type, do: Map.put(&1, :contenttype, content_type), else: &1))
+    |> SIP.Msg.Ops.update_sip_msg({:body, parts})
+  end
 
   defp put_page_body(req, body, content_type) do
     req

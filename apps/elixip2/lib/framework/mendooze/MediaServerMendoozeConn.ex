@@ -2636,7 +2636,7 @@ defmodule MediaServer.Mendooze.Conn do
   # **The node's configured family decides nothing.** It describes every interface
   # at once, and on a B2BUA bridging two of them it is right for one leg and wrong
   # for the other — a session carrying two different profiles is the objective of
-  # docs/design/multi-interface.md, not an edge case. Three parties decide, each
+  # docs/design/DESIGN-FRAMEWORK.md, "Network profiles", not an edge case. Three parties decide, each
   # asked only what it alone knows:
   #
   #  * **the peer's offer**, when there is one, says which families it can receive

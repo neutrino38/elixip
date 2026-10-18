@@ -2,7 +2,7 @@ Code.require_file("support/jsr309_fake_server.exs", __DIR__)
 
 defmodule Mendooze.NetworkProfileTest do
   @moduledoc """
-  Step 5 of `docs/design/multi-interface.md`: which of the media server's
+  `docs/design/DESIGN-FRAMEWORK.md`, "Network profiles": which of the media server's
   addresses a leg's media is placed on.
 
   The profile is never configured on this side — it is the intersection of what

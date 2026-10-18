@@ -73,6 +73,7 @@ defmodule SIP.Scenario do
       use SIP.Session.Notifier
       use SIP.Session.Publish
       use SIP.Session.Page
+      use SIP.Session.FileTransfer
 
       use FSL.Machine,
         host: SIP.FSL.Host,

@@ -40,7 +40,7 @@ defmodule Kelix.DirectCallScriptTest do
       {:reply, {:ok, self()}, test}
     end
 
-    # The stamp of dialog-state-plan.md DS3 — which this script never earns.
+    # The stamp (DESIGN-PRESENCE.md, "Call occupancy") — which this script never earns.
     def handle_call({:set_remote_aor, aor}, _from, test) do
       send(test, {:stamped, aor})
       {:reply, :ok, test}
@@ -220,7 +220,7 @@ defmodule Kelix.DirectCallScriptTest do
     assert_receive {:replied, 100, "Trying", _f, _r}, 5_000
     assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
-    # Only what is PROVEN is stamped (dialog-state-plan.md §1). Nobody
+    # Only what is PROVEN is stamped (DESIGN-PRESENCE.md, "Call occupancy"). Nobody
     # authenticated Alice, so her leg carries no AOR; Bob's leg does, because the
     # registrar built the peer from his bindings.
     refute_received {:stamped, _}

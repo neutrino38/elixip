@@ -219,7 +219,7 @@ defmodule SIP.EventPackage do
 
   This is **not** what goes into `Allow-Events`: that header states what a *domain*
   enables, and two domains on one node may offer different packages
-  (docs/design/presence-basic-plan.md, decision 3).
+  (docs/design/DESIGN-PRESENCE.md, "Who registers a package").
   """
   @spec names() :: [binary()]
   def names, do: table() |> Map.keys() |> Enum.sort()

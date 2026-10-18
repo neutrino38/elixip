@@ -4,7 +4,7 @@ defmodule SIP.Test.PresenceDoc do
   @moduledoc """
   `SIP.Presence.Doc.compose/2`: the documents of a presentity's live
   publications, one per device, under the person state the collection holds
-  (docs/design/presence-composite-plan.md, PC2).
+  (docs/design/DESIGN-PRESENCE.md, "The composite state").
 
   Pure: no collection, no expiry, no decision about which publication sets the
   person — only what the composite document says given those.

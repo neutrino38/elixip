@@ -475,9 +475,14 @@ defmodule SIP.Session.Page.Relay do
       {:DOWN, ^ref, :process, _pid, _reason} -> exit(:normal)
     end
 
+    send_on(owner, ref, req, report, timeout, debug)
+  end
+
+  defp send_on(owner, ref, req, report, timeout, debug) do
     case SIP.Dialog.start_dialog(req, timeout, :outbound, debug, tag: @tag) do
-      {:ok, _dialog_pid, _dialog_id} ->
-        await(owner, ref, report, timeout * 1_000 + @margin_ms)
+      {:ok, dialog_pid, _dialog_id} ->
+        page = %{req: req, dialog: dialog_pid, timeout: timeout, debug: debug}
+        await(owner, ref, report, page, timeout * 1_000 + @margin_ms)
 
       {:error, reason} ->
         failed(owner, report, reason)
@@ -489,30 +494,49 @@ defmodule SIP.Session.Page.Relay do
 
   # `owner` is nil once muted: the relay still waits for the answer — its dialog
   # ends with it, and the journal shows it — but tells nobody.
-  defp await(owner, ref, report, wait_ms) do
-    receive do
-      {@tag, {code, rsp, _tid, _dlg}} when is_integer(code) and code >= 200 ->
-        tell(
-          owner,
-          {:page, :answered, Map.merge(report, %{code: code, reason: rsp.reason, response: rsp})}
-        )
+  #
+  # Only the current dialog is listened to: after a 415 the page goes out again
+  # on a dialog of its own, and the first one's end is not this page's failure.
+  defp await(owner, ref, report, page, wait_ms) do
+    dialog = page.dialog
 
-      {@tag, {:dialog_terminated, _dlg, reason}} ->
+    receive do
+      {@tag, {415, rsp, _tid, ^dialog}} ->
+        if SIP.Msg.BodyCoding.coding_refused?(rsp) and not Map.has_key?(page.req, :send_in_clear) do
+          # RFC 3261 §21.4.13: the coding was refused, the content was not read.
+          # Once, in clear — fit_datagram/1 deflated it, and will not again.
+          clear = SIP.Msg.BodyCoding.send_in_clear(page.req)
+          send_on(owner, ref, clear, report, page.timeout, page.debug)
+        else
+          answered(owner, report, 415, rsp)
+        end
+
+      {@tag, {code, rsp, _tid, ^dialog}} when is_integer(code) and code >= 200 ->
+        answered(owner, report, code, rsp)
+
+      {@tag, {:dialog_terminated, ^dialog, reason}} ->
         failed(owner, report, reason)
 
       {:mute, from, mref} ->
         send(from, {:muted, mref})
-        await(nil, ref, report, wait_ms)
+        await(nil, ref, report, page, wait_ms)
 
       {:DOWN, ^ref, :process, _pid, _reason} ->
         :ok
 
-      # provisionals, {:onnewdialog, …}
+      # provisionals, {:onnewdialog, …}, what an abandoned dialog still says
       {@tag, _other} ->
-        await(owner, ref, report, wait_ms)
+        await(owner, ref, report, page, wait_ms)
     after
       wait_ms -> failed(owner, report, :timeout)
     end
+  end
+
+  defp answered(owner, report, code, rsp) do
+    tell(
+      owner,
+      {:page, :answered, Map.merge(report, %{code: code, reason: rsp.reason, response: rsp})}
+    )
   end
 
   defp failed(owner, report, reason) do

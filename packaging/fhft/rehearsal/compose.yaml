@@ -1,0 +1,35 @@
+# The S0 rehearsal: the file store's RPM as web1 installs it, against a
+# PostgreSQL subscriber base. http://localhost:8089/files/hft.php
+#
+#   packaging/fhft/build-rpm.sh
+#   docker compose -f packaging/fhft/rehearsal/compose.yaml up -d --build
+#   docker compose -f packaging/fhft/rehearsal/compose.yaml down -v
+name: fhft-rehearsal
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: kamailio
+      POSTGRES_PASSWORD: rehearsal
+    volumes:
+      - ./initdb.sql:/docker-entrypoint-initdb.d/initdb.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "kamailio"]
+      interval: 2s
+      retries: 15
+
+  fhft:
+    build:
+      context: ../..
+      dockerfile: fhft/rehearsal/Containerfile
+    environment:
+      AUTH_DB_DSN: "pgsql:host=db;port=5432;dbname=kamailio"
+      AUTH_DB_USER: fhft_ro
+      AUTH_DB_PASSWORD: fhft_ro
+      AUTH_ALGORITHM: MD5
+    ports:
+      - "8089:80"
+    depends_on:
+      db:
+        condition: service_healthy

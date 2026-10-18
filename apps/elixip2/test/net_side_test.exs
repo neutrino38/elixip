@@ -1,6 +1,6 @@
 defmodule SIP.Test.NetSide do
   @moduledoc """
-  Step 5 of `docs/design/multi-interface.md`, phase 2: which side of this node's
+  `docs/design/DESIGN-SIPSTACK.md`, "Addressing": which side of this node's
   network a resolved address sits on.
 
   Not `async`: `:internal_networks` is node-wide.

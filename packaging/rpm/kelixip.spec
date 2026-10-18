@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.4
+Version:        1.7.1
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        8%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,27 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.1-1
+- 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
+  kelixip-mod-sip_servers subpackage (trunks, proxies and application servers,
+  OPTIONS liveness, tertiary_uri, source_networks, use_fqdn_contact,
+  publish_contact_host, ext_domain), the client certificate of config.toml
+  [tls], the registration binding's User-Agent, Call-ID and CSeq, the PUBLISH
+  received_time, trust_asserted_identity/1 and the SHA-256 digest spelling.
+- User-Agent is now Kelixip/1.7.1.
+
+* Wed Oct 07 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.0-1
+- Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
+  Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
+  store-and-forward intact.
+- A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
+  a 415 without deflate in Accept-Encoding gets the page again in clear.
+- The page relay keeps the sender's multipart Content-Type and relays a bare
+  multipart byte for byte.
+- Multipart parts keep their trailing whitespace; a blank line before a
+  part's Content-* headers is tolerated.
+- User-Agent is now Kelixip/1.7.0.
+
 * Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-8
 - sip_servers: with an ext_domain, the keepalive OPTIONS asks for
   sip:<ext_domain>, sent where the URI resolved, as the REGISTER and the calls

@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.6.4
-Release:        8%{?dist}
+Version:        1.7.1
+Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,19 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.1-1
+- Released together with kelixip 1.7.1-1: 1.7.0 with the SIP stack changes of
+  1.6.4-2 to 1.6.4-8 (B2BUA trunk reachability and outbound digest, a host
+  name in the Contact, TLS/TCP socket errors no longer crash the transport).
+- User-Agent is now Elixipp-1.7.1.
+
+* Wed Oct 07 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.0-1
+- Released together with kelixip 1.7.0-1.
+- File transfer verbs for scenarios (upload_file, download_file,
+  send_file_page, file_info) and the example pair uac_file_message.exs /
+  uas_file_message.exs.
+- User-Agent is now Elixipp-1.7.0.
+
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-8
 - Released together with kelixip 1.6.4-8; nothing changes in the tool.
 

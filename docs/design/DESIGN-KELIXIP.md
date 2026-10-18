@@ -106,6 +106,20 @@ only "Runtime terminating".
 exposes a half-applied routing table. `Kelix.DialPlan` compiles each domain's
 rules once, at load, rather than interpreting them per request.
 
+**Listeners.** A `[[listen]]` block names `proto`, `addr`, `port`, and optionally
+`tag = "internal"`, `networks` and `advertise`; an unknown key is refused.
+`Kelix.Config.apply_app_env/1` turns them into the stack's addressing keys
+([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#310-addressing-ipv6-dual-stack-network-sides)):
+
+| Key | Effect |
+|---|---|
+| `addr` | gives the listener its family. `0.0.0.0` / `::` = every interface of one family; absent = both families, `Kelix.Listener.Supervisor` starting one child per family the host can announce. A second `udp` block of an already bound family is ignored with a warning |
+| `tag = "internal"` | the listener's subnets (auto-detected from its interface, or `networks`, which replaces the detection) join `:internal_networks` |
+| `advertise` | the public face of `addr` behind a 1:1 NAT, into `:advertise_map`. Requires an explicit `addr` of the same family |
+
+`[tls] verify` / `ca` turn on the verification of the certificate offered to the
+outbound TLS/WSS leg.
+
 ---
 
 ## 4. Dispatch
@@ -144,7 +158,18 @@ The dialog is what a script serving an OPTIONS needs: the re-submission after a
 407 keeps the Call-ID and From-tag and reaches the instance that challenged it,
 and a relay to a registered UA is a B2BUA leg. The `default` rule never serves an
 R-URI with no user-part, so a probe script cannot answer a load balancer's ping
-480. The plan and its decisions are [options-plan.md](options-plan.md).
+480.
+
+The rules are `[[domain.options]]` blocks: at most one `keepalive = true` (an
+R-URI with no user-part), `pattern` rules on the user-part with the dial-plan
+syntax, and a last `default = true`. A scripted OPTIONS instance counts in
+`max_calls`, like a call; the keepalive the core answers creates none. Its sender
+may be challenged (407). Relayed to a registered UA, the answer carries the UA's
+`Allow`, `Accept`, `Accept-Encoding`, `Accept-Language`, `Supported` and
+`Allow-Events` back — on the answer to an OPTIONS only. The reference scripts are
+`options-keepalive.exs` (200 with `Kelix.Options.allow()`, then ends) and
+`options-probe-ua.exs` (407, then 480 when unregistered, else relay; 408 when the
+UA never answers).
 
 Step 5 is what keeps scripts generic: the instance's context is seeded with the
 domain (which becomes the auth realm), the resolved expiry bounds and the
@@ -270,11 +295,11 @@ Its `[module.registrar]` block lives in `domains.toml` rather than
 
 ### 8.2 `auth_db`
 
-Credential lookup against MariaDB, exposed as a facade the script calls when it
-decides to challenge. Today it authenticates REGISTER; extending it to INVITE
-and to other backends (LDAP, HTTP, Diameter) behind an `Auth` behaviour is
-designed but not built — see `docs/design/evolution-auth-db.md`; what is built is
-[DESIGN-AUTH.md](DESIGN-AUTH.md).
+Credential lookup against MariaDB. It authenticates every initial request a
+script challenges — REGISTER through its facade, INVITE, SUBSCRIBE, PUBLISH and
+OPTIONS through the `authenticate` block — and stamps the identity it proved
+([DESIGN-AUTH.md](DESIGN-AUTH.md)). Other backends (LDAP, HTTP, Diameter) are
+not built ([kelixip_roadmap.md](kelixip_roadmap.md#a-replaceable-authentication-backend)).
 
 ### 8.3 `mcu` — conferencing
 
@@ -300,6 +325,20 @@ a media-server upgrade a routine operation.
 
 The pool hands a script its server through the injected context override (§4), so
 a script never names one.
+
+**Network profiles.** The health probe, every 30 s, also reads each server's
+address profiles (`GetNetworkProfiles`); `status/0` exposes them per entry, and a
+failed probe keeps what the previous one learned. `Kelix.MediaPool.checkout/2`
+takes the profiles a call needs — one per leg, `{family, side}` — and round-robins
+among the entries that are enabled, healthy **and** carry all of them; none
+eligible is a 503, never a fallback to another profile. An entry whose profiles
+are unknown is eligible only for calls that ask for none. The framework reaches the
+pool through `:elixip2, :mediaserver_selector`, set to
+`Kelix.Router.media_for_profiles/1`
+([DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md#510-network-profiles)).
+
+Once a media server is started with `--internal-ip`, its XML-RPC API listens on
+the internal address only (IPv4 if it has both): the pool `url` must name it.
 
 **`[mediaserver] video_bitrate` is a section key, not a pool key.** It says what a
 video leg is encoded at, and it caps the `b=AS:` this node answers with. Both media
@@ -365,6 +404,76 @@ batch so rotation needs no signal. The line's shape is a contract with the
 fail2ban filters shipped under `packaging/fail2ban/`, pinned by
 `fail2ban_filter_test.exs`. The incident types, their raising points and what is
 deliberately not one are in [fail2ban-plan.md](fail2ban-plan.md) §3.
+
+### 11.1 Scenario journals
+
+An operator turns the journal of a live call on and off
+(`Kelix.Control.debug_scenario/3`, `kelictl debug <id> on|off`, a kelescope row
+action). The node keeps the journal as data; `kelictl` and kelescope render it.
+
+- **One journal per instance**, keyed by the monitor's instance id. FSL starts no
+  journal again after `off`, so a second `on` answers `{:error, :journal_written}`.
+- **`Kelix.Traces`** stores what `SIP.FSL.Host.journal_events/2` hands it
+  ([DESIGN-FSL.md](DESIGN-FSL.md#310-journal_events2--where-a-journal-goes)),
+  monitors the instance (`running`), expires entries after `[debug]
+  trace_retention`, evicts the oldest past `max_traces`, and cuts a journal at
+  `max_trace_bytes` of message text with a `:cut` event. Memory only: a restart
+  keeps nothing.
+- **Messages are kept as text**, body decoded (`SIPMsg` and
+  `SIP.Msg.BodyCoding`, `deflate` and `gzip`, inflation bounded by
+  `max_message_size`), clipped at 8 KiB per message. A MESSAGE's content is never
+  recorded (`redacted: true`).
+- **The monitor row** carries `traced: true` while a journal is on (`●` in
+  `kelictl monitor`).
+- **`kelictl debug show <id>`** draws a text ladder (one column per lane, one line
+  per event, `(r)` for a retransmission, `--full` for the bodies);
+  `--format-puml` renders PlantUML through `FSL.Diagram.PlantUML`. `GET /traces`
+  and `GET /traces/:id` answer the same data as JSON.
+
+The contract kelescope codes against, all in `Kelix.Control`:
+
+```elixir
+# monitor rows (subscribe_monitor/1, monitor/0) carry
+traced: boolean()
+
+debug_scenario(id, :on | :off, admin)
+  :: :ok | {:error, :not_found} | {:error, :journal_written}
+
+subscribe_traces(pid) :: %{limits: %{trace_retention:, max_traces:, max_trace_bytes:},
+                           traces: [summary]}
+unsubscribe_traces(pid) :: :ok
+traces() :: [summary]                        # least recently written first
+# pushed: {:kelix_traces, {:upsert, summary}}   — stored, and again when the instance ends
+#         {:kelix_traces, {:remove, id}}        — expired or evicted
+
+summary :: %{id:, scenario:, domain:, script:, written_at:, expires_at:,
+             running: boolean, sip_count:, bytes:}
+
+trace(id) :: {:ok, summary + %{meta: meta, events: [event]}} | {:error, :not_found}
+
+meta :: %{scenario:, pid:, slot:, joined_in:, config:, t0:}
+        # config may hold secrets: mask with FSL.Diagram.mask/2 before showing
+
+event ::                                     # oldest first; `at` in monotonic µs
+    %{kind: :transition, at:, to:, event:, type:}
+  | %{kind: :command, at:, type:, name:}
+  | %{kind: :terminal, at:, outcome: :succeeded | :failed | :aborted, reason:, type:}
+  | %{kind: :message, at:, dir: :in | :out,
+      lane:,                                 # the Call-ID
+      party:,                                # the leg tag
+      peer:,                                 # "10.0.0.1:5060/udp"
+      label:,                                # "INVITE #1 +SDP"
+      reply:, repeat:,
+      body:,                                 # the message as text, body decoded
+      clipped:, redacted:,
+      decoded_from: "deflate" | "gzip" | nil,
+      method:, code:, reason:, cseq:, sdp:}
+  | %{kind: :cut, at:}
+  # any other kind: skip it
+```
+
+Everything is plain data and crosses the distribution as is. A node older than a
+field sends none (`redacted` reads `false`).
 
 ---
 

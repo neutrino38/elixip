@@ -1,3 +1,30 @@
+kelixip (1.7.1-1) stable; urgency=low
+
+  * 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
+    kelixip-mod-sip-servers package (trunks, proxies and application servers,
+    OPTIONS liveness, tertiary_uri, source_networks, use_fqdn_contact,
+    publish_contact_host, ext_domain), the client certificate of config.toml
+    [tls], the registration binding's User-Agent, Call-ID and CSeq, the PUBLISH
+    received_time, trust_asserted_identity/1 and the SHA-256 digest spelling.
+  * User-Agent is now Kelixip/1.7.1.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 18 Oct 2026 18:00:00 +0200
+
+kelixip (1.7.0-1) stable; urgency=low
+
+  * Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
+    Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
+    store-and-forward intact.
+  * A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
+    a 415 without deflate in Accept-Encoding gets the page again in clear.
+  * The page relay keeps the sender's multipart Content-Type and relays a bare
+    multipart byte for byte.
+  * Multipart parts keep their trailing whitespace; a blank line before a
+    part's Content-* headers is tolerated.
+  * User-Agent is now Kelixip/1.7.0.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Wed, 07 Oct 2026 18:00:00 +0200
+
 kelixip (1.6.4-8) stable; urgency=low
 
   * sip_servers: with an ext_domain, the keepalive OPTIONS asks for
