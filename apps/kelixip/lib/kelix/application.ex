@@ -31,6 +31,10 @@ defmodule Kelix.Application do
     # 489 on a package the node does not know.
     :ok = SIP.EventPackage.register_builtins()
 
+    # No outbound SIP from a module before the listeners own their sockets: see
+    # Kelix.Listener.Supervisor.listening?/0. Opened by the last child below.
+    :ok = Kelix.Listener.Supervisor.close_gate()
+
     children = [
       # Syslog sink (§3.1 `[log].target`). Before Kelix.Config, which decides in its
       # own init whether to enable it — so it must already be there to be asked.
@@ -117,7 +121,9 @@ defmodule Kelix.Application do
       # Inbound SIP listeners (§2.1): one child per [[listen]] entry. Last, so no
       # request can arrive before the whole stack above is up. No [[listen]]
       # entry ⇒ no child ⇒ no port bound.
-      Kelix.Listener.Supervisor
+      Kelix.Listener.Supervisor,
+      # The listeners are bound: a module's outbound SIP may go (listening?/0).
+      %{id: :listening, start: {Kelix.Listener.Supervisor, :mark_listening, []}}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Kelix.Supervisor)

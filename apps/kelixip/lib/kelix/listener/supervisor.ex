@@ -64,6 +64,40 @@ defmodule Kelix.Listener.Supervisor do
     end
   end
 
+  @listening_key {__MODULE__, :listening}
+
+  @doc """
+  Whether the listeners own their sockets yet — the gate a module's own outbound
+  SIP waits on at boot.
+
+  The modules start before the listeners, and an outbound datagram sent in
+  between makes the selector create the `UDP_<family>` instance itself, on the
+  node's port, under the very registry name the udp listener is about to claim:
+  the listener then fails on `{:already_started, _}` and the boot aborts. The
+  `sip_servers` keepalive and REGISTER, sent at 0 ms, lost that race on
+  2026-10-18 the first time the MCU took 5 s to come up.
+
+  `false` from `Kelix.Application`'s start until `mark_listening/0`, the child
+  that follows this supervisor; `true` when nobody closed the gate (the tests, a
+  module started outside the server's tree).
+  """
+  @spec listening?() :: boolean
+  def listening?, do: :persistent_term.get(@listening_key, true)
+
+  @doc false
+  @spec close_gate() :: :ok
+  def close_gate, do: :persistent_term.put(@listening_key, false)
+
+  @doc """
+  Opens the gate of `listening?/0`. A child of the root tree placed right after
+  this supervisor, so it runs once every listener is bound; starts no process.
+  """
+  @spec mark_listening() :: :ignore
+  def mark_listening do
+    :persistent_term.put(@listening_key, true)
+    :ignore
+  end
+
   @impl true
   def init(opts) do
     listeners = Keyword.get(opts, :listen) || listen_from_config()

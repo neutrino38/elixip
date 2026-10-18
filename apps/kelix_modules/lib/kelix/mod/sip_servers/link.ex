@@ -52,6 +52,8 @@ defmodule Kelix.Mod.SipServers.Link do
   @default_interval_s 30
   @options_timeout_s 32
   @register_timeout_s 32
+  # How often a probe or a REGISTER due at boot looks again for the listeners.
+  @listen_wait_ms 200
   @max_retry_s 3_600
 
   # ── API ─────────────────────────────────────────────────────────────────────
@@ -129,6 +131,17 @@ defmodule Kelix.Mod.SipServers.Link do
 
   @impl GenServer
   def handle_info(:flush_status, state), do: {:noreply, send_status(%{state | flush: nil})}
+
+  # Nothing goes out before the listeners own their sockets: a datagram sent at
+  # boot, ahead of them, takes the udp listener's registry name and aborts the
+  # node's start (Kelix.Listener.Supervisor.listening?/0). Each timer is re-armed
+  # where it is kept, so a definition change can still cancel it.
+  def handle_info(msg, state) when msg in [:probe, :register, :probe_aor] do
+    if Kelix.Listener.Supervisor.listening?(),
+      do: msg |> info(state) |> published(),
+      else: {:noreply, rearm(msg, state)}
+  end
+
   def handle_info(msg, state), do: msg |> info(state) |> published()
 
   @impl GenServer
@@ -685,6 +698,14 @@ defmodule Kelix.Mod.SipServers.Link do
 
   defp options_from(server, _parsed),
     do: %SIP.Uri{scheme: "sip:", userpart: "kelixip", domain: server.domain}
+
+  defp rearm(:probe, state), do: schedule(state, @listen_wait_ms)
+  defp rearm(:register, state), do: register_soon(state, @listen_wait_ms)
+
+  defp rearm(:probe_aor, state) do
+    timer = Process.send_after(self(), :probe_aor, @listen_wait_ms)
+    %{state | aors: %{state.aors | timer: timer}}
+  end
 
   defp schedule(state, ms) do
     if state.timer, do: Process.cancel_timer(state.timer)

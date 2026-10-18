@@ -181,6 +181,21 @@ defmodule Kelix.Mod.SipServersLivenessTest do
     until!(fn -> state_of("live3", uri("live3")) == :up end)
   end
 
+  # The boot of 2026-10-18: an OPTIONS sent before the udp listener bound took
+  # its registry name, and the node aborted on {:already_started, _}.
+  test "no OPTIONS before the listeners are bound, then the first one goes out" do
+    on_exit(fn -> Kelix.Listener.Supervisor.mark_listening() end)
+    :ok = Kelix.Listener.Supervisor.close_gate()
+
+    _tp = peer!("gate1")
+    :ok = app("gate1")
+    refute_receive {:sip_mockup, {:request_sent, :OPTIONS, _}}, 1_000
+
+    :ignore = Kelix.Listener.Supervisor.mark_listening()
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, _}}, 3_000
+    until!(fn -> state_of("gate1", uri("gate1")) == :up end)
+  end
+
   test "send_keepalive = false: no OPTIONS, and an unknown URI counts as reachable" do
     _tp = peer!("live4")
     :ok = app("live4", %{"send_keepalive" => "false"})
