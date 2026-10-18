@@ -152,6 +152,7 @@ defmodule Kelix.Mod.SipServersRegistrationTest do
     assert_receive {:sip_mockup, {:request_sent, :OPTIONS, req}}, 3_000
     assert parsed(req.from).userpart == "0123456789"
     assert parsed(req.from).domain == "reg7.example.net"
+    assert parsed(req.contact).userpart == "0123456789"
   end
 
   test "ext_domain: the keepalive OPTIONS comes from the account at that domain" do

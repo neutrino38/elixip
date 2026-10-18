@@ -116,6 +116,9 @@ defmodule Kelix.Mod.SipServersLivenessTest do
 
     assert_receive {:sip_mockup, {:request_sent, :OPTIONS, options}}, 3_000
     refute options.contact.domain == @domain
+    # a server other than a trunk: the node's own name, for a Kamailio that
+    # crashes on a Contact without a user part
+    assert options.contact.userpart == "kelixip"
   end
 
   test "use_fqdn_contact: the OPTIONS Contact names the server's domain, without a port" do

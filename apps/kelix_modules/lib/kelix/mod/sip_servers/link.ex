@@ -672,22 +672,36 @@ defmodule Kelix.Mod.SipServers.Link do
   # An out-of-dialog OPTIONS (RFC 3261 §11): its own Call-ID and From tag, nothing
   # that would open a dialog.
   defp options_msg(server, parsed, ruri, to) do
-    %{
+    from = options_from(server, parsed)
+
+    msg = %{
       "Max-Forwards" => "70",
       "Accept" => "application/sdp",
       method: :OPTIONS,
       ruri: ruri,
-      from: %SIP.Uri{
-        options_from(server, parsed)
-        | hparams: %{"tag" => SIP.Msg.Ops.generate_from_or_to_tag()}
-      },
+      from: %SIP.Uri{from | hparams: %{"tag" => SIP.Msg.Ops.generate_from_or_to_tag()}},
       to: to,
       callid: SIP.Msg.Ops.generate_branch_value(),
       cseq: [1, :OPTIONS],
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
       contentlength: 0
     }
+
+    case options_contact(server, from) do
+      nil -> msg
+      contact -> Map.put(msg, :contact, contact)
+    end
   end
+
+  # The Contact carries the From's user part: a Contact without one crashes the
+  # modified Kamailio in front of some servers. The transport keeps it and stamps
+  # the address, port and transport (SIP.Transport.add_contact_header/3), as for a
+  # REGISTER. A server that knows us by name (`use_fqdn_contact`) gets the bare
+  # host, as before.
+  defp options_contact(%Server{use_fqdn_contact: true}, _from), do: nil
+
+  defp options_contact(_server, %SIP.Uri{userpart: user}),
+    do: %SIP.Uri{scheme: "sip:", userpart: user, domain: "0.0.0.0"}
 
   # A trunk's keepalive comes from its account, as its REGISTER and its calls do:
   # an operator SBC may drop an OPTIONS from a user it does not know. Another
