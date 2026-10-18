@@ -624,7 +624,7 @@ defmodule Kelix.Mod.SipServers.Link do
 
       ruri ->
         case SIP.Transac.start_uac_transaction(
-               options_msg(state.server, ruri, target),
+               options_msg(state.server, parsed, ruri, target),
                @options_timeout_s
              ) do
           {:ok, tid, _sent} ->
@@ -658,17 +658,15 @@ defmodule Kelix.Mod.SipServers.Link do
 
   # An out-of-dialog OPTIONS (RFC 3261 §11): its own Call-ID and From tag, nothing
   # that would open a dialog.
-  defp options_msg(server, ruri, to) do
+  defp options_msg(server, parsed, ruri, to) do
     %{
       "Max-Forwards" => "70",
       "Accept" => "application/sdp",
       method: :OPTIONS,
       ruri: ruri,
       from: %SIP.Uri{
-        scheme: "sip:",
-        userpart: "kelixip",
-        domain: server.domain,
-        hparams: %{"tag" => SIP.Msg.Ops.generate_from_or_to_tag()}
+        options_from(server, parsed)
+        | hparams: %{"tag" => SIP.Msg.Ops.generate_from_or_to_tag()}
       },
       to: to,
       callid: SIP.Msg.Ops.generate_branch_value(),
@@ -677,6 +675,16 @@ defmodule Kelix.Mod.SipServers.Link do
       contentlength: 0
     }
   end
+
+  # A trunk's keepalive comes from its account, as its REGISTER and its calls do:
+  # an operator SBC may drop an OPTIONS from a user it does not know. Another
+  # server, or a trunk URI naming no account, gets the node's own name.
+  defp options_from(%Server{type: "sip-trunk"} = server, %SIP.Uri{userpart: account} = parsed)
+       when account not in [nil, ""],
+       do: %SIP.Uri{scheme: "sip:", userpart: account, domain: server.ext_domain || parsed.domain}
+
+  defp options_from(server, _parsed),
+    do: %SIP.Uri{scheme: "sip:", userpart: "kelixip", domain: server.domain}
 
   defp schedule(state, ms) do
     if state.timer, do: Process.cancel_timer(state.timer)
@@ -765,7 +773,7 @@ defmodule Kelix.Mod.SipServers.Link do
         }
 
         case SIP.Transac.start_uac_transaction(
-               options_msg(state.server, ruri, target),
+               options_msg(state.server, target, ruri, target),
                @options_timeout_s
              ) do
           {:ok, tid, _sent} -> put_in(state.aors.probes[tid], aor)

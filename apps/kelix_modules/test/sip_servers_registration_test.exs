@@ -145,6 +145,29 @@ defmodule Kelix.Mod.SipServersRegistrationTest do
     until!(fn -> registration("reg6").state == "registered" end)
   end
 
+  test "the keepalive OPTIONS of a trunk comes from its account, not from kelixip" do
+    _tp = registrar!("reg7")
+    :ok = trunk("reg7", %{"send_keepalive" => "true", "register" => "false"})
+
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, req}}, 3_000
+    assert parsed(req.from).userpart == "0123456789"
+    assert parsed(req.from).domain == "reg7.example.net"
+  end
+
+  test "ext_domain: the keepalive OPTIONS comes from the account at that domain" do
+    _tp = registrar!("reg8")
+
+    :ok =
+      trunk("reg8", %{
+        "send_keepalive" => "true",
+        "register" => "false",
+        "ext_domain" => "operator.net"
+      })
+
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, req}}, 3_000
+    assert {parsed(req.from).userpart, parsed(req.from).domain} == {"0123456789", "operator.net"}
+  end
+
   test "deleting a registered trunk un-registers it" do
     tp = registrar!("reg2")
     :ok = trunk("reg2", %{})
