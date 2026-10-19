@@ -54,6 +54,8 @@ In terms of capabilities, the emphasis will be on:
 - [Back to back user agent](B2BUA.md): first release
 - [Codec negotiation across two legs](CODEC-NEGOTIATION.md), with a transcoding
   policy per media: implemented
+- FSL: [Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
+  concept inspired by Jain SLEE 1.1
 
 ### Testing tool: elixipp
 - Interactive command elixipp for testing tools: done
@@ -72,16 +74,16 @@ In terms of capabilities, the emphasis will be on:
 - NAT/flow for WebRTC — a media-server pool
 - a Total Conversation capable **conferencing (MCU)**: done
 - MCU: hardware acceleration watchdog and delegated codec negotiation: done
-- kelixip B2BUA and call processing: in progress
+- kelixip B2BUA and call processing: done
+- kelixip and elixip `presence` support: basic presence and dialog presence.
+- Total Conversation call recorder (separate module)
 
 ## Roadmap
-- FSL: [Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
-  concept inspired by Jain SLEE 1.1
-- kelixip and elixip `presence` support including some level of LoST support
+
+- Automated call captioning
+- Automated call distribution
 - kelixip distributed cluster tech
 - FSL: formal proof of scenario correctness
-- Total Conversation call recorder
-- Automated call captioning
 - Push notification support
 
 - **borderline** SBC: 
