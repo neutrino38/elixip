@@ -29,11 +29,12 @@ rather than falling out of per-attribute handling.
 
 **Out, and why it is safe:** conference templates and ad-hoc creation on an
 unknown DID (an unknown DID is a `404`); an admin web UI (REST and `kelictl`
-only); outbound calls (they need B2BUA legs); RTMP/Flash, recording of
+only); RTMP/Flash, recording of
 broadcasters, document sharing/BFCP, extra mosaics and sidebars, SOAP event
 listeners, a CDR engine, join-time authentication. Each was dropped against a
 reason, not by omission; the parameters that would carry them (the participant
 role, for instance) are still passed correctly, so adding one back is additive.
+Outbound calls were on this list, as L6; a conference now places them (§5.2).
 
 **Non-goals worth stating:** no multi-MCU conference (a conference is pinned to
 the media server chosen at creation), no admission control (reaching the DID *is*
@@ -375,6 +376,48 @@ as `:success` and the third as `:aborted`. They are one path with one verdict.
 shape. They are JSR-309 media scripts, not conference legs: this block does not
 cover them, and no attempt is made to generalise it into one that would.
 
+### 5.2 A call the conference places (dial-out)
+
+L6 said outbound calls "need B2BUA legs". They did not: a leg the conference places
+is a UAC call whose media plane is the mixer, and it needed three things the
+answering side already had in another shape.
+
+**The reservation.** `admit/3` reads two facts off an inbound INVITE — the conference
+(its R-URI user part) and the other end (its From). `dial_out/4` states them instead:
+`dial_out(domain, did, callee)` makes the same atomic reservation, through the same
+registry call, and the participant is named after the callee. Nothing is created on
+the MCU; the participant still comes with the adapter connection (§8.2).
+
+**The offer.** `Adapter.get_local_offer/1` mirrors the answer-time sequence of §6.2:
+our SDES key when the script asks for one (`srtp: :sdes`), then `StartReceiving` per
+media — which yields the port — and the SDP. The menu proposed to `StartReceiving` is
+the codec **vocabulary**, every name the shared tables can turn into a Medooze code,
+and the offer lists what the server's verdict accepted. That is §6's delegated
+negotiation with our own offer as the menu, not a capability list written on this
+side: a codec the server refuses is not offered. `codec_order:` reorders the accepted
+set; it never adds to it. Plain RTP and SDES-SRTP only — DTLS+ICE is a browser's
+transport, and a browser calls in. `ice: :lite` adds to that offer what the leg
+already answers an ICE peer with — a=ice-lite, our credentials keyed before
+`StartReceiving`, one host candidate, rtcp-mux — for a far end that runs full ICE
+on SDES, which is what Teams Direct Routing offers.
+
+**The answer, and the ACK that does not come.** `Adapter.set_remote_answer/2` records
+the answer per media in the shape the answer path leaves in `negotiated` — the
+answer's numbering for the send map (RFC 3264 lets the answerer renumber), its
+address, its key from the `a=crypto` line echoing our tag — so `attach/1` is one
+code path for both directions. A declined media stops receiving at once; an SDES
+offer answered in the clear is refused. Nothing is sent before `attach/1`, as on an
+answered leg. What differs is who sends the ACK: we do, so nothing arrives to put the
+leg in the mix. `dial_out` marks the leg `:attach_pending`, the phase §5.1 already had
+for an answered UPDATE, and `Mcu.SBB.conference()` attaches on entry — once the 200
+has been processed. From there the leg is any other leg: the far end's re-INVITEs
+come back as `{:conference, :renegotiation, …}`, its BYE as `:caller_hung_up`.
+
+Out of this increment: a re-offer from our side (hold, an added media) is refused —
+the far end renegotiates, through the answer path; early media is not mixed (the 183
+is not applied); and failover across a SIP server's URIs is the B2BUA's, so a script
+dialling through `Kelix.Mod.SipServers.dial_target/3` gets the first reachable URI.
+
 ---
 
 ## 6. Negotiation
@@ -665,7 +708,7 @@ on the same terms.
 |---|---|
 | L3 | no trickle ICE |
 | L5 | a conference's **calls** do not survive a kelixip restart; its definition does, when `conference_file` is set (§4.1) |
-| L6 | no outbound calls (dial-out into a conference) — needs B2BUA legs |
+| L6 | ~~no outbound calls (dial-out into a conference)~~ — a conference places them (§5.2): plain RTP or SDES-SRTP, no re-offer from our side, no early media |
 | L7 | a live participant's video profile is not renegotiated when the conference profile changes, and every leg is encoded at the same size and frame rate — **S6** of [mcu_server_evolutions.md](mcu_server_evolutions.md) makes both a consequence of the server's rate control instead of a setting |
 | L8 | **anyone who can dial the DID joins**; the perimeter must be protected upstream or by a derived script |
 | L9 | ~~event callbacks to an external UI are not delivered~~ — a clustered UI subscribes to three push topics; a non-BEAM client still has no callback and must poll the REST surface |
