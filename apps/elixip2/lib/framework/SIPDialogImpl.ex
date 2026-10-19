@@ -2637,6 +2637,33 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # The 2xx that establishes an outbound dialog names its remote tag (RFC 3261
+  # §12.1.2, §13.2.2.4) — even when an early dialog already took another one from a
+  # 1xx. A callee may answer from a different leg than the one that rang: the
+  # Microsoft PSTN hub sends its 180 with one To-tag and its 200 with another. Kept
+  # on the 180's tag, the dialog was registered under a key no in-dialog request
+  # would ever name: the hub's re-INVITE completing ICE got a 481, and the hub hung
+  # up (Q.850 cause 95) eight seconds into the call, capture of 2026-10-19.
+  #
+  # Only while the dialog is not yet established: once it is, a 2xx (to a
+  # re-INVITE) cannot move its tag.
+  defp confirm_totag(%SIP.DialogImpl{direction: :outbound, totag: early} = state, totag)
+       when is_binary(early) and is_binary(totag) and early != totag and
+              state.state in [:initial, :uac_challenged] do
+    Registry.unregister(Registry.SIPDialog, {state.fromtag, state.callid, early})
+    Registry.register(Registry.SIPDialog, {state.fromtag, state.callid, totag}, :completedialog)
+
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "2xx from another To-tag than the early dialog's (#{early}): dialog now #{totag}"
+    )
+
+    %SIP.DialogImpl{state | totag: totag}
+  end
+
+  defp confirm_totag(state, totag), do: add_totag(state, totag)
+
   defp handle_UAS_response(state = %SIP.DialogImpl{direction: :outbound}, rsp, transact_pid)
        when state.state in [:initial, :uac_challenged] and rsp.response in 200..202 do
     Logger.debug(
@@ -3374,10 +3401,10 @@ defmodule SIP.DialogImpl do
         # and every later in-dialog request would name a callee that never
         # answered.
         state =
-          if adopts_totag?(state, rsp) do
-            add_totag(state, totag)
-          else
-            state
+          cond do
+            not adopts_totag?(state, rsp) -> state
+            rsp.response in 200..299 -> confirm_totag(state, totag)
+            true -> add_totag(state, totag)
           end
 
         if rsp.response >= 200 do
