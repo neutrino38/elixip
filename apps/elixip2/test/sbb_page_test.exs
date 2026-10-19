@@ -121,7 +121,7 @@ defmodule SIP.Test.SbbPage do
 
   def journal(events, meta) do
     if pid = Process.whereis(@test_name), do: send(pid, {:journal, to_string(meta.pid), events})
-    :kept
+    {:ok, :kept}
   end
 
   # ── The reading of the answers ──────────────────────────────────────────────
