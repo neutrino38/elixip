@@ -209,7 +209,40 @@ Enum.each([Registry.SIP.Transac, Registry.SIPTransport, Registry.SIPDialog], fn 
   end) == :ok || raise("#{inspect(name)} did not come up before the suite started")
 end)
 
+defmodule SIP.Test.Journal do
+  @moduledoc """
+  Keep the sequence diagrams of the suite off the working directory.
+
+  A scenario with `debug: true` journals its run, and without a `:sequence_output`
+  FSL renders the journal to `<scenario>_<pid>.puml` in the working directory. The
+  modules that care route it elsewhere and put the key back when they end — to
+  nil, so an instance still lingering then (SbbPage's relay stays 600 ms after its
+  outcome) dropped its diagram next to mix.exs, to be committed by the next
+  `git add -A`.
+
+  Two nets. `:sequence_output` defaults to `discard/2`, so restoring the key
+  restores a sink, not the file. And the modules that delete the key on purpose,
+  to read the file elixipp writes, get whatever they leave behind swept after the
+  suite — only the files that appeared during it.
+  """
+
+  def discard(_events, _meta), do: {:ok, :discarded}
+
+  def setup do
+    Application.put_env(:elixip2, :sequence_output, {__MODULE__, :discard})
+    before = MapSet.new(diagrams())
+
+    ExUnit.after_suite(fn _result ->
+      Enum.each(diagrams() -- MapSet.to_list(before), &File.rm/1)
+    end)
+  end
+
+  defp diagrams, do: Path.wildcard("*.puml")
+end
+
 ExUnit.start(exclude: [:skip])
+
+SIP.Test.Journal.setup()
 
 Code.require_file("support/test_log.exs", __DIR__)
 SIP.Test.Log.setup()

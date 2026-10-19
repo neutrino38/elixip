@@ -50,7 +50,7 @@ defmodule Kelix.Mod.Mcu.SBB.Conference do
   | Value | Meaning on entry | Set when |
   |---|---|---|
   | absent / `:awaiting_ack` | the next ACK is the first one: attach | the script answered a 200 and entered; a re-INVITE was handed back |
-  | `:attach_pending` | attach now, before waiting for anything | an UPDATE was handed back (RFC 3311: its 200 concludes the offer/answer, no ACK follows) |
+  | `:attach_pending` | attach now, before waiting for anything | an UPDATE was handed back (RFC 3311: its 200 concludes the offer/answer, no ACK follows); or the leg is a dial-out (`dial_out`), whose ACK is ours to send, not to receive |
   | `:in_mix` | an ACK is a retransmission: ignore it | the leg attached |
 
   Two consequences to accept rather than engineer around. A script that
@@ -124,15 +124,16 @@ defmodule Kelix.Mod.Mcu.SBB.Conference do
   @bye_timeout 10_000
 
   # No `on_events`: this reads where the leg is and moves. The only phase that
-  # needs acting on here is the UPDATE that was handed back and answered — RFC
-  # 3311 §5.1 makes its 200 the end of the offer/answer, so no ACK follows and
-  # the mix has to be told now.
+  # needs acting on here is a leg no ACK will reach: the UPDATE that was handed
+  # back and answered — RFC 3311 §5.1 makes its 200 the end of the offer/answer —
+  # and a dial-out, whose ACK we sent ourselves. Either way the mix has to be
+  # told now.
   state initial_state do
     if appdata_get(:mcu_leg_phase) == :attach_pending do
       case attach_leg(sip_ctx) do
         {sip_ctx, :ok} ->
           appdata_set(:mcu_leg_phase, :in_mix)
-          goto(in_conference, "UPDATE renegotiated: back in the mix")
+          goto(in_conference, "no ACK to wait for: in the mix")
 
         {sip_ctx, {:refused, reason}} ->
           sip_ctx = release_leg(sip_ctx, reason)

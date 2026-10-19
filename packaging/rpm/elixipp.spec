@@ -49,7 +49,10 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.1-1
 - Released together with kelixip 1.7.1-1: 1.7.0 with the SIP stack changes of
   1.6.4-2 to 1.6.4-8 (B2BUA trunk reachability and outbound digest, a host
-  name in the Contact, TLS/TCP socket errors no longer crash the transport).
+  name in the Contact, TLS/TCP socket errors no longer crash the transport),
+  and those of 1.6.5-1 to 1.6.5-5 (a P-Asserted-Identity holding two
+  bracketed values on one line no longer raises, the 2xx names the remote tag
+  of an outbound dialog).
 - User-Agent is now Elixipp-1.7.1.
 
 * Wed Oct 07 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.0-1
@@ -58,6 +61,10 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
   send_file_page, file_info) and the example pair uac_file_message.exs /
   uas_file_message.exs.
 - User-Agent is now Elixipp-1.7.0.
+
+* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-1
+- Released together with kelixip 1.6.5-1; the SIP stack it shares no longer
+  raises on a P-Asserted-Identity holding two bracketed values on one line.
 
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-8
 - Released together with kelixip 1.6.4-8; nothing changes in the tool.

@@ -216,6 +216,22 @@ defmodule Kelix.Control.CLI do
     end
   end
 
+  # `run <script> <domain> [name=value…]`: the tokens become the script's
+  # `run_args`, string to string — REST takes typed JSON, a command line has only
+  # strings to give.
+  defp parse(["run", script, domain | tokens]) do
+    case Enum.find(tokens, &(not String.contains?(&1, "="))) do
+      nil ->
+        args = Map.new(tokens, &(&1 |> String.split("=", parts: 2) |> List.to_tuple()))
+        {:ok, :run, :run_script, [script, domain, args]}
+
+      bad ->
+        {:error, "run: #{inspect(bad)} is not name=value"}
+    end
+  end
+
+  defp parse(["run" | _]), do: {:error, "usage: kelictl run <script> <domain> [name=value…]"}
+
   defp parse(["debug", "list"]), do: {:ok, :traces, :traces, []}
 
   # `--format-puml` and `--full` anywhere after `show`, like `--notify` for
@@ -342,6 +358,7 @@ defmodule Kelix.Control.CLI do
     "module",
     "log-level",
     "stop",
+    "run",
     "debug",
     "reload-all",
     "reload-script",
@@ -511,6 +528,19 @@ defmodule Kelix.Control.CLI do
       {@exit_conflict,
        "the journal of scenario #{id} was already written, and a scenario has only one — " <>
          "`kelictl debug show #{id}`"}
+
+  defp render(:run, {:error, :not_found}), do: {@exit_not_found, "no such domain"}
+
+  defp render(:run, {:error, :bad_script_name}),
+    do: {1, "run: a script name from script_dir, not a path"}
+
+  defp render(:run, {:error, {:script, reason}}),
+    do:
+      {1,
+       "run: the script does not load: #{if is_binary(reason), do: reason, else: inspect(reason)}"}
+
+  defp render(:run, {:error, {:rejected, code, reason}}),
+    do: {@exit_unavailable, "run: refused, #{code} #{reason}"}
 
   defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
   defp render(:reg_domain, {:error, :not_found}), do: {1, "no such domain"}
@@ -732,6 +762,9 @@ defmodule Kelix.Control.CLI do
   end
 
   defp render(:ok, :ok), do: {0, "ok"}
+
+  defp render(:run, {:ok, %{id: id}}),
+    do: {0, "instance #{id} started (kelictl monitor; kelictl stop #{id})"}
 
   defp render({:debug, id, "on"}, :ok) do
     {0,
@@ -1634,6 +1667,8 @@ defmodule Kelix.Control.CLI do
       mediaserver show <name>         one media server in detail
       mediaserver enable|disable <name>  take a media server in/out of the pool
       stop <id>                       shut down one scenario
+      run <script> <domain> [k=v…]    start a script now, with no SIP request
+                                      behind it; k=v become its run_args
       debug <id> on|off               journal of a live scenario:
                                       start it now / write it now
       debug list                      the journals kept in memory

@@ -56,6 +56,7 @@ do about it — the release's own script would only say `cat: Permission denied`
 | `kelictl mediaserver show <name>` | R | One media server in detail, including what it says about itself |
 | `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
+| `kelictl run <script> <domain> [key=value…]` | W | Start a script now, with no SIP request behind it; the pairs become its `run_args` — [REST](rest-api.md#running-a-script-on-demand) |
 | `kelictl debug <id> on\|off` | W | Start the journal of a live scenario now, or write it now — [below](#the-journal-of-a-live-scenario) |
 | `kelictl debug list` | R | The journals kept in memory |
 | `kelictl debug show <id> [--full] [--format-puml]` | R | One journal, as a sngrep-like ladder (default) or PlantUML |

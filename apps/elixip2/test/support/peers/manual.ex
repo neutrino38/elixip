@@ -57,6 +57,16 @@ defmodule SIP.Test.Peers.Manual do
   end
 
   @doc """
+  Answer from now on with another To tag: the callee whose 2xx comes from another
+  leg than its 1xx did. The Microsoft PSTN hub does exactly that — its 180 and its
+  200 to one INVITE carry two different tags (capture of 2026-10-19).
+  """
+  @spec retag(pid(), String.t()) :: :ok
+  def retag(t_pid, totag) when is_binary(totag) do
+    Mockup.tell_peer(t_pid, {:retag, totag})
+  end
+
+  @doc """
   Hang up: the BYE this peer sends when the person it stands for goes on-hook,
   delivered inbound like a datagram off the wire.
 
@@ -186,6 +196,8 @@ defmodule SIP.Test.Peers.Manual do
   end
 
   def on_command(:hangup, state), do: send_in_dialog(state, :BYE, "hang up")
+
+  def on_command({:retag, totag}, state), do: {[], %{state | totag: totag}}
 
   def on_command({:refresh_session, headers}, state) do
     case send_in_dialog(state, :UPDATE, "refresh the session") do

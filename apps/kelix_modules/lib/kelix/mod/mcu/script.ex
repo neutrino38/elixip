@@ -3,7 +3,7 @@ defmodule Kelix.Mod.Mcu.Script do
   MCU helpers mixin for the MCU scenario scripts (`mcu.exs`, `mcu_adhoc.exs`
   and their copies).
 
-  This module provides the `admit`, `attach` and `leave` FSL macros (through
+  This module provides the `admit`, `dial_out`, `attach` and `leave` FSL macros (through
   `__using__/1`), following the `SIP.Session.Media` scheme: the expansion
   rebinds the scenario's `sip_ctx` variable in place, so the state code reads
   like the other FSL verbs — no visible `sip_ctx =` — and only tests
@@ -35,6 +35,31 @@ defmodule Kelix.Mod.Mcu.Script do
 
           var!(sip_ctx) =
             do_admit(var!(sip_ctx), unquote(req), unquote(dialog_pid), var!(sip_ctx).domain)
+        end
+      end
+
+      # Reserve a slot in the conference on `did` for a leg this script PLACES
+      # (dial-out, DESIGN-MCU.md L6), towards `callee`. No SIP reply to compose —
+      # nobody asked us anything — so it calls the context-aware
+      # `Kelix.Mod.Mcu.dial_out/5` directly, on the domain of the current context,
+      # and leaves the verdict in `sip_ctx.lasterr` like `admit`.
+      #
+      # The leg comes back wired for `media_connect()` and an INVITE whose body is
+      # `:mediaserver`; once its 200 is processed, `Mcu.SBB.conference()` puts it in
+      # the mix on entry. `Kelix.Mod.Mcu.dial_out/5` says why each piece differs from
+      # an inbound leg.
+      defmacro dial_out(did, callee, opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "mcu_dial_out")
+
+          var!(sip_ctx) =
+            Kelix.Mod.Mcu.dial_out(
+              var!(sip_ctx),
+              var!(sip_ctx).domain,
+              unquote(did),
+              unquote(callee),
+              unquote(opts)
+            )
         end
       end
 

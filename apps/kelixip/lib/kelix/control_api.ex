@@ -26,6 +26,7 @@ defmodule Kelix.ControlAPI do
   | `traces/0` | `GET /traces` |
   | `trace/1` | `GET /traces/:id` (the journal, unrendered, secrets masked) |
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
+  | `run_script/3` | `POST /scripts/:name/run` (body `{"domain": …, "args": {…}}`) → `202` |
   | `reload_domains/0` | `POST /domains/reload` |
   | `reload_all/0` | `POST /reload-all` |
   | `module_reload/1` | `POST /modules/:name/reload` |
@@ -207,6 +208,34 @@ defmodule Kelix.ControlAPI do
 
       _ ->
         json(conn, 400, %{error: ~s(body must be {"names": ["…"]})})
+    end
+  end
+
+  # A script run on demand: `202` with the instance id, which is what `/scenarios`
+  # lists and `/scenarios/:id/shutdown` stops — the instance runs on after the
+  # response, and how it ends is the monitor's to show.
+  post "/scripts/:name/run" do
+    case {conn.body_params["domain"], Map.get(conn.body_params, "args", %{})} do
+      {domain, args} when is_binary(domain) and is_map(args) ->
+        case Control.run_script(name, domain, args) do
+          {:ok, %{id: id}} ->
+            json(conn, 202, %{result: %{id: id}})
+
+          {:error, :not_found} ->
+            json(conn, 404, %{error: "no domain #{domain}"})
+
+          {:error, :bad_script_name} ->
+            json(conn, 400, %{error: "a script name, not a path"})
+
+          {:error, {:script, reason}} ->
+            json(conn, 422, %{error: "script #{name} does not load: #{error_message(reason)}"})
+
+          {:error, {:rejected, code, reason}} ->
+            json(conn, code, %{error: reason})
+        end
+
+      _ ->
+        json(conn, 400, %{error: ~s(body must be {"domain": "…", "args": {…}}, args optional)})
     end
   end
 

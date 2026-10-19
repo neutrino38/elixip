@@ -82,6 +82,14 @@ defmodule SIP.Test.MsgOpsIdentity do
       assert Ops.asserted_username(req) == "+33970260233"
     end
 
+    # Microsoft Teams Direct Routing, verbatim: bracketed, comma, no space.
+    test "two bracketed values on one line, unspaced, tel: first" do
+      req =
+        invite(%{"P-Asserted-Identity" => "<tel:+33977190504>,<sip:emmanuel.buu@ives.fr>"})
+
+      assert Ops.asserted_username(req) == "+33977190504"
+    end
+
     test "two occurrences arrive as a list" do
       req = invite(%{"P-Asserted-Identity" => ["tel:+33970260233", "sip:dave@example.com"]})
       assert Ops.asserted_username(req) == "+33970260233"
@@ -140,6 +148,13 @@ defmodule SIP.Test.MsgOpsIdentity do
 
       assert %SIP.Uri{userpart: "dave", domain: "example.com"} = Ops.asserted_identity(sip_first)
       assert %SIP.Uri{userpart: "dave", domain: "example.com"} = Ops.asserted_identity(tel_first)
+    end
+
+    test "the Microsoft PSTN hub's unspaced bracketed pair yields its sip: value" do
+      req =
+        invite(%{"P-Asserted-Identity" => "<tel:+33977190504>,<sip:emmanuel.buu@ives.fr>"})
+
+      assert %SIP.Uri{userpart: "emmanuel.buu", domain: "ives.fr"} = Ops.asserted_identity(req)
     end
 
     test "two occurrences arrive as a list" do

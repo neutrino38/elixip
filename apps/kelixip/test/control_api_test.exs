@@ -199,6 +199,38 @@ defmodule Kelix.ControlAPITest do
       assert Map.has_key?(body(conn), "does-not-exist")
     end
 
+    test "POST /scripts/:name/run → 202 with the instance id, which /scenarios lists" do
+      %{dir: dir} =
+        Kelix.Test.Fixtures.serve_domains("""
+        [[domain]]
+        name = "runapi.example.com"
+        """)
+
+      File.cp!(Path.join(__DIR__, "support/scripts/launched.exs"), Path.join(dir, "launched.exs"))
+      Kelix.Test.Fixtures.with_script_dir(dir)
+      Process.register(self(), :kelix_launch_test)
+
+      run = fn name, body ->
+        conn(:post, "/scripts/#{name}/run", Jason.encode!(body))
+        |> put_req_header("content-type", "application/json")
+        |> call()
+      end
+
+      conn = run.("launched.exs", %{domain: "runapi.example.com", args: %{to: "+33977190504"}})
+      assert conn.status == 202
+      assert %{"result" => %{"id" => id}} = body(conn)
+      on_exit(fn -> Kelix.Control.shutdown_scenario(id) end)
+
+      assert_receive {:launched, %{"to" => "+33977190504"}, "runapi.example.com", nil}, 2_000
+      assert Enum.any?(body(call(conn(:get, "/scenarios"))), &(&1["id"] == id))
+
+      assert run.("launched.exs", %{domain: "nowhere.test"}).status == 404
+      assert run.("launched.exs", %{args: %{}}).status == 400
+      assert run.("launched.exs", %{domain: "runapi.example.com", args: "x"}).status == 400
+      assert run.("..%2Flaunched.exs", %{domain: "runapi.example.com"}).status == 400
+      assert run.("missing.exs", %{domain: "runapi.example.com"}).status == 422
+    end
+
     test "POST /scripts/reload without names → 400" do
       conn =
         conn(:post, "/scripts/reload", Jason.encode!(%{}))
