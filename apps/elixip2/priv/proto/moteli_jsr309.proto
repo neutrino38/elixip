@@ -681,10 +681,94 @@ message SetupDataChannelReq {
   uint32 remote_sctp_port = 4;
 }
 
+// --- Speech processors ----------------------------------------------------------------
+// Two ports, 0 (A) and 1 (B), each carrying audio and/or text; video is
+// refused and goes endpoint to endpoint (EndpointAttachToEndpoint). The relays
+// are automatic: a medium entering a port leaves on the other one as soon as
+// both ends are attached, no call enables them. Audio is always decoded, mixed
+// with the comfort noise and re-encoded with the port codec; text leaves as
+// T.140 RED when the endpoint accepts it, plain T.140 otherwise.
+// Contract: mediaserver docs/JSR-309-API.md §6.13; design: mediaserver
+// docs/conception/SPEECH-PROCESSOR/SPEC.md.
+
+message SpeechProcessorCreateReq {
+  uint32 session_id = 1;
+  string name = 2;
+}
+// -> CreatedResp (sp_id)
+
+message SpeechProcessorDeleteReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+}
+
+// The port encoder, set like a mixer port from the SDP of its leg. Required
+// before audio leaves the port.
+message SpeechProcessorPortSetCodecReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3; // 0 (A) or 1 (B)
+  int32 codec = 4; // AudioCodec table
+}
+
+// White noise mixed into the audio leaving the port: -96 to 0 dBov, 0 being
+// exact silence. Default -65.
+message SpeechProcessorSetComfortNoiseReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  int32 dbov = 4;
+}
+
+// The port RECEIVES the medium of the endpoint.
+message SpeechProcessorAttachToEndpointReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  uint32 endpoint_id = 4;
+  MediaType media = 5; // MEDIA_AUDIO or MEDIA_TEXT
+}
+
+// The endpoint RECEIVES the medium of the port.
+message EndpointAttachToSpeechProcessorReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  uint32 sp_id = 3;
+  uint32 port = 4;
+  MediaType media = 5; // MEDIA_AUDIO or MEDIA_TEXT
+}
+
+message SpeechProcessorDettachReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  MediaType media = 4;
+}
+
+// The voice entering `port` is transcribed by speech-server. A VAD sends it
+// only while someone speaks: silence is not billed. Fails with "speech service
+// not configured" when the media server runs without --speech-url. Calling it
+// again replaces the settings and reopens the stream.
+message SpeechProcessorStartRecognitionReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;          // where the voice comes in
+  bool to_events = 4;       // Jsr309SpeechRecognized events
+  int32 text_port = 5;      // T.140 output port, -1 for none; at least one destination
+  bool half_duplex = 6;     // mute recognition while synthesis speaks to this port
+}
+
+message SpeechProcessorStopRecognitionReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+}
+
 // --- Events (published on kelixip.events, routing key <instance>.jsr309.<session tag>) ----------
 // Wire event codes stay append-only server-side (1 player EOF, 2 external FIR,
 // 3 player started, 4 recorder started, 5 recorder stopped, 6 endpoint
-// disconnected, 7 endpoint connected).
+// disconnected, 7 endpoint connected, 8 speech recognized, 9 speech synthesis
+// started, 10 speech synthesis done, 11 speech activity, 12 speech service).
 // TODO(P3): confirm the exact per-event payload fields against the server's
 // event serializer when porting the event sink; tags below follow the
 // long-poll tuples consumed by MediaServer.Mendooze.EventPoller today.
@@ -734,6 +818,35 @@ message Jsr309EndpointConnected {
   MediaType media = 3;
 }
 
+// Text recognised from the voice entering `port`. final=false: the deltas of
+// the last 250 ms at most; final=true: the whole utterance, once the speaker
+// stopped and the text settled.
+message Jsr309SpeechRecognized {
+  string session_tag = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  string text = 4;
+  bool final = 5;
+}
+
+// The VAD of `port` heard someone start or stop speaking (barge-in).
+message Jsr309SpeechActivity {
+  string session_tag = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  bool speaking = 4;
+}
+
+// A speech-server stream went down or came back; up also follows each start.
+message Jsr309SpeechService {
+  string session_tag = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  string function = 4; // "asr" or "tts"
+  bool up = 5;
+  string reason = 6;   // empty when up
+}
+
 message Jsr309Event {
   oneof body {
     Jsr309PlayerEndOfFile player_end_of_file = 1;
@@ -743,5 +856,8 @@ message Jsr309Event {
     Jsr309RecorderStopped recorder_stopped = 5;
     Jsr309EndpointDisconnected endpoint_disconnected = 6;
     Jsr309EndpointConnected endpoint_connected = 7;
+    Jsr309SpeechRecognized speech_recognized = 8;
+    Jsr309SpeechActivity speech_activity = 11;
+    Jsr309SpeechService speech_service = 12;
   }
 }

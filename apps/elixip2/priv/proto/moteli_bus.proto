@@ -225,6 +225,15 @@ message ControlRequest {
     ConnectMediaConnectionReq connect_media_connection = 278;
     EndpointCreateVideoStreamReq endpoint_create_video_stream = 279;
     EndpointDeleteVideoStreamReq endpoint_delete_video_stream = 280;
+    SpeechProcessorCreateReq speech_processor_create = 281;
+    SpeechProcessorDeleteReq speech_processor_delete = 282;
+    SpeechProcessorPortSetCodecReq speech_processor_port_set_codec = 283;
+    SpeechProcessorSetComfortNoiseReq speech_processor_set_comfort_noise = 284;
+    SpeechProcessorAttachToEndpointReq speech_processor_attach_to_endpoint = 285;
+    EndpointAttachToSpeechProcessorReq endpoint_attach_to_speech_processor = 286;
+    SpeechProcessorDettachReq speech_processor_dettach = 287;
+    SpeechProcessorStartRecognitionReq speech_processor_start_recognition = 288;
+    SpeechProcessorStopRecognitionReq speech_processor_stop_recognition = 289;
   }
 }
 
@@ -278,6 +287,7 @@ message ControlResponse {
     CreatedResp video_transcoder_create = 270;
     StringResp get_media_candidates = 276;
     EndpointCreateVideoStreamResp endpoint_create_video_stream = 279;
+    CreatedResp speech_processor_create = 281;
   }
 }
 
