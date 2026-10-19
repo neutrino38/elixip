@@ -340,6 +340,48 @@ defmodule Kelix.Mod.SipServers do
   end
 
   @doc """
+  Where an INVITE a script **places itself** — no inbound leg to forward, hence no
+  `b2bua_forward` — must go to reach `user` at the server `slug`: `{:ok, uri}`, the
+  server's first URI not known to be down, with `user` as its user part and the
+  host our Contact must publish towards that server (`use_fqdn_contact`) carried in
+  `contact_host`. Hand it to `send_INVITE` as the Request-URI.
+
+  What `forward/3` does for a forwarded call, minus what only the B2BUA can do:
+  there is no failover onto the next URI (the script gets the first usable one), and
+  the call is counted as sent to the server. A `sip-appsrv` only — a `sip-proxy`
+  routes on a Request-URI it keeps, and a `sip-trunk` rewrites the From and answers
+  challenges with its account, both of which belong to the forwarding path:
+  `{:error, {:unsupported_type, type}}`. Also `{:error, :not_found}` for an unknown
+  server and `{:error, :no_reachable_uri}` when every URI is known to be down.
+  """
+  @spec dial_target(%SIP.Context{} | String.t(), String.t(), String.t()) ::
+          {:ok, %SIP.Uri{}} | {:error, term}
+  def dial_target(ctx_or_domain, slug, user) when is_binary(slug) and is_binary(user) do
+    domain = domain_of(ctx_or_domain)
+
+    case Kelix.Module.safe_call(__MODULE__, {:forward, domain, String.downcase(slug)}) do
+      {:ok, %Server{type: "sip-appsrv"} = server, resolved, turn, link} ->
+        req = %{method: :INVITE, ruri: %SIP.Uri{userpart: user, domain: domain}}
+        {_req, peer} = Route.forward(req, server, resolved, turn, link)
+
+        case Enum.find(List.flatten(peer.uris), &(not is_pid(link) or Link.reachable?(link, &1))) do
+          %SIP.Uri{} = target ->
+            if is_pid(link), do: Link.count_call(link, :out)
+            {:ok, %SIP.Uri{target | contact_host: peer.contact_host}}
+
+          nil ->
+            {:error, :no_reachable_uri}
+        end
+
+      {:ok, %Server{type: type}, _resolved, _turn, _link} ->
+        {:error, {:unsupported_type, type}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
   Subscribe `pid` to the servers of `domain`: `{:ok, %{owner: pid, servers: [row]}}`,
   then the pushes described in the module doc. The snapshot and the registration
   happen in one message of the service, so no change falls between them. `owner`
