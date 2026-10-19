@@ -201,6 +201,20 @@ nothing and their verdict is read from `sip_ctx.lasterr`.
 admit(req, dialog_pid)     # verdict in sip_ctx.lasterr
 ```
 
+The macro calls the script's `do_admit/4`, which calls `Kelix.Mod.Mcu.admit/4`.
+That function reads the conference number (DID) from the user part of the R-URI.
+A script that computes the number another way passes it with `did:`:
+
+```elixir
+# the last 4 digits of the dialled number: "+33977190504" -> "0504"
+Kelix.Mod.Mcu.admit(sip_ctx, domain, req, did: String.slice(user, -4, 4))
+```
+
+The number must name the room the script created or found with
+`ensure_conference/3`. Otherwise the verdict is `{:error, :no_such_conference}`.
+The ad-hoc reference scripts compute the number once, in `did_of/1`, and pass it
+to both calls.
+
 Processes an INVITE request and
 - checks that the user part of the INVITE's R-URI matches an existing conference
   SIP number,
@@ -241,6 +255,52 @@ last write wins.
 
 See the [`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs) sample script for more
 explanation.
+
+### dial_out(did, callee, opts)
+
+```elixir
+dial_out(conf.did, target)            # verdict in sip_ctx.lasterr
+dial_out(conf.did, target, displayname: "PSTN")
+```
+
+Reserves a seat in the conference on `did` for a call the script **places** to
+`callee` (a `%SIP.Uri{}` or a URI string), on the domain of the current context — the
+outbound counterpart of `admit()`. The verdicts are `admit()`'s, plus
+`{:error, :bad_callee}`; the participant is named after the callee, and
+`displayname: :auto` (the default) shows its user part on the tile.
+
+The leg is wired for the INVITE that follows, with three differences from an
+admitted one:
+
+| Set | Not set | Why |
+|---|---|---|
+| `:media_conn_opts` = `mcu_participant:` | `nat_latch` | the address we send to is the callee's answer, not a caller's idea of itself |
+| `:mediaserver_instance` | `:username` | the identity of a call we place is the script's own (`config`); the DID is no one's |
+| `:mcu_leg_phase` = `:attach_pending` | | we send the ACK, so none arrives: `Mcu.SBB.conference()` attaches on entry |
+
+Then the INVITE carries the conference's offer:
+
+```elixir
+media_connect()
+send_INVITE(target, :mediaserver, media: :audio_video, srtp: :sdes, timeout: 90)
+# … on the 200:
+process_invite_reply(rsp, trans)      # applies the answer, sends the ACK
+goto(in_conference)                   # whose body is Mcu.SBB.conference()
+```
+
+The options the offer reads, given to `send_INVITE` like `media:`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `srtp:` | `:none` | `:sdes` offers RTP/SAVP with our key per media; an answer in the clear is then refused |
+| `ice:` | `:none` | `:lite` adds a=ice-lite, our ICE credentials, a host candidate and rtcp-mux — what the leg answers a peer offering ICE with. Teams Direct Routing runs full ICE and wants it |
+| `codec_order:` | `[]` | `[audio: ["PCMA"], video: ["H264"]]` — the names listed first, per media. Only orders what the media server accepted; an unknown name is ignored |
+
+The offer lists what the media server accepted out of every codec name the module
+knows, so a codec the server cannot carry is never offered (DESIGN-MCU §5.2). A
+WebRTC offer (`webrtc: :yes`) is refused: DTLS+ICE callers call in. A re-offer from
+our side is refused too; the far end's re-INVITEs are handed back by the block as
+usual.
 
 ### attach()
 

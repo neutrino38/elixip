@@ -128,6 +128,21 @@ defmodule Kelix.InstancePool do
   def accept(route, dialog_id, req, overrides \\ []),
     do: GenServer.call(__MODULE__, {:accept, route, dialog_id, req, overrides})
 
+  @doc """
+  Reserve a slot and spawn an instance **no SIP request started** — a script run on
+  demand (`Kelix.Control.run_script/3`). Everything else is `accept/4`'s: the same
+  quotas (`503` beyond), the same versioned checkout, the same monitor row, the same
+  cooperative shutdown. The instance has no dialog and no inbound request; `args`
+  seeds its appdata under `:run_args`, where the script reads what it was asked to do.
+
+  `{:ok, %{id: id, pid: pid}}` — `id` being the handle `kelictl stop` and the monitor
+  use — or `{:reject, code, reason}`.
+  """
+  @spec launch(route, map, keyword) ::
+          {:ok, %{id: pos_integer, pid: pid}} | {:reject, integer, String.t()}
+  def launch(route, args, overrides \\ []) when is_map(args),
+    do: GenServer.call(__MODULE__, {:launch, route, args, overrides})
+
   @doc "Runtime counters (for --monitor / status / tests)."
   def stats(), do: GenServer.call(__MODULE__, :stats)
 
@@ -213,6 +228,17 @@ defmodule Kelix.InstancePool do
     case live_conversation(state, Map.get(route, :conversation)) do
       {ref, inst} -> join_conversation(state, ref, inst)
       nil -> reserve_and_spawn(state, route, dialog_id, req, overrides)
+    end
+  end
+
+  def handle_call({:launch, route, args, overrides}, _from, state) do
+    case reserve_and_spawn(state, route, nil, nil, overrides, appdata: %{run_args: args}) do
+      {:reply, {:accept, pid}, state} ->
+        %{id: id} = Enum.find(Map.values(state.instances), &(&1.pid == pid))
+        {:reply, {:ok, %{id: id, pid: pid}}, state}
+
+      reject ->
+        reject
     end
   end
 
@@ -448,7 +474,9 @@ defmodule Kelix.InstancePool do
 
   # ── internals ────────────────────────────────────────────────────────────────
 
-  defp reserve_and_spawn(state, route, dialog_id, req, overrides) do
+  # `run_opts` go to the instance on top of the pool's own — the appdata seed of a
+  # launched script, nothing for a routed request.
+  defp reserve_and_spawn(state, route, dialog_id, req, overrides, run_opts \\ []) do
     %{domain: domain, function: function, script: script, max_calls: dmax} = route
     server_max = server_max_calls()
 
@@ -466,7 +494,17 @@ defmodule Kelix.InstancePool do
         {:reply, {:reject, 503, "Service Unavailable"}, bump(state, :rejected_quota)}
 
       true ->
-        spawn_instance(state, route, function, domain, script, dialog_id, req, overrides)
+        spawn_instance(
+          state,
+          route,
+          function,
+          domain,
+          script,
+          dialog_id,
+          req,
+          overrides,
+          run_opts
+        )
     end
   end
 
@@ -617,7 +655,7 @@ defmodule Kelix.InstancePool do
     :exit, _ -> nil
   end
 
-  defp spawn_instance(state, route, function, domain, script, dialog_id, req, overrides) do
+  defp spawn_instance(state, route, function, domain, script, dialog_id, req, overrides, run_opts) do
     case ScriptRegistry.checkout(script) do
       {:error, reason} ->
         Logger.error(
@@ -642,7 +680,7 @@ defmodule Kelix.InstancePool do
               # `Kelix.Control.monitor/0` can join the two views — and so a
               # `spawn_fsm` child sorts right under its parent ({id, name}).
               slot_id: id
-            ] ++ wake_conversation(route, id)
+            ] ++ wake_conversation(route, id) ++ run_opts
           )
 
         inst = %{

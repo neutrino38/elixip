@@ -51,7 +51,7 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     def handle_call(:established?, _from, state),
       do: {:reply, state.state == :established, state}
 
-    # The stamp of dialog-state-plan.md DS3, from the authenticate block.
+    # The stamp (DESIGN-PRESENCE.md, "Call occupancy"), from the authenticate block.
     def handle_call({:set_remote_aor, aor}, _from, state) do
       send(state.test, {:stamped, aor})
       {:reply, :ok, state}
@@ -242,7 +242,7 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     assert fwd.ruri.domain == "10.0.0.9"
 
     # Each leg is stamped with the served AOR its far end is PROVEN to be
-    # (dialog-state-plan.md §1): Alice's by the digest, Bob's by the registrar
+    # (DESIGN-PRESENCE.md, "Call occupancy"): Alice's by the digest, Bob's by the registrar
     # that grouped his bindings. Bob's leg is a real dialog, so it pushes its
     # call state as soon as it exists.
     assert_receive {:stamped, %SIP.Uri{userpart: @caller, domain: @domain}}, 1_000

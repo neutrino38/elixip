@@ -226,7 +226,7 @@ different backend is this one function rewritten. The algorithm comes back *with
 the credential because it is a property of the stored secret, not of the request.
 
 See [DESIGN-AUTH.md](../../design/DESIGN-AUTH.md) for the rules behind these
-verdicts, and [evolution-auth-db.md](../../design/evolution-auth-db.md) for where this leads
+verdicts, and [kelixip_roadmap.md](../../design/kelixip_roadmap.md#a-replaceable-authentication-backend) for where this leads
 (an `Auth` behaviour, and a Diameter backend).
 
 ### `lookup_ha1/2`

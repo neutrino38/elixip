@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.DialogStateTest do
   @moduledoc """
-  The call occupancy of a served AOR (docs/design/dialog-state-plan.md, DS5):
+  The call occupancy of a served AOR (docs/design/DESIGN-PRESENCE.md, "Call occupancy"):
   what a stamped dialog's transitions become — a dialog row pushed to the ACD,
   and two documents reported to presence — and the resync after either side
   restarts.

@@ -608,16 +608,31 @@ defmodule Kelix.Mod.Mcu do
       Resolved here (only this call still holds the request), stored on the row,
       and sent at `attach/1` time — the MCU-side participant does not exist yet
       during admit. Anything else is `{:error, :bad_displayname}`.
+    * `:did` — the conference to join, when the script computes it rather than
+      reading it off the R-URI (the last digits of a Teams number, say). It must
+      name the same room the script created with `ensure_conference/3`. Defaults
+      to the R-URI user part. Anything but a non-empty string is
+      `{:error, :bad_did}`.
   """
   @spec admit(String.t(), map, keyword) ::
           {:ok, Conference.t(), Conference.participant()}
           | {:error,
-             :no_such_conference | :full | :mcu_down | :bad_displayname | :down | :timeout}
+             :no_such_conference
+             | :full
+             | :mcu_down
+             | :bad_displayname
+             | :bad_did
+             | :down
+             | :timeout}
   def admit(domain, req, opts \\ [])
 
   def admit(domain, req, opts) when is_binary(domain) and is_map(req) and is_list(opts) do
-    with {:ok, display_name} <- requested_displayname(Keyword.get(opts, :displayname, :auto), req) do
-      Kelix.Module.safe_call(__MODULE__, {:admit, domain, req, display_name},
+    peer = uri_of(Map.get(req, :from))
+
+    with {:ok, did} <- requested_did(Keyword.get(opts, :did, :ruri), req),
+         {:ok, display_name} <-
+           requested_displayname(Keyword.get(opts, :displayname, :auto), peer) do
+      Kelix.Module.safe_call(__MODULE__, {:admit, domain, did, peer, display_name},
         timeout: @facade_timeout_ms
       )
     end
@@ -679,6 +694,84 @@ defmodule Kelix.Mod.Mcu do
               nat_latch: true
             )
             |> SIP.Context.appdata_set(:mediaserver_instance, media_config(conf))
+
+          {:error, _reason} = err ->
+            SIP.Context.set(sip_ctx, :lasterr, err)
+        end
+
+      {:error, sip_ctx} ->
+        sip_ctx
+    end
+  end
+
+  @doc """
+  Reserve a slot in the conference on `did` for a leg **we place** — dial-out, the
+  L6 of the design (§12). The same reservation as `admit/3`, with the two things an
+  inbound INVITE would have said stated instead: the conference (`did`) and the other
+  end of the leg (`callee`, a `%SIP.Uri{}` or a URI string), which names the
+  participant and, with `displayname: :auto`, its tile.
+
+  Returns `admit/3`'s verdicts. As there, nothing is created on the media server
+  here: the participant comes with the adapter connection, which the script opens
+  by sending its INVITE with `:mediaserver` as the body.
+  """
+  @spec dial_out(String.t(), String.t(), SIP.Uri.t() | String.t(), keyword) ::
+          {:ok, Conference.t(), Conference.participant()}
+          | {:error,
+             :no_such_conference
+             | :full
+             | :mcu_down
+             | :bad_displayname
+             | :bad_callee
+             | :down
+             | :timeout}
+  def dial_out(domain, did, callee, opts \\ [])
+
+  def dial_out(domain, did, callee, opts)
+      when is_binary(domain) and is_binary(did) and is_list(opts) do
+    with %SIP.Uri{} = peer <- uri_of(callee) || {:error, :bad_callee},
+         {:ok, display_name} <-
+           requested_displayname(Keyword.get(opts, :displayname, :auto), peer) do
+      Kelix.Module.safe_call(__MODULE__, {:admit, domain, did, peer, display_name},
+        timeout: @facade_timeout_ms
+      )
+    end
+  end
+
+  @doc """
+  Context-aware `dial_out/4`, for scenario scripts — `admit/4`'s contract: the
+  verdict lands in `sip_ctx.lasterr`, the conference and the participant in the
+  appdata under `:mcu_conf` and `:mcu_part`, and the JSR309 mutual exclusion applies.
+
+  The wiring differs from an inbound leg's in three places, each because this leg
+  is the one that offers:
+
+    * `:username` is **not** set. The local identity of a call we place is the
+      script's to choose (its `config` block), and it is already in every request
+      of the dialog we create; the DID would be an identity the far end never
+      heard of.
+    * `:media_conn_opts` carries `mcu_participant:` alone. No `nat_latch`: the
+      address we send to comes from the callee's ANSWER, and the topology it sits
+      on is the script's knowledge, not an assumption to make here.
+    * the leg is marked as having **no ACK to wait for** (`:mcu_leg_phase`,
+      `:attach_pending`). We send the ACK; nothing arrives to put the leg in the
+      mix, so `Mcu.SBB.conference()` does it on entry — once the 200 is in and
+      `process_invite_reply/2` has applied its answer.
+  """
+  @spec dial_out(%SIP.Context{}, String.t(), String.t(), SIP.Uri.t() | String.t(), keyword) ::
+          %SIP.Context{}
+  def dial_out(sip_ctx = %SIP.Context{}, domain, did, callee, opts) do
+    case no_jsr309_media(sip_ctx) do
+      {:ok, sip_ctx} ->
+        case dial_out(domain, did, callee, opts) do
+          {:ok, conf, part} ->
+            sip_ctx
+            |> SIP.Context.appdata_set(:mcu_conf, conf)
+            |> SIP.Context.appdata_set(:mcu_part, part)
+            |> SIP.Context.appdata_set(:media_conn_opts, mcu_participant: part)
+            |> SIP.Context.appdata_set(:mediaserver_instance, media_config(conf))
+            |> SIP.Context.appdata_set(:mcu_leg_phase, :attach_pending)
+            |> SIP.Context.set(:lasterr, :ok)
 
           {:error, _reason} = err ->
             SIP.Context.set(sip_ctx, :lasterr, err)
@@ -1883,8 +1976,8 @@ defmodule Kelix.Mod.Mcu do
 
   # `from` is the scenario instance: it is the process whose death must reap the
   # participant (§9.3), so it is recorded as the row's owner.
-  def handle_call({:admit, domain, req, display_name}, {scenario, _tag}, state) do
-    {result, state} = do_admit(state, domain, req, scenario, display_name)
+  def handle_call({:admit, domain, did, peer, display_name}, {scenario, _tag}, state) do
+    {result, state} = do_admit(state, domain, did, peer, scenario, display_name)
     {:reply, result, state}
   end
 
@@ -2050,13 +2143,13 @@ defmodule Kelix.Mod.Mcu do
 
   # ── admit / join / leave ─────────────────────────────────────────────────────
 
-  defp do_admit(state, domain, req, scenario, display_name) do
-    did = ruri_user(req)
-
+  # `peer` is the other end of the leg — the caller of an inbound one, the callee of a
+  # dial-out — and the participant is named after it either way.
+  defp do_admit(state, domain, did, peer, scenario, display_name) do
     with {:ok, conf} <- did_or_reject(domain, did),
          :ok <- mcu_up(conf),
          :ok <- room_left(conf) do
-      part = new_participant(conf, req, scenario, display_name)
+      part = new_participant(conf, peer, scenario, display_name)
 
       :ets.insert(
         @conf_table,
@@ -2171,14 +2264,14 @@ defmodule Kelix.Mod.Mcu do
   defp sip_code(:mcu_down), do: 503
   defp sip_code(_reason), do: 500
 
-  defp new_participant(conf, req, scenario, display_name) do
+  defp new_participant(conf, peer, scenario, display_name) do
     %{
       ref: make_ref(),
       part_id: nil,
       conf_uid: conf.uid,
-      name: participant_name(req),
+      name: participant_name(peer),
       display_name: display_name,
-      from: from_string(req),
+      from: from_string(peer),
       scenario: scenario,
       conn: nil,
       state: :ringing,
@@ -2196,34 +2289,37 @@ defmodule Kelix.Mod.Mcu do
 
   # `CreateParticipant`'s name must not contain a dot — mcuGold replaces it with
   # `_`, and so do we (§3.3).
-  defp participant_name(req) do
-    (from_string(req) || "unknown")
+  defp participant_name(peer) do
+    (from_string(peer) || "unknown")
     |> String.replace(".", "_")
   end
 
-  defp from_string(req) do
-    case uri_of(Map.get(req, :from)) do
-      %SIP.Uri{userpart: user, domain: domain} when is_binary(user) -> "#{user}@#{domain}"
-      _ -> nil
-    end
-  end
+  defp from_string(%SIP.Uri{userpart: user, domain: domain}) when is_binary(user),
+    do: "#{user}@#{domain}"
 
-  # Resolve admit/3's `:displayname` option into the name the others will see — or
+  defp from_string(_peer), do: nil
+
+  # Resolve admit's `:displayname` option into the name the others will see — or
   # nil for no name at all, which is also what an empty string means (the RPC's
-  # "clear" form has nothing to clear at admit time).
-  defp requested_displayname(nil, _req), do: {:ok, nil}
-  defp requested_displayname("", _req), do: {:ok, nil}
-  defp requested_displayname(name, _req) when is_binary(name), do: {:ok, name}
+  # "clear" form has nothing to clear at admit time). `:auto` reads the other end of
+  # the leg: the From of an inbound call, the dialled URI of a dial-out.
+  defp requested_displayname(nil, _peer), do: {:ok, nil}
+  defp requested_displayname("", _peer), do: {:ok, nil}
+  defp requested_displayname(name, _peer) when is_binary(name), do: {:ok, name}
 
-  defp requested_displayname(:auto, req) do
-    case uri_of(Map.get(req, :from)) do
+  defp requested_displayname(:auto, peer) do
+    case peer do
       %SIP.Uri{displayname: shown} when is_binary(shown) and shown != "" -> {:ok, shown}
       %SIP.Uri{userpart: user} when is_binary(user) and user != "" -> {:ok, user}
       _ -> {:ok, nil}
     end
   end
 
-  defp requested_displayname(_other, _req), do: {:error, :bad_displayname}
+  defp requested_displayname(_other, _peer), do: {:error, :bad_displayname}
+
+  defp requested_did(:ruri, req), do: {:ok, ruri_user(req)}
+  defp requested_did(did, _req) when is_binary(did) and did != "", do: {:ok, did}
+  defp requested_did(_other, _req), do: {:error, :bad_did}
 
   defp uri_of(%SIP.Uri{} = uri), do: uri
 

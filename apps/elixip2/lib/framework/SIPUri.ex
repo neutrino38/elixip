@@ -321,45 +321,63 @@ defmodule SIP.Uri do
         # Form "Display Name"<sip:user@domain>;param=value
         # Form DisplayName <sip:user@domain>;param=value
 
-        display_name =
-          cond do
-            # test "Display Name" <....
-            String.contains?(part1, "\" <") ->
-              [d_name, _truc] = String.split(part1, "\" <")
-              URI.decode_www_form(String.slice(d_name, 1..-1//1))
+        case display_name(part1) do
+          :error ->
+            {:invalid_sip_uri_general, Map.new()}
 
-            # test "Display Name"<....
-            String.contains?(part1, "\"<") ->
-              [d_name, _truc] = String.split(part1, "\"<")
-              # URI.decode_www_form(String.slice(d_name, 1..-1))
-              URI.decode_www_form(String.slice(d_name, 1..-1//1))
+          {:ok, display_name} ->
+            # Recurse to parse the URI part
+            case SIP.Uri.parse("<" <> proto <> part2) do
+              {:ok, core_uri} ->
+                {:ok, Map.put(core_uri, :displayname, display_name)}
 
-            # test DisplayName <....
-            String.contains?(part1, " <") ->
-              [d_name, _truc] = String.split(part1, " <")
-              URI.decode_www_form(d_name)
-
-            # test DisplayName <....
-            String.contains?(part1, "<") ->
-              [d_name, _truc] = String.split(part1, "<")
-              d_name
-
-            # Parse error
-            true ->
-              part1
-          end
-
-        # Recurse to parse the URI part
-        case SIP.Uri.parse("<" <> proto <> part2) do
-          {:ok, core_uri} ->
-            {:ok, Map.put(core_uri, :displayname, display_name)}
-
-          {code, core_uri} ->
-            {code, core_uri}
+              {code, core_uri} ->
+                {code, core_uri}
+            end
         end
 
       _ ->
         {:invalid_sip_uri_general, Map.new()}
+    end
+  end
+
+  # What precedes `<sip:` in a name-addr. An unquoted display name holds no angle
+  # bracket of its own (RFC 3261 §25.1 `token`), so a prefix that closes one, or
+  # opens two, is another value: `<tel:+33977190504>,<sip:a@b>` is the two values
+  # of RFC 3325 §9.1 on one line, unspaced, as the Microsoft PSTN hub sends them.
+  # The split below then yielded three parts and raised MatchError — refused
+  # instead, so that the caller falls back to reading each value on its own.
+  # Likewise a quoted display name is one only when the prefix opens with it.
+  defp display_name(part1) do
+    quoted = String.starts_with?(String.trim_leading(part1), "\"")
+
+    cond do
+      # test "Display Name" <....
+      quoted and String.contains?(part1, "\" <") ->
+        [d_name, _truc] = String.split(part1, "\" <", parts: 2)
+        {:ok, URI.decode_www_form(String.slice(d_name, 1..-1//1))}
+
+      # test "Display Name"<....
+      quoted and String.contains?(part1, "\"<") ->
+        [d_name, _truc] = String.split(part1, "\"<", parts: 2)
+        {:ok, URI.decode_www_form(String.slice(d_name, 1..-1//1))}
+
+      String.contains?(part1, ">") or length(String.split(part1, "<")) > 2 ->
+        :error
+
+      # test DisplayName <....
+      String.contains?(part1, " <") ->
+        [d_name, _truc] = String.split(part1, " <")
+        {:ok, URI.decode_www_form(d_name)}
+
+      # test DisplayName<....
+      String.contains?(part1, "<") ->
+        [d_name, _truc] = String.split(part1, "<")
+        {:ok, d_name}
+
+      # Parse error
+      true ->
+        {:ok, part1}
     end
   end
 

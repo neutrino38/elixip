@@ -29,24 +29,18 @@ The user-facing counterparts live at the repository root —
 
 | Document | Subject |
 |---|---|
-| [kelixip_roadmap.md](kelixip_roadmap.md) | presence, `Path` generation, usrloc persistence, HA, `radius_billing` |
+| [kelixip_roadmap.md](kelixip_roadmap.md) | `queue()` and its objects (trunks, agents, `queue_log`), `Path` generation, usrloc persistence, HA, `radius_billing` |
 | [mcu_server_evolutions.md](mcu_server_evolutions.md) | media-server increments the conferencing module waits on |
-| [evolution-auth-db.md](evolution-auth-db.md) | a replaceable authentication backend (LDAP, HTTP, Diameter) |
-| [kelixip-b2bua.md](kelixip-b2bua.md) | `queue()` above the B2BUA primitives (`call()` shipped in 1.5.0) |
 | [sbb_evolutions.md](sbb_evolutions.md) | service building blocks: the catalogue, the published view, the TypeScript side |
 | [integration-fail2ban.md](integration-fail2ban.md) | making kelixip trivially protectable |
 | [fail2ban-plan.md](fail2ban-plan.md) | the build order of the above: the incident struct and its one reporting function, the security log, the shipped filters and jails, what each phase proves |
 | [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
 | [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
-| [dialog-state-plan.md](dialog-state-plan.md) | call occupancy of a served AOR: the `dialog` package (RFC 4235), the stamp auth_db and the registrar put on a leg, the `dialog_state` module and its push for the ACD |
-| [presence-basic-plan.md](presence-basic-plan.md) | the build order of the above, phase by phase: what basic presence is, and what each step proves |
-| [presence-rls-plan.md](presence-rls-plan.md) | the buddy list on top of it: one SUBSCRIBE covering N resources (RFC 4662 / 5367), lot by lot |
 | [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
 | [chat-basic-plan.md](chat-basic-plan.md) | the build order of basic chat: the `chat` function, the page relay, the Silo, phase by phase |
-| [debug-improvments.md](debug-improvments.md) | scenario debugging: the sequence diagram drawn from the real SIP messages — what is built, its limits, what comes next (in French) |
-| [debug-fsl-port-plan.md](debug-fsl-port-plan.md) | carrying the step above across the FSL extraction: what goes into the `finite_state_language` package, what stays in the SIP binding, in which order |
-| [kelescope-debug-scenario.md](kelescope-debug-scenario.md) | a live scenario's journal in kelescope — what the node must add (FSL 0.4.1, `Kelix.Traces`, the pushes, `kelictl debug show` as a text ladder) and the kelescope side, against a frozen contract |
+| [DESIGN-CHAT-MEDIA.md](DESIGN-CHAT-MEDIA.md) | chat attachments: the RCS `fthttp` contract Linphone speaks, the file store behind Apache, the web client |
+| [chat-media-plan.md](chat-media-plan.md) | its build order: the PHP reference server first, Trix, then the Elixir store |
 
 ## Designed elsewhere
 

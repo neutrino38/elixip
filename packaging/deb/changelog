@@ -1,3 +1,53 @@
+kelixip (1.7.1-1) stable; urgency=low
+
+  * 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
+    kelixip-mod-sip-servers package (trunks, proxies and application servers,
+    OPTIONS liveness, tertiary_uri, source_networks, use_fqdn_contact,
+    publish_contact_host, ext_domain), the client certificate of config.toml
+    [tls], the registration binding's User-Agent, Call-ID and CSeq, the PUBLISH
+    received_time, trust_asserted_identity/1 and the SHA-256 digest spelling.
+  * And everything delivered in 1.6.5-1 to 1.6.5-5: a P-Asserted-Identity
+    holding two bracketed values on one line is refused instead of raising
+    (Teams Direct Routing), the 2xx names the remote tag of an outbound
+    dialog, a conference places calls (mcu dial_out/4, sip_servers
+    dial_target/3), admit/3 takes the conference number (did:), a script
+    starts on demand (POST /scripts/<name>/run, kelictl run), a trunk's
+    keepalive OPTIONS comes from its account with a user part in its Contact,
+    no module sends outbound SIP before the listeners are bound, and
+    compile_and_restart_all keeps the installed distribution cookie.
+  * User-Agent is now Kelixip/1.7.1.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 18 Oct 2026 18:00:00 +0200
+
+kelixip (1.7.0-1) stable; urgency=low
+
+  * Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
+    Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
+    store-and-forward intact.
+  * A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
+    a 415 without deflate in Accept-Encoding gets the page again in clear.
+  * The page relay keeps the sender's multipart Content-Type and relays a bare
+    multipart byte for byte.
+  * Multipart parts keep their trailing whitespace; a blank line before a
+    part's Content-* headers is tolerated.
+  * User-Agent is now Kelixip/1.7.0.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Wed, 07 Oct 2026 18:00:00 +0200
+
+kelixip (1.6.5-1) stable; urgency=low
+
+  * SIP.Uri: a P-Asserted-Identity holding two bracketed values on one line,
+    unspaced (<tel:…>,<sip:…>, as the Microsoft PSTN hub sends it), is refused
+    as one URI instead of raising: every Teams Direct Routing call died in
+    initial_account/1 before its script ran.
+  * sip_servers: a trunk's keepalive OPTIONS comes from its account, and its
+    Contact always carries a user part (a modified Kamailio crashed on a
+    user-less one).
+  * kelixip: no module sends outbound SIP before the listeners are bound.
+  * compile_and_restart_all keeps the installed distribution cookie.
+
+ -- Emmanuel BUU <latribuu@proton.me>  Mon, 19 Oct 2026 12:00:00 +0200
+
 kelixip (1.6.4-8) stable; urgency=low
 
   * sip_servers: with an ext_domain, the keepalive OPTIONS asks for
@@ -5,7 +55,7 @@ kelixip (1.6.4-8) stable; urgency=low
     calls are. The REGISTER and the calls to a trunk keep the URI's parameters
     (;transport=tls) when its host is replaced by ext_domain.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 18 Oct 2026 12:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Sun, 18 Oct 2026 12:00:00 +0200
 
 kelixip (1.6.4-7) stable; urgency=low
 
@@ -14,7 +64,7 @@ kelixip (1.6.4-7) stable; urgency=low
     publish_contact_host(peer.contact_host). Reference script mcu-from-sfu.exs,
     a conference entered from Teams Direct Routing.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 17 Oct 2026 22:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Sat, 17 Oct 2026 22:00:00 +0200
 
 kelixip (1.6.4-6) stable; urgency=low
 
@@ -22,7 +72,7 @@ kelixip (1.6.4-6) stable; urgency=low
     when a called TLS or WSS peer demands one (mutual TLS, Teams Direct
     Routing). cert holds the certificate followed by its intermediates.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 17 Oct 2026 18:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Sat, 17 Oct 2026 18:00:00 +0200
 
 kelixip (1.6.4-5) stable; urgency=low
 
@@ -32,7 +82,7 @@ kelixip (1.6.4-5) stable; urgency=low
   * TLS/TCP transports: a socket error stops the connection cleanly instead
     of crashing its process.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Fri, 16 Oct 2026 14:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Fri, 16 Oct 2026 14:00:00 +0200
 
 kelixip (1.6.4-4) stable; urgency=low
 
@@ -42,7 +92,7 @@ kelixip (1.6.4-4) stable; urgency=low
   * kelictl: server.list shows the first URI and counts the others,
     server.show lays the URIs out as a table with their role and state.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 18:10:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Mon, 12 Oct 2026 18:10:00 +0200
 
 kelixip (1.6.4-3) stable; urgency=low
 
@@ -52,7 +102,7 @@ kelixip (1.6.4-3) stable; urgency=low
   * A published presence state reports received_time, the instant the PUBLISH
     was accepted, in epoch seconds like kamailio's column.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 19:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Mon, 12 Oct 2026 19:00:00 +0200
 
 kelixip (1.6.4-2) stable; urgency=low
 
@@ -74,7 +124,7 @@ kelixip (1.6.4-2) stable; urgency=low
   * A script can keep an inbound P-Asserted-Identity: trust_asserted_identity/1.
   * Digest: a challenge naming SHA-256, the RFC 8760 spelling, is answered.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 12 Oct 2026 18:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Mon, 12 Oct 2026 18:00:00 +0200
 
 kelixip (1.6.4-1) stable; urgency=low
 
@@ -94,7 +144,7 @@ kelixip (1.6.4-1) stable; urgency=low
   * The reference media call script carries text too (T.140 data channel).
   * User-Agent is now Kelixip/1.6.4.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Thu, 08 Oct 2026 18:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Thu, 08 Oct 2026 18:00:00 +0200
 
 kelixip (1.6.3-2) stable; urgency=low
 
@@ -109,7 +159,7 @@ kelixip (1.6.3-2) stable; urgency=low
   * New [session_timer] section in config.toml: enabled (default true),
     expires (1800), min_se (90), refresher (local | remote, default local).
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Tue, 06 Oct 2026 18:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Tue, 06 Oct 2026 18:00:00 +0200
 
 kelixip (1.6.3-1) stable; urgency=low
 
@@ -119,7 +169,7 @@ kelixip (1.6.3-1) stable; urgency=low
     "do not disturb" back as busy and kept busy after a reload.
   * User-Agent is now Kelixip/1.6.3.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 03 Oct 2026 23:30:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Sat, 03 Oct 2026 23:30:00 +0200
 
 kelixip (1.6.2-1) stable; urgency=low
 
@@ -140,5 +190,5 @@ kelixip (1.6.2-1) stable; urgency=low
   * The control API encodes a pid as text: GET /scenarios no longer answers 500.
   * User-Agent is now Kelixip/1.6.2.
 
- -- Emmanuel BUU <emmanuel.buu@ives.fr>  Wed, 30 Sep 2026 18:00:00 +0200
+ -- Emmanuel BUU <latribuu@proton.me>  Wed, 30 Sep 2026 18:00:00 +0200
 

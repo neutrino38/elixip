@@ -6,7 +6,7 @@ defmodule SIP.EventPackage.Dialog do
   @moduledoc """
   `Event: dialog` — the package a BLF key subscribes through, and the one the
   `dialog_state` module reports call occupancy on
-  (docs/design/dialog-state-plan.md).
+  (docs/design/DESIGN-PRESENCE.md, "Call occupancy").
 
   Same bounds as `SIP.EventPackage.Presence`, for the same reasons: RFC 4235
   §3.4 keeps RFC 3856's default of 3600 s, and a desk phone refreshing its BLF

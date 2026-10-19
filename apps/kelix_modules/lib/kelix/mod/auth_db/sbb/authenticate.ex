@@ -23,7 +23,7 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
     * `{:ok, identity}` — records the identity (`assert_identity/1`, so the leg
       the host places next carries a `P-Asserted-Identity`), stamps the dialog
       with it (`SIP.Dialog.set_remote_aor/2`: the digest is what proves the far
-      end of this leg to be that served AOR, docs/design/dialog-state-plan.md
+      end of this leg to be that served AOR, docs/design/DESIGN-PRESENCE.md, "Call occupancy"
       §1) and returns;
     * `{:requireauth, stale}` — challenges and waits for the request to come back
       with credentials, on the same dialog: same Call-ID, a new CSeq, no To tag.

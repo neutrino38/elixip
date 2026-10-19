@@ -4,9 +4,6 @@ Registration state, published state, consent, and the composite state a
 subscriber presents to the others. Instant messaging is its neighbour and lives
 in [DESIGN-CHAT.md](DESIGN-CHAT.md), which also holds the Silo.
 
-The order this gets built in — the scope of *basic* presence, the phases, and what
-each one proves — is [presence-basic-plan.md](presence-basic-plan.md).
-
 ## Objectives
 
 Implement RFC 3856 and use it creatively, as follows.
@@ -33,10 +30,12 @@ needed for that.
 
 **3 — A Service Building Block for presence-based Automatic Call Distribution.**
 
-The idea is asterisk's `app_queue` with a purely SIP interface. Queues are
+The idea is asterisk's `app_queue`. Queues are
 persistent objects, like the MCU module's conferences: they are created, edited
 and destroyed through `kelictl` commands, the REST API and a dedicated kelescope
 view.
+
+
 
 Subscribing to a queue would be done like this:
 
@@ -67,17 +66,19 @@ STATE queue_call do
 
     on_events do
         { :queued, queue_entry } -> goto session_progress
-        { :unknown_queue, queue_entry } -> ...
-        { :empty_queue, queue_entry } -> ...
+        { :queue_unknown } -> ...
+        { :queue_empty, queue_proc } -> ...
     end
 end
 
 STATE session_progress do
     reply_invite_with_sdp(183, [media: :tc, webrtc: :if_offered])
     on_events do
-        {:ACK, _req, _trans, _dlg} -> goto play_background
-        {:CANCEL, _req, _trans, _dlg} ->
-            ACD.cancel_queue_call("myqueue")
+        {:ACK, _req, _trans, dlg} -> goto play_background
+        {:CANCEL, req, _trans, dlg} ->
+            ACD.cancel_queue_call(sip_ctx.queue_proc)
+            Dialog.reply(dlg, req, 200)
+            goto cancelled
     end
 end
 
@@ -85,28 +86,84 @@ STATE session_progress do
 
     media_play("background.mp4")
     on_events do
-        {:ms_event, _res, :player_ended} -> stay()
+        { :ms_event, _res, :player_ended} -> loop()
+        { :queue_empty, queue_proc } -> ...
+
+        { :CANCEL, _req, _trans, _dlg } ->
+            ACD.cancel_queue_call(sip_ctx.queue_proc)
+            Dialog.reply(dlg, req, 200)
+            goto cancelled
+
+        { :queue_connected, queue_proc, agent_uri } ->
+            # When connected, we established a transcoding bridge to the agent 
+            goto stop_queue_prompt
+
+        # If the queue object was removed during the call
+        { :queue_removed } -> ....
+    end
+end
+
+STATE stop_queue_prompt do
+  media_stop()
+
+  on_events do
+    { :ms_event, _res, :player_ended} -> goto bridge
+  end
+end
+
+
+STATE bridge
+  Call.SBB.bridge()
+
+  on_events do
+    {:bridge, :caller_hung_up, _} ->
+      scenario_success("User hung up")
+
+    {:bridge, :callee_hung_up, _} ->
+      scenario_success("Agent hung up")
+    ...
+  end
+end
+
 ```
 
+
+
+
 The SBB places the call in the queue (held by a process of its own?). The next
-available agent — one who subscribed to the queue, is not handling a call, is
-registered and has declared themselves available — is selected according to the
+available agent — one who subscribed to the queue, one that is not handling a call, 
+one that is registered and has declared themselves available — is selected according to the
 queue's policy, and the B2BUA module is used to connect them to the caller. If
 the agent answers, done. Otherwise the next agent is tried, possibly changing the
 agent's presence state along the way (the `autopause` option).
 
 The B2BUA's hunt function is obviously what is used here.
 
-`ACD.SBB.queue()` will have to end up as easy to use as asterisk's `app_queue()`.
+
+Later we should develop an SBB `ACD.SBB.queue()` 
+that will encapsulate the behavior will have to end up as easy to use as asterisk's `app_queue()`.
+
+The module will maintain for each call the following information:
+- date / time of 
+
+The module will also provide a optional 
 
 ## Configuration in domains.toml
 
 ```toml
 [[domain.presence]]
-event-package=<event package>
-publish=publish-<event package>.exs
-subscribe=subscribe-<event package>.exs
+event-package = "presence"
+subscribe = "presence-subscribe.exs"
+publish = "presence-publish.exs"
 ```
+
+One block per event package; two blocks claiming one package are refused at
+parse time. `subscribe` is required, `publish` optional: a PUBLISH for a package
+with no `publish` script is answered **405**. The Router reads `Event` to pick
+the block and answers **489** itself, with an `Allow-Events` naming the packages
+the domain serves. `Allow-Events` goes on the 2xx to a SUBSCRIBE and on the 489,
+never on the node's OPTIONS answer. `[module.presence]` carries `call_timeout_ms`
+only.
 
 MESSAGE is dispatched by its own `[[domain.chat]]` blocks — see
 [DESIGN-CHAT.md](DESIGN-CHAT.md#dispatch-chat-is-a-function-of-its-own).
@@ -248,9 +305,11 @@ would be forgotten in three scripts out of four, and the subscription would leak
 on the watcher's side — the same failure mode `requested_expires/2` was written
 to end.
 
-**5. The watcher refreshes by itself.** Symmetric with `RegisterUAC`: the
-framework re-SUBSCRIBEs before expiry, and an `app_drives_…` control hands the
-refresh back to the scenario when it wants it.
+**5. The watcher refreshes by itself.** The **dialog** sends the refresh before
+expiry — it holds the timer, the `Event`, the `id`, the route set and the granted
+lifetime — and its response surfaces to the scenario like any other.
+`SIP.Dialog.app_drives_refresh/1` hands the schedule back, symmetric with
+`app_drives_keepalive/1`.
 
 **6. Two concrete defects this layer must close:**
 
@@ -271,8 +330,55 @@ to the application, with the RFC 6665 reasons — `deactivated`, `probation`,
 `rejected`, `timeout`, `giveup`, `noresource`, `invariant`. "Exactly one" is the
 contract, as it is for `{:dialog_terminated, …}`
 ([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#55-the-termination-contract)).
-`deactivated` and `probation` mean *subscribe again*, and the framework does it
-without waking the scenario; the other five are terminal and surface.
+`deactivated` and `probation` mean *subscribe again*; they surface like the other
+five, because re-subscribing opens a new dialog and only the scenario can open
+one (`send_SUBSCRIBE/3`).
+
+A subscription granted 0 (an un-SUBSCRIBE) is marked terminated at acceptance,
+and `notify/1` on a terminated subscription sends nothing: the final NOTIFY is
+the dialog's. The 2xx to a SUBSCRIBE carries a `Contact`, and a NOTIFY arriving
+before the 200 is matched on Call-ID plus the local tag.
+
+### The verbs and the readings
+
+The notifier half is `SIP.Session.Notifier` (`accept_subscription/1`,
+`reject_subscription/2`, `notify/2`, `terminate_subscription/1`, refusals **423**,
+**406**, **489**, and **420** with `Unsupported` for a `Require` it does not
+implement); the watcher half is `SIP.Session.SubscribeUAC` (`send_SUBSCRIBE/3`,
+`send_auth_SUBSCRIBE/4`, the automatic 200 to a NOTIFY,
+`notified_document/1`). `%SIP.Subscription{}` is keyed
+`{callid, local_tag, remote_tag, package, id}` and carries the columns of a
+kamailio `active_watchers` row, the watcher and presentity identities included.
+
+Every header is read once, in `SIP.Msg.Ops`: `event_package/1`,
+`accepted_content_types/1`, `subscription_expires/2` (a reading of its own: no
+Contact `expires`, the default is the package's), `subscription_state/1`,
+`publish_etag/1`, `entity_tag/1`, `publish_operation/2`, `allow_events/1`,
+`required_extensions/1`, `supported_extensions/1`, `recipient_list/1`.
+
+**PUBLISH** (RFC 3903) is `SIP.Session.Publish`. `check_publish/1` reads the
+request against the package registry, answers **489**, **400** (neither tag nor
+body), **415** (with `Accept`) and **423** (with `Min-Expires`) itself, and hands
+the collection a `%SIP.Publication{}` — a kamailio `presentity` row: the
+operation (initial, refresh, modify, remove), the entity-tag presented, the parsed
+document, an absolute `expires`. The collection answers the **412** and mints the
+new entity-tag (`SIP.Publication.new_etag/0`); a 200 to a removal carries no
+`SIP-ETag`. A PUBLISH instance lives as long as its transaction.
+
+**PIDF** is `SIP.Presence.Doc` and `SIP.Presence.Pidf`, parsed with `:erlsom`: a
+body over 64 kB or carrying a `<!DOCTYPE` is refused. Tuples carry reachability
+per device; the RPID `activity` and `note` sit on the person. A known RFC 4480
+activity is an atom, anything else stays a string. `SIP.EventPackage.Presence`
+has `default_expires` 3600 and `content_types ["application/pidf+xml"]`;
+`register_builtins/0` installs it from `SIP.FSL.Host.bootstrap/0` and
+`Kelix.Application`.
+
+**Without a node.** `uas :presence` makes a scenario a presence server for
+`elixipp --listen`; `config event_package: "presence"` makes
+`Elixip.ScenarioUAS` answer 489 to any other package. SUBSCRIBE and PUBLISH reach
+the same scenario. `scenarios/uac_subscribe.exs` and `scenarios/uas_presence.exs`
+are the reference watcher and notifier. A `:uas_presence` scenario cannot be a
+sub-FSM.
 
 ### What this leaves to the module
 
@@ -515,8 +621,20 @@ created.
 other — both are optional packages, and a node running one without the other must
 not change. `mcu_presence` follows the MCU's live push and reports each room
 (`sip:<did>@<domain>`): open, open with the RPID activity `busy` when full, closed
-while its media server is lost. Its plan is
-[mcu-presence-plan.md](mcu-presence-plan.md).
+while its media server is lost:
+
+| The conference | The state reported for `sip:<did>@<domain>` |
+|---|---|
+| live, not full | `open` |
+| live, full (the next caller would get 486) | `open` + RPID `busy` |
+| `stale` (its media server went away) | `closed` |
+| does not exist | none — `noresource` |
+
+It follows `Kelix.Mod.Mcu.subscribe_conferences/1`, reports a room only when its
+document changes, and resyncs fully after an MCU or a presence restart.
+`[module.mcu_presence] domains` restricts it (default: every domain the MCU holds
+rooms on); its `validate_config/1` refuses the block when `mcu` or `presence` is
+not loaded. `kelictl mcu_presence list` shows what was reported.
 
 The registrar keeps its own path (`registration_changed/1`); moving it onto
 `report/4` is possible, and not done.
@@ -588,14 +706,12 @@ of the publication whose state changed last.
 Out of the composite, each its own work: call occupancy overriding the published
 activity (`on-the-phone` from `dialog_state`, a reported state ranked below a
 publication), location, devices registered for push, partial state (RFC 5262).
-The order it was built in is [presence-composite-plan.md](presence-composite-plan.md).
 
 ### Call occupancy
 
 Whether a user is on the phone is one fact read through three doors: a BLF key
 (`Event: dialog`, RFC 4235), the composite presence (`on-the-phone`), and the
-ACD's feed. `dialog_state` produces it; the build order is
-[dialog-state-plan.md](dialog-state-plan.md).
+ACD's feed. `dialog_state` produces it.
 
 **Invariant: a dialog is reported under a user only when a module proved its far
 end is that user.** A dialog does not know who is at the other end. Its `From` is
@@ -625,6 +741,58 @@ subscription of every idle phone at subscribe time.
 Neither `presence` nor the B2BUA depends on `dialog_state`. It holds the link, as
 `mcu_presence` does, and its package is named so the `Presence*` glob of the
 presence package does not take it.
+
+**The stamp.** `SIP.Dialog.set_remote_aor/2` sets `remote_aor` on the dialog and
+dispatches its current state at once (the inbound stamp arrives after the INVITE,
+from the authentication state). The outbound stamp travels in
+`%SIP.B2bua.Peer{aor:}`, filled by `Registrar.targets/2` and applied by
+`b2bua_forward` when the leg is created. Only stamped dialogs dispatch, on the
+`:duplicate` registry `Registry.SIPDialogEvents` (`SIP.Dialog.Events.subscribe/0`),
+as `{:sip_dialog, pid, info}`; `SIP.Dialog.info/1` gives the same map.
+
+| Dialog event | RFC 4235 state | `event` on `terminated` |
+|---|---|---|
+| INVITE received or sent | `trying` | |
+| 1xx without to-tag | `proceeding` | |
+| 18x, dialog not yet established | `early` | |
+| 2xx | `confirmed` | |
+| BYE either way | `terminated` | `local-bye` / `remote-bye` |
+| CANCEL, 4xx–6xx, timer, crash | `terminated` | `cancelled` / `rejected` / `timeout` / `error` |
+
+**The `dialog` package.** `SIP.EventPackage.Dialog` is built into elixip2:
+`application/dialog-info+xml`, `SIP.DialogInfo.Doc` with one
+`SIP.DialogInfo.Dialog` per live dialog of the AOR, always `full` state. Its
+`version` is the subscription's, stamped at each NOTIFY. Nothing publishes it: a
+PUBLISH on `dialog` is 405. A domain enables it with a `[[domain.presence]]` block
+(`event-package = "dialog"`, `subscribe = "presence-subscribe.exs"`).
+`Kelix.Mod.Presence.report/5` takes the package; on `dialog` the resolution is the
+reported document, else an empty one for a subscriber `auth_db` knows, else none.
+
+**The module** (`Kelix.Mod.DialogState`, no SIP function, no script) subscribes
+to the dialog events, then resyncs from `SIP.Dialog.pids/0` and monitors each
+stamped dialog — a `:DOWN` is a `terminated` with `error`. Per AOR touched it
+reports, each only when its document changed: on `dialog`, the live dialogs (or
+`nil`); on `presence`, `open` + `on-the-phone` while one dialog is `confirmed`
+(a ringing user is not on the phone). It re-reports after a presence restart.
+`[module.dialog_state] domains` restricts it; `validate_config/1` refuses the block
+without `presence`. `kelictl dialog_state list` shows the live dialogs.
+
+**The ACD feed.** `Kelix.Control.subscribe_dialogs(domain, pid)` returns the
+snapshot, then pushes `{:kelix_dialogs, domain, {:upsert, row} | {:remove, id}}`;
+the last upsert of a call is its `terminated` row:
+
+```elixir
+%{domain:, aor:, id: call_id,
+  direction: :initiator | :recipient,      # from the AOR's point of view
+  state: :trying | :proceeding | :early | :confirmed | :terminated,
+  event: nil | :local_bye | :remote_bye | :cancelled | :rejected | :timeout | :error,
+  remote:, since:}
+```
+
+Not built: RFC 7463 shared appearances (built on this package and module, no
+terminal asks for it); forked branches reported as separate early dialogs (a
+parallel fork is one dialog here); `include-session-description`; a UA publishing
+its own dialog state.
 
 ## The data model is kamailio's
 

@@ -13,9 +13,10 @@ defmodule Kelix.Mod.Mcu.Adapter do
   | `connect/1` | resolve the `Client` of that MCU entry |
   | `create_peer_connection/3` | `CreateParticipant` in `opts[:mcu_participant]`'s conference |
   | `set_remote_offer/2` | the answer-time sequence (§6.2 steps 3-6) → SDP answer |
+  | `get_local_offer/1` | dial-out (L6): keys, `StartReceiving` on the codec vocabulary → SDP offer |
+  | `set_remote_answer/2` | dial-out: the answer's address, keys and payload types, for `attach/1` |
   | `close_peer_connection/1` | `StopSending`/`StopReceiving` + `DeleteParticipant` |
   | `add_remote_candidate/2` | `:ok`, no-op (G5: ICE-lite plus the offerer's candidates is enough) |
-  | `get_local_offer/1`, `set_remote_answer/2` | `{:error, :not_supported}` until B2BUA legs exist |
   | player / recorder / echo | `{:error, :not_supported}` — the RPCs exist (§1.2), the perimeter does not |
 
   The conference-level operations are **not** forced into the behaviour: they are
@@ -122,14 +123,22 @@ defmodule Kelix.Mod.Mcu.Adapter do
   @impl MediaServer.Behaviour
   def call_answered(_conn), do: :ok
 
-  # Outbound legs need `get_local_offer/1` + `set_remote_answer/2`; they arrive with
-  # the B2BUA leg primitives (§1.2), and FSL surfaces the error as a 500 —
-  # which is the honest answer to a scenario asking a mixer to place a call.
+  @doc """
+  The offer of a leg the conference places (dial-out, L6): the receive plane opens
+  and the offer is built from the server's verdict on the codec vocabulary. Plain RTP,
+  or SDES-SRTP when the connection was created with `srtp: :sdes`; `codec_order:`
+  (`[audio: ["PCMA"], video: ["H264"]]`) orders what the server accepted. See
+  `Conn` for the sequence.
+  """
   @impl MediaServer.Behaviour
-  def get_local_offer(_conn), do: {:error, :not_supported}
+  def get_local_offer(conn), do: Conn.get_local_offer(conn)
 
+  @doc """
+  The answer to that offer: the far end's address, keys and payload types, recorded
+  for `attach/1` — which sends nothing before it runs, exactly as on an answered leg.
+  """
   @impl MediaServer.Behaviour
-  def set_remote_answer(_conn, _sdp), do: {:error, :not_supported}
+  def set_remote_answer(conn, sdp), do: Conn.set_remote_answer(conn, sdp)
 
   # A conference leg's far end is the mixer, and a mixer is what two legs are
   # already joined THROUGH — bridging a pair of them directly would take them out

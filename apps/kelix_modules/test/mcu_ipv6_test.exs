@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.McuIPv6Test do
   @moduledoc """
   IPv6 on the MCU module: the control channel, and the addressing profile a leg
-  asks the media server for (`docs/design/multi-interface.md`, MCU section; MCU
+  asks the media server for (`docs/design/DESIGN-MCU.md`, "The address a leg announces"; MCU
   API §6.7 and §6.7 bis).
 
   Two halves, and they are independent. The **control channel** must reach a

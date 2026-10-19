@@ -64,6 +64,26 @@ defmodule Kelix.Test.Fixtures do
   end
 
   @doc """
+  Points `Kelix.ScriptRegistry` at `dir` for the duration of the test.
+
+  A script NAME is resolved in `script_dir` and nowhere else — that is the point of
+  `Kelix.Control.run_script/3`, which refuses a path — so a test that runs one by
+  name needs the registry to look where the test put it. The registry reads its
+  directory once, at boot, from a config that names the packaged one; there is no
+  setter to call, hence the state replaced and put back.
+  """
+  def with_script_dir(dir) do
+    prev = :sys.get_state(Kelix.ScriptRegistry).script_dir
+    :sys.replace_state(Kelix.ScriptRegistry, &%{&1 | script_dir: dir})
+
+    ExUnit.Callbacks.on_exit(fn ->
+      :sys.replace_state(Kelix.ScriptRegistry, &%{&1 | script_dir: prev})
+    end)
+
+    :ok
+  end
+
+  @doc """
   Registers `module` as the loadable module named `name`, unregistered on exit.
 
   The core names no module, so a fake exporting only the functions under test is

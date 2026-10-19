@@ -229,6 +229,29 @@ When every URI of the server is known to be down, nothing is sent and the forwar
 fails: `call/1` ends with `{:call, :failed, %{reason: :forward_failed, cause:
 {:b2bua, :no_reachable_target}}}`.
 
+### `dial_target/3`
+
+```elixir
+Kelix.Mod.SipServers.dial_target(sip_ctx, slug, user) ::
+  {:ok, %SIP.Uri{}}
+  | {:error, :not_found | :no_reachable_uri | {:unsupported_type, type} | :down | :timeout}
+```
+
+For a call the script **places** — no inbound request to forward, so no
+`b2bua_forward`: the Request-URI to hand to `send_INVITE`. It is `user` at the
+server's first URI not known to be down, and carries the Contact host the server
+expects (`use_fqdn_contact`), which the dialog then stamps on every Contact of the
+call. The call is counted as sent to the server.
+
+A `sip-appsrv` only: a proxy routes on a Request-URI it keeps, and a trunk rewrites
+the From and answers challenges with its account — both belong to the forwarding
+path. There is no failover onto the next URI either: that is the B2BUA's.
+
+```elixir
+{:ok, target} = Kelix.Mod.SipServers.dial_target(sip_ctx, "teams", "+33123456789")
+send_INVITE(target, :mediaserver, media: :audio, srtp: :sdes, timeout: 90)
+```
+
 ## Control commands
 
 `<server>` is `<domain> <slug>` for `kelictl`, `<domain>/<slug>` in a path.

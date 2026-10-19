@@ -18,7 +18,7 @@ defmodule Kelix.Mod.AuthDb do
       `:ok` the registrar scripts match on;
     * `challengeable?/1`       — is this request one to authenticate at all;
     * `fetch_credential/3`     — the secret, and the one function a different backend
-      would rewrite (see docs/design/evolution-auth-db.md);
+      would rewrite (see docs/design/kelixip_roadmap.md);
     * `lookup_ha1/2`, `challenge_algorithm/0`.
 
   The DB connection is the module's supervised service (`child_spec/2`); the

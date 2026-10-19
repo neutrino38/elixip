@@ -117,11 +117,10 @@ Design: [DESIGN-AUTH.md](../design/DESIGN-AUTH.md#3-the-authentication-block).
 
 - `FSL.md` gains a service-building-block section and hands "Under the hood" over
   to [DESIGN-FSL.md](../design/DESIGN-FSL.md).
-- [kelixip-b2bua.md](../design/kelixip-b2bua.md) keeps `queue()` as future work;
+- [kelixip_roadmap.md](../design/kelixip_roadmap.md#call-control-queue) keeps `queue()` as future work;
   its FSL prerequisite and its `call()` are delivered.
 - [DESIGN-AUTH.md](../design/DESIGN-AUTH.md) gains the authentication block and
-  the `P-Asserted-Identity` rule; `evolution-auth-db.md` goes back to being about
-  the replaceable backend alone.
+  the `P-Asserted-Identity` rule.
 - The `auth_db` module doc documents the block beside the facades.
 - The TypeScript dialect implements the same names in
   `finite-state-language` 0.1.3 (`fsl-typescript/spec/fsl-js-ts.md` §8.4), where

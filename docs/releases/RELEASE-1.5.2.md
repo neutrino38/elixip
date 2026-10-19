@@ -3,8 +3,7 @@
 2026-09-06 — 85 commits since 1.5.1 (2026-08-22). Theme: **a node has several
 faces**. One kelixip now speaks IPv4 and IPv6, on an internal side and a public
 side, and it announces to each correspondent the address that correspondent can
-reach. Six of the seven steps of
-[multi-interface.md](../design/multi-interface.md) are delivered.
+reach.
 
 Three other deliveries: 
 - real-time text travels on a WebRTC data channel
@@ -12,14 +11,14 @@ Three other deliveries:
 - a B2BUA call can recorded on both legs, i
 - and kelixip **asks** the media server what it can do instead of declaring it.
 
-Reference: [multi-interface.md](../design/multi-interface.md) for the network
-design, [installation.md](../kelixip/installation.md) for the new `config.toml`
+Reference: [DESIGN-SIPSTACK.md](../design/DESIGN-SIPSTACK.md#310-addressing-ipv6-dual-stack-network-sides) and
+[DESIGN-FRAMEWORK.md](../design/DESIGN-FRAMEWORK.md#510-network-profiles) for the network design, [installation.md](../kelixip/installation.md) for the new `config.toml`
 keys.
 
 ## Multi-interface and IPv6
 
-The bulk of this release. Every step is described in
-[multi-interface.md](../design/multi-interface.md).
+The bulk of this release. The design is in
+[DESIGN-SIPSTACK.md](../design/DESIGN-SIPSTACK.md#310-addressing-ipv6-dual-stack-network-sides) and [DESIGN-FRAMEWORK.md](../design/DESIGN-FRAMEWORK.md#510-network-profiles).
 
 ### Listeners
 
@@ -205,9 +204,8 @@ the `mockup` adapter. Selection and health do not depend on it.
 
 ## Documentation
 
-- [multi-interface.md](../design/multi-interface.md) is the network design: the
-  seven steps, what is delivered, and the two keys set aside (`[network]` at node
-  level, and the STUN client).
+- the network design is in [DESIGN-SIPSTACK.md](../design/DESIGN-SIPSTACK.md#310-addressing-ipv6-dual-stack-network-sides) and
+  [DESIGN-FRAMEWORK.md](../design/DESIGN-FRAMEWORK.md#510-network-profiles).
 - [installation.md](../kelixip/installation.md) documents `tag`, `networks`,
   `advertise`, the `[tls]` section, IPv6 on the media server side and SELinux.
 - [administration.md](../kelixip/administration.md) explains what the media server

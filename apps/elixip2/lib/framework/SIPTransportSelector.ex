@@ -38,8 +38,8 @@ defmodule SIP.Transport.Selector do
   The `Registry.SIPTransport` key an unreliable transport is registered under:
   one instance per protocol **and family**.
 
-  A node binds one UDP socket per family (step 4 of
-  docs/design/multi-interface.md), and a datagram leaves only through the socket
+  A node binds one UDP socket per family
+  (docs/design/DESIGN-SIPSTACK.md, "Addressing"), and a datagram leaves only through the socket
   of its destination's family — the other answers `:eafnosupport`. The name is
   built here so the listener that registers an instance and the selector that
   looks one up cannot disagree.

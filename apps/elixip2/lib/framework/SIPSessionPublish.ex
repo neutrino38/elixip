@@ -1,6 +1,6 @@
 # The publication half of presence (RFC 3903): one PUBLISH, seen from the
 # transaction that carries it. See docs/design/DESIGN-PRESENCE.md, "The data
-# model is kamailio's", and docs/design/presence-basic-plan.md, phase P5.
+# model is kamailio's" and "The verbs and the readings".
 #
 # Two modules, in the order they are read:
 #

@@ -128,7 +128,7 @@ defmodule SIP.DialogImpl do
     destport: 0,
     # The AOR of a served domain the far end of this dialog is PROVEN to be —
     # set by the module that proved it, never derived from a header (design
-    # docs/design/dialog-state-plan.md §1). A stamped INVITE dialog pushes its
+    # docs/design/DESIGN-PRESENCE.md, "Call occupancy"). A stamped INVITE dialog pushes its
     # call state through SIP.Dialog.Events; the fields below are that state.
     remote_aor: nil,
     call_state: :trying,
@@ -891,7 +891,7 @@ defmodule SIP.DialogImpl do
   defp put_notify_body(req, sub, body, content_type) do
     req = Map.put(req, :contenttype, content_type)
 
-    case SIP.Msg.BodyCoding.encode(body_octets(body), encoding_of(sub)) do
+    case SIP.Msg.BodyCoding.encode(SIPMsg.body_octets(body), encoding_of(sub)) do
       {:ok, compressed} ->
         req
         |> SIP.Msg.Ops.update_sip_msg({:body, compressed})
@@ -907,9 +907,6 @@ defmodule SIP.DialogImpl do
         |> Map.put(:contenttype, content_type)
     end
   end
-
-  defp body_octets(parts) when is_list(parts), do: SIPMsg.multipart_body(parts)
-  defp body_octets(body) when is_binary(body), do: body
 
   defp encoding_of(%SIP.Subscription{body_encoding: coding}), do: coding
   defp encoding_of(_no_subscription), do: nil
@@ -2637,6 +2634,33 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # The 2xx that establishes an outbound dialog names its remote tag (RFC 3261
+  # §12.1.2, §13.2.2.4) — even when an early dialog already took another one from a
+  # 1xx. A callee may answer from a different leg than the one that rang: the
+  # Microsoft PSTN hub sends its 180 with one To-tag and its 200 with another. Kept
+  # on the 180's tag, the dialog was registered under a key no in-dialog request
+  # would ever name: the hub's re-INVITE completing ICE got a 481, and the hub hung
+  # up (Q.850 cause 95) eight seconds into the call, capture of 2026-10-19.
+  #
+  # Only while the dialog is not yet established: once it is, a 2xx (to a
+  # re-INVITE) cannot move its tag.
+  defp confirm_totag(%SIP.DialogImpl{direction: :outbound, totag: early} = state, totag)
+       when is_binary(early) and is_binary(totag) and early != totag and
+              state.state in [:initial, :uac_challenged] do
+    Registry.unregister(Registry.SIPDialog, {state.fromtag, state.callid, early})
+    Registry.register(Registry.SIPDialog, {state.fromtag, state.callid, totag}, :completedialog)
+
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "2xx from another To-tag than the early dialog's (#{early}): dialog now #{totag}"
+    )
+
+    %SIP.DialogImpl{state | totag: totag}
+  end
+
+  defp confirm_totag(state, totag), do: add_totag(state, totag)
+
   defp handle_UAS_response(state = %SIP.DialogImpl{direction: :outbound}, rsp, transact_pid)
        when state.state in [:initial, :uac_challenged] and rsp.response in 200..202 do
     Logger.debug(
@@ -3374,10 +3398,10 @@ defmodule SIP.DialogImpl do
         # and every later in-dialog request would name a callee that never
         # answered.
         state =
-          if adopts_totag?(state, rsp) do
-            add_totag(state, totag)
-          else
-            state
+          cond do
+            not adopts_totag?(state, rsp) -> state
+            rsp.response in 200..299 -> confirm_totag(state, totag)
+            true -> add_totag(state, totag)
           end
 
         if rsp.response >= 200 do

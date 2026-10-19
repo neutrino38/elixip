@@ -70,6 +70,18 @@ defmodule Kelix.Mod.SipServers.Link do
   @doc "`%{uri => :unknown | :up | :down}`."
   def states(pid), do: GenServer.call(pid, :states)
 
+  @doc """
+  Whether `target`, one of the server's URIs, is worth trying — the question the
+  B2BUA asks before a forwarded attempt (`{:reachable?, uri}`), with its answer to
+  silence: no reply, or no process, counts as reachable.
+  """
+  @spec reachable?(pid(), %SIP.Uri{}) :: boolean()
+  def reachable?(pid, target) do
+    GenServer.call(pid, {:reachable?, target}) != false
+  catch
+    :exit, _ -> true
+  end
+
   @doc "`%{aor => :unknown | :open | :closed}` of a proxy's probed remote AORs."
   def aor_states(pid), do: GenServer.call(pid, :aor_states)
 

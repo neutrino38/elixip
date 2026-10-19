@@ -358,6 +358,34 @@ defmodule Kelix.Mod.SipServersRoutingTest do
     end
   end
 
+  describe "dial_target/3" do
+    test "the dialled user at the server's first URI, with the Contact host it expects" do
+      :ok =
+        app("teams", "sip:10.0.0.7:5061;transport=tls", %{
+          "use_fqdn_contact" => "true",
+          "backup_uri" => "sip:10.0.0.8:5061;transport=tls"
+        })
+
+      assert {:ok, %SIP.Uri{} = target} = SipServers.dial_target(@domain, "Teams", "+33977190504")
+      assert target.userpart == "+33977190504"
+      assert target.domain == "10.0.0.7"
+      assert SIP.Uri.get_transport(target) == "TLS"
+      # carried by the R-URI to the dialog, which stamps every Contact of the leg
+      assert target.contact_host == @domain
+    end
+
+    test "a server that is not an application server needs the forwarding path" do
+      :ok = trunk("operator")
+
+      assert {:error, {:unsupported_type, "sip-trunk"}} =
+               SipServers.dial_target(@domain, "operator", "0123")
+    end
+
+    test "an unknown server" do
+      assert {:error, :not_found} = SipServers.dial_target(@domain, "nope", "0123")
+    end
+  end
+
   describe "Resolution" do
     test "a literal address never expires" do
       server = %SipServers.Server{

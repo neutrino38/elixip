@@ -137,6 +137,13 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   def set_remote_offer(conn, sdp) when is_pid(conn),
     do: safe_call(conn, {:set_remote_offer, sdp})
 
+  @spec get_local_offer(pid) :: {:ok, String.t()} | {:error, term}
+  def get_local_offer(conn) when is_pid(conn), do: safe_call(conn, :get_local_offer)
+
+  @spec set_remote_answer(pid, String.t()) :: :ok | {:error, term}
+  def set_remote_answer(conn, sdp) when is_pid(conn),
+    do: safe_call(conn, {:set_remote_answer, sdp})
+
   @spec attach(pid | nil) :: {:ok, map} | {:error, term}
   def attach(conn) when is_pid(conn), do: safe_call(conn, :attach)
   def attach(_conn), do: {:error, :no_connection}
@@ -213,6 +220,21 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # whether this scenario allows a DTLS/ICE leg at all (SDES needs no such
          # permission: it is what a plain SIP phone offers)
          webrtc: Keyword.get(opts, :webrtc_support, :if_offered),
+         # A leg WE place (dial-out, L6): how its offer is secured — `:none` (RTP/AVP)
+         # or `:sdes` (RTP/SAVP, our key per media) — and the codec names its offer
+         # lists first, per media. Both are the script's call: the far end is a
+         # network the script knows and this adapter does not. Ignored on a leg that
+         # answers, whose security and order are the offer's.
+         offer_srtp: Keyword.get(opts, :srtp, :none),
+         # `:lite` adds what this leg already puts in the ANSWERS it gives a peer
+         # offering ICE: a=ice-lite, our credentials, our host candidate, rtcp-mux.
+         # Some far ends (Teams Direct Routing among them) run full ICE and expect
+         # to find it in what they are offered too.
+         offer_ice: Keyword.get(opts, :ice, :none),
+         offer_codec_order: Keyword.get(opts, :codec_order, []),
+         # what our offer proposed and the server accepted, per media, until the
+         # answer arrives: %{rtp_map:, accepted:, rec_port:}
+         offered: %{},
          # whether the MCU may re-target its send address to where the RTP really
          # comes from (see set_rtp_properties/3). Off unless the script asks for
          # it: the reference `mcu.exs` does, a leg driven by some other script may
@@ -361,6 +383,71 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         {:reply, {:error, reason}, state}
     end
   end
+
+  # ── offer time: a leg we place (dial-out, L6) ────────────────────────────────
+  #
+  # The mirror of the answer sequence, with the same split. At OFFER time the receive
+  # plane opens — keys, `StartReceiving`, which yields the port the offer needs — and
+  # nothing is sent. At ANSWER time the peer's address, keys and payload types are
+  # recorded into `negotiated`, in exactly the shape the answer path leaves there, so
+  # `attach/1` — codecs, `StartSending`, mixer join — is the same code for both
+  # directions and runs at the same moment: once the call is up, which for a leg we
+  # place is right after the 200 and our ACK.
+  #
+  # The menu is the codec VOCABULARY, not a capability list: every name our tables can
+  # turn into a Medooze code is proposed to `StartReceiving`, and the server's verdict
+  # is what the offer lists — the delegated negotiation of §6, with our own offer as the
+  # menu. `codec_order` only orders what the server accepted; it never adds a codec.
+  def handle_call(:get_local_offer, _from, %{status: :created} = state) do
+    with :ok <- offerable(state),
+         {:ok, conf} <- fetch_conference(state.conf_uid),
+         state = %{state | video: conf.video},
+         {:ok, state, specs} <- open_offer_plane(state, conf),
+         :ok <- ensure_any_media(specs) do
+      offer =
+        Sdp.build(%{
+          ip: media_ip(state),
+          ice_lite: state.local_ice != nil,
+          medias: Enum.map(state.medias, &Map.get(specs, &1)) |> Enum.reject(&is_nil/1)
+        })
+
+      {:reply, {:ok, offer}, %{state | status: :offered}}
+    else
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "conference #{state.conf_uid}: no offer built (#{inspect(reason)})"
+        )
+
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # A re-offer from our side (hold, an added media) is not something a conference leg
+  # does: it is the far end that renegotiates, through the answer path above.
+  def handle_call(:get_local_offer, _from, state),
+    do: {:reply, {:error, {:already_negotiated, state.status}}, state}
+
+  def handle_call({:set_remote_answer, sdp}, _from, %{status: :offered} = state) do
+    with {:ok, descs} <- parse_answer(sdp),
+         {:ok, conf} <- fetch_conference(state.conf_uid),
+         descs = index_sections(descs),
+         {:ok, state, negotiated} <- apply_answer(state, conf, descs),
+         :ok <- ensure_any_media(negotiated) do
+      {:reply, :ok, %{state | negotiated: negotiated, status: :answered}}
+    else
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "conference #{state.conf_uid}: answer refused (#{inspect(reason)})"
+        )
+
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:set_remote_answer, _sdp}, _from, state),
+    do: {:reply, {:error, {:no_offer_pending, state.status}}, state}
 
   # ── ACK time (§6.2, after the 200 OK) ────────────────────────────────────────
 
@@ -1324,6 +1411,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   defp leg_profile(%{address_profile: profile} = state, _desc) when is_binary(profile),
     do: {:ok, state, profile}
 
+  # A leg we placed and offered on the server's default: it asked for no profile, and
+  # must never ask for one later — see `offer_profile/1`.
+  defp leg_profile(%{address_profile: :server_default} = state, _desc), do: {:ok, state, nil}
+
   defp leg_profile(%{network_profiles: profiles} = state, _desc) when not is_map(profiles),
     do: {:ok, state, nil}
 
@@ -1392,7 +1483,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     # The same profile as the receive side, because the socket is the same in both
     # directions: the server takes a second, different one as an error rather than
     # rebinding the media under a port it has already published.
-    if state.address_profile, do: args ++ [state.address_profile], else: args
+    if is_binary(state.address_profile), do: args ++ [state.address_profile], else: args
   end
 
   # What `StartSending` may use, in the offerer's numbering.
@@ -2010,6 +2101,330 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     )
 
     {:error, :no_media_ip}
+  end
+
+  # ── the offering side (dial-out, L6) ─────────────────────────────────────────
+
+  # Plain RTP or SDES-SRTP. DTLS+ICE is a browser's transport, and a browser calls in —
+  # it is not dialled; offering it would need a transport plane (our own checks, the
+  # DTLS role decided by the answer) that nothing here drives.
+  defp offerable(%{webrtc: :yes}), do: {:error, :webrtc_offer_not_supported}
+  defp offerable(%{offer_ice: ice}) when ice not in [:none, :lite], do: {:error, {:bad_ice, ice}}
+  defp offerable(%{offer_srtp: srtp}) when srtp in [:none, :sdes], do: :ok
+  defp offerable(%{offer_srtp: other}), do: {:error, {:bad_srtp, other}}
+
+  # Per media, in the leg's media order: our key, `StartReceiving` with the menu, and
+  # the offer section built from the verdict. A media the server accepts nothing of is
+  # left out of the offer, not a failure — only an offer with no media at all is.
+  defp open_offer_plane(state, conf) do
+    # one credential pair for the whole leg, as on the answer path
+    state =
+      if state.offer_ice == :lite,
+        do: %{state | local_ice: %{ufrag: random_token(8), pwd: random_token(24)}},
+        else: state
+
+    Enum.reduce_while(state.medias, {:ok, state, %{}}, fn media, {:ok, st, acc} ->
+      case open_offered(st, conf, media) do
+        {:ok, st, spec} -> {:cont, {:ok, st, Map.put(acc, media, spec)}}
+        {:skip, st} -> {:cont, {:ok, st, acc}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp open_offered(state, conf, media) do
+    m = media_int(media)
+    rtp_map = offer_menu(state, conf, media)
+
+    # same rule as the answer path: our capability goes in before the negotiator reads it
+    push_local_codec_props(state, m, media, @role_main)
+
+    with {:ok, state} <- offer_sdes(state, media),
+         :ok <- offer_ice_credentials(state, m),
+         {:ok, state, profile} <- offer_profile(state),
+         {:ok, [rec_port | returned]} <-
+           rpc(
+             state,
+             "StartReceiving",
+             start_receiving_args(state, m, rtp_map, %{"fmtp" => %{}}, profile)
+           ),
+         {:ok, ip} <- announced_ip(state, returned) do
+      state = %{state | receiving: add_media(state.receiving, media), media_ip: ip}
+
+      # A server that predates the delegation returns no verdict: the whole menu
+      # stands, with no fmtp — the legacy behaviour of the answer path too.
+      accepted =
+        Sdp.accepted_pts(rtp_map, Enum.at(returned, 1)) ||
+          Map.new(rtp_map, fn {pt, _code} -> {pt, ""} end)
+
+      ordered = offer_pts(state, conf, media, rtp_map, accepted)
+
+      if Enum.all?(ordered, &(Map.fetch!(rtp_map, &1) == @dtmf_code)) do
+        void_rpc(state, "StopReceiving", [state.conf_id, state.part_id, m, @role_main])
+        {:skip, %{state | receiving: List.delete(state.receiving, media)}}
+      else
+        offered = %{
+          rtp_map: Map.take(rtp_map, ordered),
+          accepted: Map.take(accepted, ordered),
+          rec_port: rec_port
+        }
+
+        Logger.info(
+          module: __MODULE__,
+          message:
+            "conf=#{state.conf_id} part=#{state.part_id} #{media}: offering " <>
+              "#{length(ordered)} pt of #{map_size(rtp_map)} proposed"
+        )
+
+        {:ok, %{state | offered: Map.put(state.offered, media, offered)},
+         offer_spec(state, media, offered, ordered)}
+      end
+    end
+  end
+
+  # Every name the tables can turn into a code — the vocabulary, not a capability: the
+  # server answers which of them it carries. telephone-event rides along on audio when
+  # the conference relays DTMF, as on the answer path.
+  defp offer_menu(state, conf, media) do
+    Sdp.local_rtp_map(
+      media,
+      offer_names(state, conf, media),
+      media == :audio and Map.get(conf, :dtmf, true)
+    )
+  end
+
+  # The order our offer states its preference in: the script's `codec_order`, then the
+  # conference's preferred video codec, then the rest of the vocabulary. A name the
+  # tables do not know is dropped rather than raised on — it is the script's typo, and
+  # the call is worth more than the order.
+  defp offer_names(state, conf, media) do
+    stated =
+      state.offer_codec_order
+      |> Keyword.get(media, [])
+      |> Enum.map(&String.upcase(to_string(&1)))
+
+    preferred = if media == :video, do: List.wrap(Map.get(conf, :preferred_video_codec)), else: []
+
+    (stated ++ preferred ++ Sdp.codec_names(media))
+    |> Enum.filter(&(Sdp.codec_code(media, &1) != :error))
+    |> Enum.uniq()
+  end
+
+  # The accepted payload types in the order of `offer_names/3`, telephone-event last.
+  defp offer_pts(state, conf, media, rtp_map, accepted) do
+    codec_pts =
+      Enum.flat_map(offer_names(state, conf, media), fn name ->
+        media |> Sdp.local_rtp_map([name], false) |> Map.keys()
+      end)
+
+    dtmf_pts = for {pt, @dtmf_code} <- rtp_map, do: pt
+
+    Enum.filter(codec_pts ++ dtmf_pts, &Map.has_key?(accepted, &1))
+  end
+
+  # Our key for this media, pushed BEFORE `StartReceiving` like on the answer path. The
+  # offer has one `a=crypto` line, tag 1, in our preferred suite: the answer must
+  # echo that tag (RFC 4568 §6.1), and its key is the one `apply_answer/3` pushes.
+  defp offer_sdes(%{offer_srtp: :sdes} = state, media) do
+    [suite | _] = @sdes_suites
+    key = random_sdes_key()
+
+    case void_rpc(state, "SetLocalCryptoSDES", [
+           state.conf_id,
+           state.part_id,
+           media_int(media),
+           suite,
+           key,
+           @role_main
+         ]) do
+      :ok ->
+        local = %{tag: "1", suite: suite, key: key, peer_key: nil}
+        {:ok, %{state | local_sdes: Map.put(state.local_sdes, media, local)}}
+
+      err ->
+        err
+    end
+  end
+
+  defp offer_sdes(state, _media), do: {:ok, state}
+
+  # Our ICE credentials, keyed before `StartReceiving` like the SDES key: the server
+  # answers the peer's connectivity checks with them from the first packet.
+  defp offer_ice_credentials(%{local_ice: %{ufrag: ufrag, pwd: pwd}} = state, m) do
+    void_rpc(state, "SetLocalSTUNCredentials", [
+      state.conf_id,
+      state.part_id,
+      m,
+      ufrag,
+      pwd,
+      @role_main
+    ])
+  end
+
+  defp offer_ice_credentials(_state, _m), do: :ok
+
+  # No peer has published an address yet, so the only profile this leg can prefer is
+  # the one its options state; without one the server picks its default, which is
+  # what a controller that never heard of profiles gets.
+  #
+  # Offering on the default is then a choice the leg keeps, not a gap a later answer
+  # may fill. The server fixes nothing when asked for no profile, and the first
+  # profile it IS asked for re-binds the sockets — a new port. The far end's
+  # re-INVITE is exactly where the answer path would compute one from its SDP:
+  # the Microsoft PSTN hub's, sent right after the ACK to confirm the pair ICE had
+  # validated, moved our audio from 13442 to 13536 while the hub kept sending to
+  # 13442, and the leg died on its RTP watchdog ten seconds in (capture of
+  # 2026-10-19). `:server_default` makes every later call ask for none, like this one.
+  defp offer_profile(%{address_profile: profile} = state) when is_binary(profile),
+    do: {:ok, state, profile}
+
+  defp offer_profile(%{address_profile: :server_default} = state), do: {:ok, state, nil}
+
+  defp offer_profile(%{network_profiles: profiles, local_profile: local} = state)
+       when is_map(profiles) and is_binary(local) do
+    if get_in(profiles, [local, :available]),
+      do: {:ok, %{state | address_profile: local}, local},
+      else: {:ok, %{state | address_profile: :server_default}, nil}
+  end
+
+  defp offer_profile(state), do: {:ok, %{state | address_profile: :server_default}, nil}
+
+  defp offer_spec(state, media, offered, ordered) do
+    rtpmaps =
+      for pt <- ordered,
+          {encoding, clock, channels} <- [Sdp.code_rtpmap(media, Map.fetch!(offered.rtp_map, pt))],
+          do: %{pt: String.to_integer(pt), encoding: encoding, clock: clock, channels: channels}
+
+    %{
+      type: media,
+      port: offered.rec_port,
+      rtpmaps: rtpmaps,
+      fmtp: offered.accepted,
+      direction: :sendrecv,
+      crypto: offer_crypto(state, media),
+      # the conference's encoding bitrate, as the answer path caps it
+      bandwidth: if(media == :video, do: state.video.bitrate)
+    }
+    |> Map.merge(offer_ice_spec(state, offered))
+  end
+
+  defp offer_ice_spec(%{local_ice: %{} = ice} = state, offered),
+    do: %{
+      ice: ice,
+      rtcp_mux: true,
+      candidates: Sdp.host_candidates(media_ip(state), offered.rec_port, true)
+    }
+
+  defp offer_ice_spec(_state, _offered), do: %{}
+
+  defp offer_crypto(state, media) do
+    case Map.get(state.local_sdes, media) do
+      %{suite: suite, key: key} -> {:sdes, suite, key}
+      nil -> :none
+    end
+  end
+
+  defp parse_answer(sdp) do
+    case Sdp.parse(sdp) do
+      {:ok, descs} -> {:ok, descs}
+      {:error, reason} -> {:error, {:bad_answer, reason}}
+    end
+  end
+
+  # Per offered media, the answer's section of that type. Declined (port 0) or absent,
+  # the media stops receiving and is left out; answered, it is recorded in the same
+  # shape `open_receive/3` gives an answered offer, so `attach/1` cannot tell the two
+  # directions apart.
+  defp apply_answer(state, conf, descs) do
+    Enum.reduce_while(state.medias, {:ok, state, %{}}, fn media, {:ok, st, acc} ->
+      with {:ok, offered} <- Map.fetch(st.offered, media),
+           desc when is_map(desc) <- Enum.find(descs, &(&1.type == media)),
+           false <- withdrawn?(st, desc) do
+        case answered_neg(st, conf, media, desc, offered) do
+          {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, media, neg)}}
+          :decline -> {:cont, {:ok, decline_offered(st, media), acc}}
+          {:error, _} = err -> {:halt, err}
+        end
+      else
+        :error -> {:cont, {:ok, st, acc}}
+        _declined -> {:cont, {:ok, decline_offered(st, media), acc}}
+      end
+    end)
+  end
+
+  defp decline_offered(state, media) do
+    void_rpc(state, "StopReceiving", [state.conf_id, state.part_id, media_int(media), @role_main])
+    %{state | receiving: List.delete(state.receiving, media)}
+  end
+
+  defp answered_neg(state, conf, media, desc, offered) do
+    m = media_int(media)
+    offered_codes = Map.values(offered.rtp_map)
+
+    # In the ANSWER's numbering, which is what we send on (RFC 3264 §6.1 lets the
+    # answerer renumber), and restricted to codecs we offered: an answer naming one we
+    # did not is not something the mixer was told it would receive.
+    rtp_map = Map.filter(desc.rtp_map, fn {_pt, code} -> code in offered_codes end)
+
+    if Enum.all?(Map.values(rtp_map), &(&1 == @dtmf_code)) do
+      :decline
+    else
+      # the answer's own fmtp per payload type, else what the server put in our offer
+      # for that codec — the parameters `encoder_props/1` reads the profile from
+      accepted =
+        Map.new(rtp_map, fn {pt, code} ->
+          {pt, Map.get(Map.get(desc, :fmtp_raw, %{}), pt) || offered_fmtp(offered, code) || ""}
+        end)
+
+      with {:ok, state} <- answer_sdes(state, media, desc),
+           :ok <- set_remote_security(state, m, desc),
+           :ok <- set_rtp_properties(state, m, desc) do
+        neg = %{
+          codecs: Map.get(desc, :codecs, []),
+          dtmf: @dtmf_code in Map.values(rtp_map),
+          rtp_map: rtp_map,
+          rec_port: offered.rec_port,
+          remote: {desc.ip, desc.port},
+          fmt_order: Sdp.fmt_order(desc, @fmt_order_opts),
+          accepted: accepted,
+          direction: Map.get(desc, :direction, :sendrecv),
+          expect_rtp: expect_rtp?(state, desc),
+          preferred_codec: preferred_code(state, conf, media, rtp_map, accepted)
+        }
+
+        {:ok, state,
+         neg
+         |> Map.put(:answered_profile_level_id, answered_profile_level_id(desc, neg))
+         |> Map.put(:answered_video_fmtp, answered_video_fmtp(desc, neg))}
+      end
+    end
+  end
+
+  defp offered_fmtp(offered, code) do
+    Enum.find_value(offered.rtp_map, fn {pt, c} ->
+      if c == code, do: Map.get(offered.accepted, pt)
+    end)
+  end
+
+  # The answer's half of SDES: the line carrying our tag, in our suite, holds the key
+  # the peer encrypts with. An answer that drops SRTP from an SRTP offer is refused —
+  # RTP/SAVP answered as RTP/AVP is not an answer to our offer (RFC 3264 §6.1), and
+  # keeping the call would leave the mixer decrypting cleartext.
+  defp answer_sdes(state, media, desc) do
+    case Map.get(state.local_sdes, media) do
+      nil ->
+        {:ok, state}
+
+      %{tag: tag, suite: suite} = local ->
+        case Enum.find(Map.get(desc, :sdes_offers, []), &(&1.tag == tag and &1.suite == suite)) do
+          %{key: key} ->
+            {:ok,
+             %{state | local_sdes: Map.put(state.local_sdes, media, %{local | peer_key: key})}}
+
+          nil ->
+            {:error, {:sdes_not_answered, media}}
+        end
+    end
   end
 
   # ── guards ───────────────────────────────────────────────────────────────────

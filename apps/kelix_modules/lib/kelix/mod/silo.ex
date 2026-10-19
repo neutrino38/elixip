@@ -283,7 +283,7 @@ defmodule Kelix.Mod.Silo do
   The retention is the sender's (`SIP.Msg.Ops.content_expires/1`: the lifetime
   it gave the content), else the script's `:retention`, else the module
   default — bounded by `max_retention`. The body is stored verbatim, CPIM
-  wrapper included.
+  wrapper included, a multipart whole (`SIPMsg.body_octets/1`).
 
     * `{:stored, %{id: id, expires_in: seconds}}`;
     * `{:error, :quota}` — the AOR is over `max_messages` or `max_bytes`: the
@@ -395,9 +395,11 @@ defmodule Kelix.Mod.Silo do
   end
 
   # The message as delivery will rebuild it: the identities as header values,
-  # the Content-Type, the carried-over headers, the body verbatim.
+  # the Content-Type, the carried-over headers, the body verbatim — as it was on
+  # the wire, a multipart whole with the boundary its Content-Type names, not
+  # the first part `body_string/1` would read.
   defp row(req, domain, aor, now, retention, served) do
-    body = SIP.Msg.Ops.body_string(req) || ""
+    body = SIPMsg.body_octets(Map.get(req, :body))
 
     %{
       domain: domain,

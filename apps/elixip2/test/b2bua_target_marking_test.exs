@@ -1,6 +1,6 @@
 defmodule SIP.Test.B2buaTargetMarking do
   @moduledoc """
-  Step 5 of `docs/design/multi-interface.md`, phase 1: every target of a Peer is
+  `docs/design/DESIGN-FRAMEWORK.md`, "Network profiles": every target of a Peer is
   resolved and marked with its side of the network **before** any of them is
   attempted.
 

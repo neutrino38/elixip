@@ -1,6 +1,6 @@
 defmodule SIP.Test.B2bua.AddrProfileHunt do
   @moduledoc """
-  Step 5 of `docs/design/multi-interface.md`: one media endpoint per addressing
+  `docs/design/DESIGN-FRAMEWORK.md`, "Network profiles": one media endpoint per addressing
   profile a hunt walks through.
 
   The address in an offer's `c=` line is fixed when the endpoint is created, so a

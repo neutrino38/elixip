@@ -67,7 +67,7 @@ defmodule Kelix.Mod.Presence do
   and, for a subscriber `Kelix.Mod.AuthDb` knows, an **empty** document when
   nothing is: an idle phone has no dialog, which is what its BLF key displays,
   and `noresource` would end the subscription of every idle phone at subscribe
-  time (docs/design/dialog-state-plan.md, decision 7). Any other package has no
+  time (docs/design/DESIGN-PRESENCE.md, "Call occupancy"). Any other package has no
   state.
 
   A registration that changes what a watcher is told — a resource nobody
@@ -1033,7 +1033,7 @@ defmodule Kelix.Mod.Presence do
   defp ruid_of(nil), do: nil
   defp ruid_of(%SIP.Publication{ruid: ruid}), do: ruid
 
-  # Decision 1 of presence-composite-plan.md: every publication that carries a
+  # DESIGN-PRESENCE.md, "The composite state": every publication that carries a
   # document states the person — a document with no activity states "none",
   # which is how the field clients say "available". A refresh carries none.
   defp hold_person(state, {user, rdomain, _event} = resource, %SIP.Publication{

@@ -67,7 +67,7 @@ defmodule SIP.B2bua.Peer do
       are, set by the module that grouped them (`Kelix.Mod.Registrar.targets/2`)
       and `nil` for every other peer. The outbound leg is stamped with it at
       creation (`SIP.Dialog.set_remote_aor/2`), so the call state of that AOR
-      is pushed to whoever watches it (docs/design/dialog-state-plan.md §1).
+      is pushed to whoever watches it (docs/design/DESIGN-PRESENCE.md, "Call occupancy").
     * `contact_host` — the host name the Contact of this leg publishes instead
       of the bound address, for a far end that identifies us by name (a SIP
       server with `use_fqdn_contact`). Carried by the leg's requests, in-dialog
@@ -94,8 +94,8 @@ defmodule SIP.B2bua.Peer do
             #
             # It exists so the media server can be chosen knowing where the call is
             # actually going: the profiles of the outbound targets are readable from
-            # here BEFORE any leg is created (step 5 of
-            # docs/design/multi-interface.md).
+            # here BEFORE any leg is created
+            # (docs/design/DESIGN-FRAMEWORK.md, "Network profiles").
             resolved: nil
 end
 
@@ -307,8 +307,8 @@ defmodule SIP.Session.B2bua do
       going. The outbound leg's addressing profile follows from its target, and one
       media server serves the whole session, so the profiles of every target have to
       be known together — a server picked before the target is a server that may
-      not carry the interface the call needs (step 5 of
-      docs/design/multi-interface.md).
+      not carry the interface the call needs
+      (docs/design/DESIGN-FRAMEWORK.md, "Network profiles").
 
       `ctx_get(:lasterr)` is `:ok`, or `:no_target_resolved` when not one target
       could be resolved — a routing failure to answer rather than to discover as a
@@ -1818,7 +1818,7 @@ defmodule SIP.Session.B2bua do
     end
   end
 
-  # Phase 1 of step 5 (docs/design/multi-interface.md): give every target its
+  # docs/design/DESIGN-FRAMEWORK.md, "Network profiles": give every target its
   # address BEFORE any of them is attempted, and mark which side of this node's
   # network it sits on. The media server a leg is placed on follows from that
   # mark, and one server serves the whole session, so the marks of all the targets

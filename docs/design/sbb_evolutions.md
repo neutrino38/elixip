@@ -54,7 +54,7 @@ per script:
   rather than SIP-level.
 
 `queue()` — the ACD verb — is a block too, but what it needs first is the kelixip
-objects it takes names for: [kelixip-b2bua.md](kelixip-b2bua.md).
+objects it takes names for: [kelixip_roadmap.md](kelixip_roadmap.md#call-control-queue).
 
 ## 4. The TypeScript side — done
 

@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.4
+Version:        1.7.1
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        8%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,31 +394,95 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
-* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-8
+* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.1-1
+- 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
+  kelixip-mod-sip_servers subpackage (trunks, proxies and application servers,
+  OPTIONS liveness, tertiary_uri, source_networks, use_fqdn_contact,
+  publish_contact_host, ext_domain), the client certificate of config.toml
+  [tls], the registration binding's User-Agent, Call-ID and CSeq, the PUBLISH
+  received_time, trust_asserted_identity/1 and the SHA-256 digest spelling.
+- And everything delivered in 1.6.5-1 to 1.6.5-5: a P-Asserted-Identity
+  holding two bracketed values on one line is refused instead of raising
+  (Teams Direct Routing), the 2xx names the remote tag of an outbound dialog,
+  a conference places calls (mcu dial_out/4, sip_servers dial_target/3),
+  admit/3 takes the conference number (did:), a script starts on demand
+  (POST /scripts/<name>/run, kelictl run), a trunk's keepalive OPTIONS comes
+  from its account with a user part in its Contact, no module sends outbound
+  SIP before the listeners are bound, and compile_and_restart_all keeps the
+  installed distribution cookie.
+- User-Agent is now Kelixip/1.7.1.
+
+* Wed Oct 07 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.0-1
+- Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
+  Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
+  store-and-forward intact.
+- A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
+  a 415 without deflate in Accept-Encoding gets the page again in clear.
+- The page relay keeps the sender's multipart Content-Type and relays a bare
+  multipart byte for byte.
+- Multipart parts keep their trailing whitespace; a blank line before a
+  part's Content-* headers is tolerated.
+- User-Agent is now Kelixip/1.7.0.
+
+* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-5
+- mcu: admit/3 takes the conference number as an option (did:), for a script
+  that computes it rather than reading it off the R-URI.
+
+* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-4
+- mcu: a dial-out leg offered on the media server's default addressing
+  profile keeps it. A profile asked for at the far end's re-INVITE re-bound
+  the sockets and moved the audio port the PSTN hub had validated with ICE:
+  no RTP reached the leg, which died on its RTP watchdog.
+
+* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-3
+- SIP.DialogImpl: the 2xx that establishes an outbound dialog names its
+  remote tag even when a 1xx gave the early dialog another one (RFC 3261
+  §13.2.2.4). The Microsoft PSTN hub answers from another leg than the one
+  that rang: its ICE re-INVITE got a 481 and the call was hung up.
+
+* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-2
+- mcu: a conference places calls (dial-out, DESIGN-MCU L6): dial_out/4,
+  the adapter's get_local_offer/set_remote_answer, SDES and ICE-lite offers.
+- sip_servers: dial_target/3, the Request-URI of a call a script places.
+- kelixip: POST /scripts/<name>/run and `kelictl run` start a script with no
+  SIP request behind it; its args reach the instance as run_args.
+
+* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-1
+- SIP.Uri: a P-Asserted-Identity holding two bracketed values on one line,
+  unspaced (<tel:…>,<sip:…>, as the Microsoft PSTN hub sends it), is refused
+  as one URI instead of raising: every Teams Direct Routing call died in
+  initial_account/1 before its script ran.
+- sip_servers: a trunk's keepalive OPTIONS comes from its account, and its
+  Contact always carries a user part (a modified Kamailio crashed on a
+  user-less one).
+- kelixip: no module sends outbound SIP before the listeners are bound.
+- compile_and_restart_all keeps the installed distribution cookie.
+
+* Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-8
 - sip_servers: with an ext_domain, the keepalive OPTIONS asks for
   sip:<ext_domain>, sent where the URI resolved, as the REGISTER and the calls
   are. The REGISTER and the calls to a trunk keep the URI's parameters
   (;transport=tls) when its host is replaced by ext_domain.
 
-* Sat Oct 17 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-7
+* Sat Oct 17 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-7
 - sip_servers: a dialog the server opened names its domain in our Contact too
   (the 2xx and the in-dialog requests), when the script calls
   publish_contact_host(peer.contact_host). Reference script mcu-from-sfu.exs, a
   conference entered from Teams Direct Routing.
 
-* Sat Oct 17 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-6
+* Sat Oct 17 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-6
 - config.toml [tls] takes cert and key: the client certificate presented when a
   called TLS or WSS peer demands one (mutual TLS, Teams Direct Routing). cert
   holds the certificate followed by its intermediates.
 
-* Fri Oct 16 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-5
+* Fri Oct 16 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-5
 - sip_servers: use_fqdn_contact, the Contact of the requests sent to a server
   names its domain instead of the bound address, without a port. Teams Direct
   Routing finds the SBC by that name.
 - TLS/TCP transports: a socket error (a fatal TLS alert from the peer) stops
   the connection cleanly instead of crashing its process.
 
-* Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-4
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-4
 - sip_servers: a third URI (tertiary_uri), tried after the backup, and
   source_networks, CIDR ranges a server's requests are recognised from on the
   transports its URIs name. Microsoft Teams Direct Routing needs both: three
@@ -426,14 +490,14 @@ fi
 - kelictl: server.list shows the first URI and counts the others, server.show
   lays the URIs out as a table with their role and state.
 
-* Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-3
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-3
 - A registration binding keeps the REGISTER's User-Agent, Call-ID and CSeq:
   kelictl registration show, the REST API and kelescope's live registrations
   carry them (user_agent, callid, cseq).
 - A published presence state reports received_time, the instant the PUBLISH
   was accepted, in epoch seconds like kamailio's column.
 
-* Mon Oct 12 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-2
+* Mon Oct 12 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-2
 - New subpackage kelixip-mod-sip_servers: the remote SIP servers of a domain
   (sip-appsrv, sip-proxy, sip-trunk), declared with kelictl sip_servers,
   the REST API or kelescope and kept in server_file. Scripts call
@@ -452,7 +516,7 @@ fi
 - A script can keep an inbound P-Asserted-Identity: trust_asserted_identity/1.
 - Digest: a challenge naming SHA-256, the RFC 8760 spelling, is answered.
 
-* Thu Oct 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-1
+* Thu Oct 08 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-1
 - Screen sharing through the B2BUA. A leg carries several video streams and
   BUNDLE: the second m=video of a browser sharing its screen is a stream of
   its own, relayed to the other leg under its mid; a share that stops is
@@ -469,7 +533,7 @@ fi
 - The reference media call script carries text too (T.140 data channel).
 - User-Agent is now Kelixip/1.6.4.
 
-* Tue Oct 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-2
+* Tue Oct 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-2
 - RFC 4028 session timers, one per call leg. A long call relayed between two
   browsers was cut after 90 s: the caller's Session-Expires was relayed to the
   callee, who then waited for kelixip to refresh its leg. Session-Expires,
@@ -481,14 +545,14 @@ fi
 - New [session_timer] section in config.toml: enabled (default true),
   expires (1800), min_se (90), refresher (local | remote, default local).
 
-* Sat Oct 03 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.3-1
+* Sat Oct 03 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-1
 - Presence: the composite person keeps the extension elements a client puts
   in <rpid:activities> beside its activity (Trix's <trix:dnd/> and
   <trix:auto/>). Lost until now, a Trix watching its own presence read
   "do not disturb" back as busy and kept busy after a reload.
 - User-Agent is now Kelixip/1.6.3.
 
-* Wed Sep 30 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.2-1
+* Wed Sep 30 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.2-1
 - Basic instant messaging (page mode, RFC 3428): a [[domain.chat]] block routes
   a MESSAGE to the `chat` function; a MESSAGE's content is never logged.
 - Conversations: one scenario handles every MESSAGE of a conversation, keyed on
@@ -506,7 +570,7 @@ fi
 - The control API encodes a pid as text: GET /scenarios no longer answers 500.
 - User-Agent is now Kelixip/1.6.2.
 
-* Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.1-1
+* Sun Sep 27 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.1-1
 - kelescope shows presence live: Kelix.Control.subscribe_presence/2 returns a
   domain's presentities, then pushes each change.
 - kelictl presence list shows a presentity reported registered by
@@ -528,14 +592,14 @@ fi
   subscribed.
 - User-Agent is now Kelixip/1.6.1.
 
-* Sun Sep 27 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-9
+* Sun Sep 27 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-9
 - A scenario state that raises tears down what it had set up: teardown now runs
   on the context the failing state had built, so both legs and the media session
   are released and the caller can hang up.
 - A dialog monitors its application and ends with it, hung up first when there is
   a session to end, instead of answering 503 to every later in-dialog request.
 
-* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-8
+* Sat Sep 26 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-8
 - Presence now follows real registrations. The registrar-presence.exs script read
   the REGISTER's To as a parsed URI, which only a test request carries: presence
   was never told of a registration (no NOTIFY to watchers), and the script ended
@@ -546,14 +610,14 @@ fi
 - kelictl: module commands take positional arguments, bound in order to the
   arguments the command declares — kelictl presence list weshwesh.eu.
 
-* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-7
+* Sat Sep 26 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-7
 - List NOTIFYs are deflated as soon as the body passes 500 octets, when the
   watcher accepts it. The bound was 1200 for the body alone, which ignored the ~700
   octets of headers a list NOTIFY carries over IPv6: a three-entry list went out
   clear in a 1806-octet datagram, which the path fragmented and the watcher never
   received.
 
-* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-6
+* Sat Sep 26 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-6
 - Presence follows registrations: a new reference script, registrar-presence.exs
   (shipped with kelixip-mod-presence), is registrar.exs plus a report to the
   presence collection on every change. A subscriber that does not PUBLISH is open
@@ -569,7 +633,7 @@ fi
   §10.3). It used to remove every binding of the AOR, un-registering a
   subscriber's other devices whenever one of them signed off.
 
-* Tue Sep 22 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-2
+* Tue Sep 22 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-2
 - Buddy lists (RFC 4662 / RFC 5367): kelixip-mod-presence ships a third
   reference script, presence-rls.exs, which serves a list subscription. Declare
   the list URI the client sends (sip.linphone.org for Linphone) as a domain of
@@ -578,11 +642,11 @@ fi
   belong to kelixip-mod-presence alone, as the mcu scripts belong to
   kelixip-mod-mcu.
 
-* Sat Sep 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-2
+* Sat Sep 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.5-2
 - Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
   before the rest of the release landed. No code change.
 
-* Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
+* Fri Sep 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.0-1
 - Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between
   them. New subpackage kelixip-mod-presence — the collection, the entity-tags and
   the fan-out — with the reference scripts presence-subscribe.exs and
@@ -605,7 +669,7 @@ fi
   {:fsl_monitor, ...}.
 - User-Agent is now Kelixip/1.6.0.
 
-* Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
+* Tue Sep 15 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.5-1
 - sip: an INVITE server transaction no longer carries timer F. A call that rang
   longer than 32 s was ended with a 408 to the caller while the callee was still
   ringing. How long a phone rings is the application's decision (RFC 3261
@@ -638,7 +702,7 @@ fi
   path.
 - User-Agent is now Kelixip/1.5.5.
 
-* Thu Sep 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.4-1
+* Thu Sep 10 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.4-1
 - mcu: the module pushes its events to kelixip, so a supervision view is told what
   a conference and its legs do rather than polling for it.
 - SBB bridge(): the outbound leg is disconnected cleanly during a progressive
@@ -649,7 +713,7 @@ fi
 - Packaging: bash-completion is declared as an optional dependency.
 - User-Agent is now Kelixip/1.5.4.
 
-* Tue Sep 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.3-1
+* Tue Sep 08 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.3-1
 - Registrations are observable live: Kelix.Control.registrations/0,
   registrations/1 and registration/2 read the registrar's bindings per domain, and
   subscribe_registrations/2 pushes every change of a domain as it happens. What
@@ -659,7 +723,7 @@ fi
 - mcu: a conference and its legs publish the same kind of events, for the same view.
 - User-Agent is now Kelixip/1.5.3.
 
-* Sun Sep 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.2-7
+* Sun Sep 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.2-7
 - Packaging: Release 6 was built more than once with different payloads, so dnf took
   the second install for a package it already had and kept the first — a node ran a
   controller without the T.140 data channel while rpm reported the version that has
@@ -667,7 +731,7 @@ fi
 - Packaging: the release tree is rebuilt from scratch, so a package carries one
   elixip2 and one releases/<version> instead of every version ever built here.
 
-* Sun Sep 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.2-1
+* Sun Sep 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.2-1
 - Multi-interface: a node speaks IPv4 and IPv6 at once, on an internal side and a
   public side. Three new [[listen]] keys, all optional: tag (internal / public) and
   networks say which side a listener sits on, advertise names the public face of addr
@@ -715,7 +779,7 @@ fi
   without which the node exited at boot on "register/listen error: eacces".
 - Medooze mediaserver 1.14.0 is required.
 - User-Agent is now Kelixip/1.5.2.
-* Thu Aug 20 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.1-1
+* Thu Aug 20 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.1-1
 - mcu: the conference DEFINITIONS survive a node restart, in one JSON file named by
   [module.mcu] conference_file. Only rooms somebody declared are written; a restored
   room is rebuilt by the same path that recovers one after a media-server restart.
@@ -739,7 +803,7 @@ fi
 - BREAKING: conference video defaults change — video_fps 15 -> 30, video_bitrate
   1024 -> 1500 kb/s. The mosaic canvas and the encoded size are held equal.
 - User-Agent is now Kelixip/1.5.1.
-* Tue Aug 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.0-1
+* Tue Aug 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.5.0-1
 - Service building blocks: an FSL scenario can enter a reusable sub-machine on its
   own legs and return from it with one event (sbb_fsm, sbb_return, use SIP.SBB).
 - SBB.Call ships the first two: call/1 establishes the outbound leg — provisionals,
@@ -754,7 +818,7 @@ fi
   matching the old shapes is warned about at compile time.
 - b2bua.exs is deleted: it was a copy of direct-call.exs.
 - User-Agent is now Kelixip/1.5.0.
-* Tue Aug 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.4.1-1
+* Tue Aug 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.4.1-1
 - The scenario language is named the Finite State Language (FSL); DSL.md becomes
   FSL.md.
 - FSL gains `stay` (handle an event without re-entering the state) and `goto back`
@@ -765,7 +829,7 @@ fi
   wait_auth_register.
 - User-Agent is now Kelixip/1.4.1.
 
-* Fri Aug 14 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.4.0-1
+* Fri Aug 14 2026 Emmanuel BUU <latribuu@proton.me> - 1.4.0-1
 - Version bump to 1.4.0: the media relay validated in real traffic. Cross-leg
   codec selection, per-leg codecs with real transcoding (VP8 <-> H.264), AV1,
   bidirectional NAT latching, media watchdog armed at answer.
@@ -774,7 +838,7 @@ fi
   single BYE per hangup, fresh Via branch on the ACK of a 2xx.
 - User-Agent is now Kelixip/1.4.0.
 
-* Mon Aug 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.3.0-1
+* Mon Aug 10 2026 Emmanuel BUU <latribuu@proton.me> - 1.3.0-1
 - Version bump to 1.3.0: the B2BUA release. A scenario can now terminate an
   incoming call and place a second one of its own, relaying between the two.
 - Call forwarding to a registered subscriber, serial and parallel hunting over
@@ -787,7 +851,7 @@ fi
 - Resilience: a transaction timeout, a dead socket or a lost media server is
   reported to the scenario instead of leaving it waiting.
 
-* Sat Aug 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.2.1-1
+* Sat Aug 08 2026 Emmanuel BUU <latribuu@proton.me> - 1.2.1-1
 - Version bump to 1.2.1: the interoperability release. WebRTC calls proven
   with MS Edge and Chrome, and with Linphone 6.2.0 in SDES as well as DTLS.
 - Codec negotiation fully delegated to the medooze media server; AV1 support,
@@ -796,13 +860,13 @@ fi
   reload leaves the running configuration untouched. systemctl reload supported.
 - New kelictl reload-all to reload every configured domain.
 
-* Sun Aug 02 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.2.0-1
+* Sun Aug 02 2026 Emmanuel BUU <latribuu@proton.me> - 1.2.0-1
 - Version bump to 1.2.0.
 - New subpackage kelixip-mod-mcu: the conference mixer (design P6).
 
-* Wed Jul 29 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.1.0-1
+* Wed Jul 29 2026 Emmanuel BUU <latribuu@proton.me> - 1.1.0-1
 - Version bump to 1.1.0.
 
-* Tue Jul 28 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 0.2.0-1
+* Tue Jul 28 2026 Emmanuel BUU <latribuu@proton.me> - 0.2.0-1
 - First packaged release (design P10): core + mod-registrar + mod-auth_db
   subpackages, systemd unit with graceful-shutdown ExecStop, per-host cookie.

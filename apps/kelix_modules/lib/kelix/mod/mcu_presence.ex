@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.McuPresence do
   @moduledoc """
-  Conference rooms as presentities (`docs/design/mcu-presence-plan.md`): the link
+  Conference rooms as presentities (`docs/design/DESIGN-PRESENCE.md`, "Reported states"): the link
   between `Kelix.Mod.Mcu` and `Kelix.Mod.Presence`, neither of which depends on
   the other.
 

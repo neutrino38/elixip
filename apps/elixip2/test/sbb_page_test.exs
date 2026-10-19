@@ -32,6 +32,27 @@ defmodule SIP.Test.SbbPage do
     def on_request(req, state), do: default_request(req, state)
   end
 
+  defmodule ClearOnlyDevice do
+    @moduledoc """
+    A device that cannot read `deflate`: a body that came compressed gets a 415
+    naming `identity` alone (RFC 3261 §21.4.13), a clear one a 200.
+    """
+    use SIP.Test.Peer
+
+    @impl true
+    def on_request(%{method: :MESSAGE} = req, state) do
+      send(:sbb_page_test, {:device_got, state.name, req})
+
+      if Map.get(req, :decoded_from) == "deflate",
+        do:
+          {[reply(req, 415, "Unsupported Media Type", [{"Accept-Encoding", "identity"}], 0)],
+           state},
+        else: {[reply(req, 200, "OK", [], 0)], state}
+    end
+
+    def on_request(req, state), do: default_request(req, state)
+  end
+
   defmodule ChatUAS do
     @moduledoc "One instance of the relay per inbound out-of-dialog MESSAGE."
     @behaviour SIP.Session.Chat
@@ -106,6 +127,10 @@ defmodule SIP.Test.SbbPage do
   setup_all do
     SIP.Test.AppEnv.preserve_proxy()
     SIP.Test.AppEnv.preserve([:sequence_output])
+    # Registered after `preserve`, so it runs first: the last test's relay still
+    # lingers (state `linger`), and its journal must reach this module's sink
+    # rather than a .puml file in the working directory once the env is restored.
+    on_exit(fn -> Process.sleep(800) end)
     :ok = SIP.Scenario.start_stack()
     Application.put_env(:elixip2, :proxyusesrv, false)
     :ok
@@ -121,7 +146,7 @@ defmodule SIP.Test.SbbPage do
 
   def journal(events, meta) do
     if pid = Process.whereis(@test_name), do: send(pid, {:journal, to_string(meta.pid), events})
-    :kept
+    {:ok, :kept}
   end
 
   # ── The reading of the answers ──────────────────────────────────────────────
@@ -256,6 +281,116 @@ defmodule SIP.Test.SbbPage do
     assert Enum.all?(events, &(&1[:body] == nil or not (&1.body =~ "Rendez-vous")))
   end
 
+  # ── Chat attachments (chat-media-plan, S1) ─────────────────────────────────
+
+  @ft_xml "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n" <>
+            "<file xmlns=\"urn:gsma:params:xml:ns:rcs:rcs:fthttp\">\r\n" <>
+            "<file-info type=\"file\">\r\n<file-size>48213</file-size>\r\n" <>
+            "<file-name>IMG_20261002_102145.jpg</file-name>\r\n" <>
+            "<content-type>image/jpeg</content-type>\r\n" <>
+            "<data url=\"https://files.example.com/files/tmp/66fd0b2c_9f8e7d6c.jpg\" " <>
+            "until=\"2026-10-09T10:21:45Z\"/>\r\n</file-info>\r\n</file>"
+
+  defp cpim(type, content) do
+    "From: <sip:alice@unit.test>\r\nTo: <sip:alice@unit.test>\r\n" <>
+      "DateTime: 2026-10-02T10:21:45Z\r\nNS: imdn <urn:ietf:params:imdn>\r\n" <>
+      "imdn.Message-ID: 7Kq2xP9fLm3a\r\n" <>
+      "imdn.Disposition-Notification: positive-delivery, display\r\n\r\n" <>
+      "Content-Type: #{type}\r\n\r\n" <> content
+  end
+
+  defp caption(n), do: String.duplicate("Une photo de la terrasse, ce matin. ", n) <> "Bises."
+
+  test "a file-transfer XML is relayed byte for byte, its Content-Type unchanged" do
+    devices(phone: [code: 200])
+    inject_message(@ft_xml, "application/vnd.gsma.rcs-ft-http+xml")
+
+    assert_receive {:outcome, :delivered, %{code: 200}}, 3_000
+    assert_receive {:device_got, :phone, req}
+    assert SIPMsg.body_octets(req.body) == @ft_xml
+    assert req.contenttype == "application/vnd.gsma.rcs-ft-http+xml"
+  end
+
+  test "a CPIM envelope is relayed byte for byte" do
+    devices(phone: [code: 200])
+    body = cpim("application/vnd.gsma.rcs-ft-http+xml", @ft_xml)
+    inject_message(body, "message/cpim")
+
+    assert_receive {:outcome, :delivered, %{code: 200}}, 3_000
+    assert_receive {:device_got, :phone, req}
+    assert SIPMsg.body_octets(req.body) == body
+    assert req.contenttype == "message/cpim"
+  end
+
+  test "a bare multipart of XML and text is relayed with its boundary and its parts" do
+    devices(phone: [code: 200])
+
+    body =
+      "--b1\r\nContent-Type: application/vnd.gsma.rcs-ft-http+xml\r\n\r\n#{@ft_xml}\r\n" <>
+        "--b1\r\nContent-Type: text/plain;charset=UTF-8\r\n\r\nla terrasse\r\n--b1--\r\n"
+
+    inject_message(body, "multipart/mixed;boundary=b1")
+
+    assert_receive {:outcome, :delivered, %{code: 200}}, 3_000
+    assert_receive {:device_got, :phone, req}
+    assert req.contenttype == "multipart/mixed;boundary=b1"
+    assert SIPMsg.body_octets(req.body) == body
+  end
+
+  test "past 1300 octets on a datagram transport, the page leaves deflated" do
+    devices(phone: [code: 200])
+    :ok = Mockup.attach_probe(Mockup.instance!(key(:phone)))
+    body = cpim("text/plain;charset=UTF-8", caption(30))
+    inject_message(body, "message/cpim")
+
+    assert_receive {:outcome, :delivered, %{code: 200}}, 3_000
+    wire = page_on_wire("phone")
+    assert wire =~ "\r\nContent-Encoding: deflate\r\n"
+    assert wire =~ "\r\nContent-Type: message/cpim\r\n"
+    assert byte_size(wire) < 1300
+
+    assert_receive {:device_got, :phone, req}
+    assert SIP.Msg.Ops.body_string(req) == body
+  end
+
+  test "a page that fits leaves in clear" do
+    devices(phone: [code: 200])
+    :ok = Mockup.attach_probe(Mockup.instance!(key(:phone)))
+    inject_message()
+
+    assert_receive {:outcome, :delivered, %{code: 200}}, 3_000
+    refute page_on_wire("phone") =~ "Content-Encoding"
+  end
+
+  test "a 415 refusing deflate gets the page once more, in clear" do
+    devices(phone: [peer: ClearOnlyDevice])
+    :ok = Mockup.attach_probe(Mockup.instance!(key(:phone)))
+    body = cpim("text/plain;charset=UTF-8", caption(30))
+    callid = inject_message(body, "message/cpim")
+
+    assert_receive {:outcome, :delivered, %{code: 200}}, 3_000
+    assert await_response(callid).response == 200
+
+    assert_receive {:device_got, :phone, first}
+    assert_receive {:device_got, :phone, second}
+    assert first.decoded_from == "deflate"
+    assert Map.get(second, :decoded_from) == nil
+    assert SIP.Msg.Ops.body_string(second) == body
+
+    assert page_on_wire("phone") =~ "Content-Encoding: deflate"
+    refute page_on_wire("phone") =~ "Content-Encoding"
+  end
+
+  # The next MESSAGE the probe saw leave towards a device, as octets.
+  defp page_on_wire(device) do
+    receive do
+      {:sip_mockup, {:wire_sent, "MESSAGE sip:alice@" <> rest = wire}} ->
+        if String.starts_with?(rest, device), do: wire, else: page_on_wire(device)
+    after
+      3_000 -> flunk("no MESSAGE on the wire towards #{device}")
+    end
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
   # One Mockup instance per device, and the relay's peer listing them all.
@@ -263,7 +398,8 @@ defmodule SIP.Test.SbbPage do
     uris =
       for {name, opts} <- specs do
         uri = "sip:alice@#{name}.unit.test;unittest=alice-#{name}"
-        :ok = Mockup.set_peer(Mockup.instance!(uri), Device, [name: name] ++ opts)
+        {peer, opts} = Keyword.pop(opts, :peer, Device)
+        :ok = Mockup.set_peer(Mockup.instance!(uri), peer, [name: name] ++ opts)
         uri
       end
 
@@ -272,9 +408,7 @@ defmodule SIP.Test.SbbPage do
 
   defp key(name), do: "sip:alice@#{name}.unit.test;unittest=alice-#{name}"
 
-  defp inbound_wire do
-    body = "Rendez-vous jeudi"
-
+  defp inbound_wire(body, type) do
     "MESSAGE sip:alice@unit.test SIP/2.0\r\n" <>
       "Via: SIP/2.0/UDP 82.184.8.2:53936;branch=z9hG4bKinjected1\r\n" <>
       "Max-Forwards: 69\r\n" <>
@@ -282,13 +416,13 @@ defmodule SIP.Test.SbbPage do
       "To: <sip:alice@unit.test>\r\n" <>
       "Call-ID: old-call-id\r\n" <>
       "CSeq: 77 MESSAGE\r\n" <>
-      "Content-Type: text/plain;charset=UTF-8\r\n" <>
+      "Content-Type: #{type}\r\n" <>
       "Content-Length: #{byte_size(body)}\r\n\r\n" <> body
   end
 
   # Inject an out-of-dialog MESSAGE, on a mockup instance of its own.
-  defp inject_message do
-    {:ok, req} = SIPMsg.parse(inbound_wire(), fn _, _, _, _ -> :ok end)
+  defp inject_message(body \\ "Rendez-vous jeudi", type \\ "text/plain;charset=UTF-8") do
+    {:ok, req} = SIPMsg.parse(inbound_wire(body, type), fn _, _, _, _ -> :ok end)
     callid = SIP.Msg.Ops.generate_from_or_to_tag()
     branch = "z9hG4bKinjected" <> SIP.Msg.Ops.generate_from_or_to_tag()
 

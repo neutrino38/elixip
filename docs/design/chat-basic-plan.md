@@ -126,7 +126,7 @@ SIPMsg.redacted(msg)
 Nothing else in the tree prints a message's body; a grep for the transports'
 dump pattern is part of the phase, and a test pins each caller.
 
-**kelescope.** The contract (`kelescope-debug-scenario.md` §4.3) gains
+**kelescope.** The contract ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md#111-scenario-journals)) gains
 `redacted: boolean` on a `:message` event. A field kelescope does not know is
 ignored, so nothing breaks before Part B follows; once it does, the unfolded
 message says "content not recorded (GDPR)" instead of showing a placeholder
@@ -134,7 +134,7 @@ that reads like a bug. `kelictl debug show --full` prints the same line.
 
 **Files** `framework/SIPMsg.ex`, `framework/SIPTransport{UDP,TCP,TLS,WSS}.ex`,
 `dsl/SIPScenarioSipTrace.ex`, `test/message_redaction_test.exs`,
-`docs/design/kelescope-debug-scenario.md` (§4.3).
+`docs/design/DESIGN-KELIXIP.md` (*Scenario journals*).
 
 **Done when** a traced call carrying an in-dialog MESSAGE, and a traced chat
 instance relaying one, keep journals in which the text appears nowhere — asserted

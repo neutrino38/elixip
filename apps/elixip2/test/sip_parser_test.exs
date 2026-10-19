@@ -28,7 +28,15 @@ defmodule SIP.Test.Uri do
   # reading of P-Asserted-Identity goes through here (SIP.Msg.Ops), and the
   # monitor reads one on every request — so the raise took the instance with it.
   test "Parse a value that is not a SIP URI and holds no closing bracket" do
-    for value <- ["tel:+33970260233, sip:dave@domain.fr", "tel:+33970260233 <sip:a@b.fr"] do
+    for value <- [
+          "tel:+33970260233, sip:dave@domain.fr",
+          "tel:+33970260233 <sip:a@b.fr",
+          # As the Microsoft PSTN hub sends it: both values bracketed, no space.
+          # The prefix was read as a display name and split into three: MatchError.
+          "<tel:+33977190504>,<sip:emmanuel.buu@ives.fr>",
+          "<tel:+33977190504>, <sip:emmanuel.buu@ives.fr>",
+          "<tel:+33977190504>,\"Bob\" <sip:bob@ives.fr>"
+        ] do
       {code, _parsed_uri} = SIP.Uri.parse(value)
       assert code == :invalid_sip_uri_general, "#{value} was not refused"
     end
