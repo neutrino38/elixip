@@ -207,12 +207,14 @@ defmodule Kelix.Mcu.AdhocCall do
   # refusal — this composes the SIP reply for the error verdicts and returns the
   # updated context; the state code tests `sip_ctx.lasterr`.
   defp do_admit(sip_ctx, req, dialog_pid, domain) do
-    case ensure_room(domain, req) do
+    did = did_of(req)
+
+    case ensure_room(domain, did) do
       {:ok, _conf, origin} ->
         # `displayname: :auto` overlays the caller's name on its tile — the From
         # header's display name, else the From URI's user part. Replace with a string
         # (or drop the option) in a copy that wants its own naming policy.
-        sip_ctx = Kelix.Mod.Mcu.admit(sip_ctx, domain, req, displayname: :auto)
+        sip_ctx = Kelix.Mod.Mcu.admit(sip_ctx, domain, req, did: did, displayname: :auto)
 
         case sip_ctx.lasterr do
           :ok ->
@@ -252,20 +254,19 @@ defmodule Kelix.Mcu.AdhocCall do
   # instance dies before anyone joins — a caller who never ACKs, a crash, a media
   # failure — the module destroys the empty conference. A room somebody joined
   # survives, and then goes with its last participant (`destroy_when_empty`).
-  defp ensure_room(domain, req) do
-    case did_of(req) do
-      nil ->
-        {:error, :no_such_conference}
+  defp ensure_room(_domain, nil), do: {:error, :no_such_conference}
 
-      did ->
-        Kelix.Mod.Mcu.ensure_conference(domain, did,
-          name: "Ad-hoc #{did}",
-          owner: :caller,
-          destroy_when_empty: true
-        )
-    end
+  defp ensure_room(domain, did) do
+    Kelix.Mod.Mcu.ensure_conference(domain, did,
+      name: "Ad-hoc #{did}",
+      owner: :caller,
+      destroy_when_empty: true
+    )
   end
 
+  # The conference number, computed once: the room is created and joined under it.
+  # A copy that derives it otherwise (the last digits of the number, a lookup)
+  # changes this function alone.
   defp did_of(req) do
     case Map.get(req, :ruri) do
       %SIP.Uri{userpart: user} when is_binary(user) and user != "" -> user

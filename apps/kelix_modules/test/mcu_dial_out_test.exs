@@ -154,6 +154,36 @@ defmodule Kelix.Mod.McuDialOutTest do
     end
   end
 
+  describe "admit/3 with did:" do
+    defp invite(user) do
+      %{
+        method: :INVITE,
+        ruri: %SIP.Uri{userpart: user, domain: @domain},
+        from: %SIP.Uri{userpart: "gw", domain: "gateway.example.com"},
+        to: %SIP.Uri{userpart: user, domain: @domain}
+      }
+    end
+
+    test "joins the room the script names, not the R-URI's", ctx do
+      req = invite("+3397719#{ctx.did}")
+
+      assert {:error, :no_such_conference} = Mcu.admit(@domain, req)
+      assert {:ok, conf, _part} = Mcu.admit(@domain, req, did: ctx.did)
+      assert conf.uid == ctx.uid
+    end
+
+    test "without did: the R-URI still names the room", ctx do
+      assert {:ok, conf, _part} = Mcu.admit(@domain, invite(ctx.did))
+      assert conf.uid == ctx.uid
+    end
+
+    test "a did that is not a non-empty string is refused", ctx do
+      for bad <- [nil, "", 8000] do
+        assert {:error, :bad_did} = Mcu.admit(@domain, invite(ctx.did), did: bad)
+      end
+    end
+  end
+
   describe "the offer" do
     test "lists what the server accepted, in our order, and nothing else", ctx do
       {conn, _part} = leg(ctx.did, media: :audio_video)

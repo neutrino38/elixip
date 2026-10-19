@@ -608,19 +608,31 @@ defmodule Kelix.Mod.Mcu do
       Resolved here (only this call still holds the request), stored on the row,
       and sent at `attach/1` time — the MCU-side participant does not exist yet
       during admit. Anything else is `{:error, :bad_displayname}`.
+    * `:did` — the conference to join, when the script computes it rather than
+      reading it off the R-URI (the last digits of a Teams number, say). It must
+      name the same room the script created with `ensure_conference/3`. Defaults
+      to the R-URI user part. Anything but a non-empty string is
+      `{:error, :bad_did}`.
   """
   @spec admit(String.t(), map, keyword) ::
           {:ok, Conference.t(), Conference.participant()}
           | {:error,
-             :no_such_conference | :full | :mcu_down | :bad_displayname | :down | :timeout}
+             :no_such_conference
+             | :full
+             | :mcu_down
+             | :bad_displayname
+             | :bad_did
+             | :down
+             | :timeout}
   def admit(domain, req, opts \\ [])
 
   def admit(domain, req, opts) when is_binary(domain) and is_map(req) and is_list(opts) do
     peer = uri_of(Map.get(req, :from))
 
-    with {:ok, display_name} <-
+    with {:ok, did} <- requested_did(Keyword.get(opts, :did, :ruri), req),
+         {:ok, display_name} <-
            requested_displayname(Keyword.get(opts, :displayname, :auto), peer) do
-      Kelix.Module.safe_call(__MODULE__, {:admit, domain, ruri_user(req), peer, display_name},
+      Kelix.Module.safe_call(__MODULE__, {:admit, domain, did, peer, display_name},
         timeout: @facade_timeout_ms
       )
     end
@@ -2304,6 +2316,10 @@ defmodule Kelix.Mod.Mcu do
   end
 
   defp requested_displayname(_other, _peer), do: {:error, :bad_displayname}
+
+  defp requested_did(:ruri, req), do: {:ok, ruri_user(req)}
+  defp requested_did(did, _req) when is_binary(did) and did != "", do: {:ok, did}
+  defp requested_did(_other, _req), do: {:error, :bad_did}
 
   defp uri_of(%SIP.Uri{} = uri), do: uri
 

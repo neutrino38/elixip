@@ -201,6 +201,20 @@ nothing and their verdict is read from `sip_ctx.lasterr`.
 admit(req, dialog_pid)     # verdict in sip_ctx.lasterr
 ```
 
+The macro calls the script's `do_admit/4`, which calls `Kelix.Mod.Mcu.admit/4`.
+That function reads the conference number (DID) from the user part of the R-URI.
+A script that computes the number another way passes it with `did:`:
+
+```elixir
+# the last 4 digits of the dialled number: "+33977190504" -> "0504"
+Kelix.Mod.Mcu.admit(sip_ctx, domain, req, did: String.slice(user, -4, 4))
+```
+
+The number must name the room the script created or found with
+`ensure_conference/3`. Otherwise the verdict is `{:error, :no_such_conference}`.
+The ad-hoc reference scripts compute the number once, in `did_of/1`, and pass it
+to both calls.
+
 Processes an INVITE request and
 - checks that the user part of the INVITE's R-URI matches an existing conference
   SIP number,
