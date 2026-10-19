@@ -708,6 +708,81 @@ defmodule Kelix.ControlTest do
     end
   end
 
+  describe "run_script/3 (a script started on demand)" do
+    setup do
+      %{dir: dir} =
+        Kelix.Test.Fixtures.serve_domains("""
+        [[domain]]
+        name = "run.example.com"
+        aliases = ["run.example.fr"]
+        max_calls = 1
+        """)
+
+      File.cp!(Path.join(__DIR__, "support/scripts/launched.exs"), Path.join(dir, "launched.exs"))
+      Kelix.Test.Fixtures.with_script_dir(dir)
+      Process.register(self(), :kelix_launch_test)
+
+      on_exit(fn ->
+        for row <- Control.monitor(),
+            row.domain == "run.example.com",
+            do: Control.shutdown_scenario(row.id)
+      end)
+
+      :ok
+    end
+
+    test "the instance runs on the domain, with its args and no dialog" do
+      assert {:ok, %{id: id}} =
+               Control.run_script("launched.exs", "run.example.fr", %{"to" => "+33977190504"})
+
+      # resolved like inbound traffic — an alias names the domain
+      assert_receive {:launched, %{"to" => "+33977190504"}, "run.example.com", nil}, 2_000
+
+      assert %{function: :run, script: "launched.exs"} =
+               Enum.find(Control.monitor(), &(&1.id == id))
+
+      assert Control.shutdown_scenario(id) == :ok
+    end
+
+    test "it counts in the domain's max_calls" do
+      assert {:ok, _} = Control.run_script("launched.exs", "run.example.com")
+      assert_receive {:launched, %{}, _, _}, 2_000
+
+      capture_log(fn ->
+        assert {:error, {:rejected, 503, _}} =
+                 Control.run_script("launched.exs", "run.example.com")
+      end)
+    end
+
+    test "a name, never a path" do
+      for name <- ["../launched.exs", "/etc/passwd", ".hidden.exs", ""] do
+        assert Control.run_script(name, "run.example.com") == {:error, :bad_script_name}
+      end
+    end
+
+    test "an unknown domain, a script that does not load" do
+      assert Control.run_script("launched.exs", "nowhere.test") == {:error, :not_found}
+
+      capture_log(fn ->
+        assert {:error, {:script, _}} = Control.run_script("missing.exs", "run.example.com")
+      end)
+    end
+
+    test "kelictl run: name=value tokens become the args" do
+      {0, text} =
+        Kelix.Control.CLI.run(
+          ["run", "launched.exs", "run.example.com", "to=+33977190504"],
+          node()
+        )
+
+      assert text =~ ~r/instance \d+ started/
+      assert_receive {:launched, %{"to" => "+33977190504"}, _, _}, 2_000
+
+      assert {2, _} =
+               Kelix.Control.CLI.run(["run", "launched.exs", "run.example.com", "oops"], node())
+    end
+  end
+
   # Point the node's `domains_path` at a temporary file for one test, and put back
   # whatever the rest of the suite expects afterwards.
   defp use_domains(content) do

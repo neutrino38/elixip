@@ -659,6 +659,73 @@ defmodule Kelix.Control do
     result
   end
 
+  @doc """
+  Run `script` on `domain` now, with no SIP request behind it (`kelictl run`,
+  `POST /scripts/:name/run`): a call the node places on demand, a test, a job.
+
+  The script is the domain's like any other — resolved in `script_dir`, loaded and
+  contract-checked by `Kelix.ScriptRegistry`, counted in the domain's `max_calls` —
+  and it runs with the overrides a routed instance gets (its `domain`, the media
+  server the pool selected). It differs in one way: nothing asked it anything, so it
+  has no dialog and no inbound request. What it was asked to do is `args`, a map that
+  reaches its appdata as `:run_args` — string keys, as JSON delivers them.
+
+  `script` is a **name**, never a path: running whatever file a caller points at is
+  not something an API should offer, even an authenticated one. Returns
+  `{:ok, %{id: id}}` (the `kelictl stop` / monitor handle), `{:error, :not_found}`
+  for an unknown domain, `{:error, :bad_script_name}`, `{:error, {:script, reason}}`
+  for a script that does not load, or `{:error, {:rejected, code, reason}}` from the
+  quotas.
+  """
+  @spec run_script(String.t(), String.t(), map) ::
+          {:ok, %{id: pos_integer}}
+          | {:error,
+             :not_found
+             | :bad_script_name
+             | {:script, term}
+             | {:rejected, integer, String.t()}}
+  def run_script(script, domain, args \\ %{})
+      when is_binary(script) and is_binary(domain) and is_map(args) do
+    with :ok <- script_name(script),
+         %Kelix.Domain{} = d <-
+           Kelix.Domains.lookup(current_domains(), domain) || {:error, :not_found},
+         {:ok, _module} <- loadable(script) do
+      route = %{domain: d.name, function: :run, script: script, max_calls: d.max_calls}
+
+      overrides =
+        case Kelix.Router.media_override() do
+          nil -> [domain: d.name]
+          cfg -> [domain: d.name, mediaserver_instance: cfg]
+        end
+
+      case Kelix.InstancePool.launch(route, args, overrides) do
+        {:ok, %{id: id}} ->
+          Logger.info(
+            module: __MODULE__,
+            message: "run_script #{script} on #{d.name}: instance #{id}, args #{inspect(args)}"
+          )
+
+          {:ok, %{id: id}}
+
+        {:reject, code, reason} ->
+          {:error, {:rejected, code, reason}}
+      end
+    end
+  end
+
+  defp script_name(name) do
+    if name != "" and Path.basename(name) == name and not String.starts_with?(name, "."),
+      do: :ok,
+      else: {:error, :bad_script_name}
+  end
+
+  defp loadable(script) do
+    case Kelix.ScriptRegistry.current(script) do
+      {:ok, module} -> {:ok, module}
+      {:error, reason} -> {:error, {:script, reason}}
+    end
+  end
+
   @doc "Cooperatively shut down one scenario by id (`kelictl stop <id>`)."
   @spec shutdown_scenario(pos_integer) :: :ok | {:error, :not_found}
   def shutdown_scenario(id) when is_integer(id), do: Kelix.InstancePool.shutdown(id)

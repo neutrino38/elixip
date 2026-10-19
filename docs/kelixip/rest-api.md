@@ -64,6 +64,7 @@ cert) with a JSON body `{"error": "…"}`.
 | `GET /traces` | R | `kelictl debug list` |
 | `GET /traces/<id>` | R | the journal of `kelictl debug show <id>`, **unrendered**: its summary, `meta` (the scenario's config with its secrets masked) and `events` (the `FSL.Journal` events, SIP messages with their text). Drawing it is the client's job |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
+| `POST /scripts/<name>/run` (body `{"domain": …, "args": {…}}`) | W | `kelictl run` — start a script now; `202 {"result": {"id": n}}`, see [below](#running-a-script-on-demand) |
 | `POST /domains/reload` | W | `kelictl domain reload-all` |
 | `POST /reload-all` | W | `kelictl reload-all` (what `systemctl reload` runs) |
 | `POST /modules/<name>/reload` | W | `kelictl module reload` |
@@ -215,11 +216,49 @@ curl -s -X POST   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: applicatio
      -d '{"names":["uas_register"]}' "$BASE/scripts/reload?notify=1"
 curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/domains/reload
 curl -s -X POST   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"domain":"example.com","args":{"to":"+33123456789"}}' $BASE/scripts/dial.exs/run
+curl -s -X POST   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"enabled":false}' $BASE/mediaservers/mcu1
 curl -s -X PUT    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"level":"debug"}' $BASE/log/level
 curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/graceful-shutdown
 ```
+
+## Running a script on demand
+
+`POST /scripts/<name>/run` starts an instance of a script that no SIP request
+started — a call the node places, a test, a job. The script is the domain's like any
+other: resolved in `script_dir`, loaded and checked as the dial plan's are, counted in
+the domain's `max_calls`, listed by `GET /scenarios` and stopped by
+`POST /scenarios/<id>/shutdown`. It runs with the overrides a routed instance gets
+(its `domain`, the media server the pool selected), but with no dialog and no inbound
+request.
+
+```json
+{"domain": "example.com", "args": {"to": "+33123456789"}}
+```
+
+`domain` is matched like inbound traffic (name or alias). `args` (optional, an
+object) reaches the instance's appdata as `run_args`, keys as strings:
+
+```elixir
+args = appdata_get(:run_args) || %{}
+callee = Map.get(args, "to")
+```
+
+| Status | When |
+|---|---|
+| `202` `{"result": {"id": n}}` | started; `n` is the monitor id |
+| `400` | no `domain`, `args` not an object, or a name that is a path — `<name>` is a file of `script_dir`, never a path |
+| `404` | no such domain |
+| `422` | the script does not load (missing, does not compile, no `on_shutdown`…) |
+| `503` | the domain's or the server's `max_calls` is reached |
+
+The response comes as soon as the instance is started: how it ends is the monitor's
+to show, and its journal (`POST /scenarios/<id>/debug`) is the way to follow it.
+
+`kelictl run <name> <domain> [key=value…]` is the same verb; each `key=value`
+becomes a string entry of `run_args`.
 
 ## Module endpoints
 
