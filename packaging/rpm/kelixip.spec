@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.6.4
+Version:        1.6.5
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        8%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,17 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Mon Oct 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.5-1
+- SIP.Uri: a P-Asserted-Identity holding two bracketed values on one line,
+  unspaced (<tel:…>,<sip:…>, as the Microsoft PSTN hub sends it), is refused
+  as one URI instead of raising: every Teams Direct Routing call died in
+  initial_account/1 before its script ran.
+- sip_servers: a trunk's keepalive OPTIONS comes from its account, and its
+  Contact always carries a user part (a modified Kamailio crashed on a
+  user-less one).
+- kelixip: no module sends outbound SIP before the listeners are bound.
+- compile_and_restart_all keeps the installed distribution cookie.
+
 * Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.4-8
 - sip_servers: with an ext_domain, the keepalive OPTIONS asks for
   sip:<ext_domain>, sent where the URI resolved, as the REGISTER and the calls

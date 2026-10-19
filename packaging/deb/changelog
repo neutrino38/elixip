@@ -1,3 +1,17 @@
+kelixip (1.6.5-1) stable; urgency=low
+
+  * SIP.Uri: a P-Asserted-Identity holding two bracketed values on one line,
+    unspaced (<tel:…>,<sip:…>, as the Microsoft PSTN hub sends it), is refused
+    as one URI instead of raising: every Teams Direct Routing call died in
+    initial_account/1 before its script ran.
+  * sip_servers: a trunk's keepalive OPTIONS comes from its account, and its
+    Contact always carries a user part (a modified Kamailio crashed on a
+    user-less one).
+  * kelixip: no module sends outbound SIP before the listeners are bound.
+  * compile_and_restart_all keeps the installed distribution cookie.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 19 Oct 2026 12:00:00 +0200
+
 kelixip (1.6.4-8) stable; urgency=low
 
   * sip_servers: with an ext_domain, the keepalive OPTIONS asks for

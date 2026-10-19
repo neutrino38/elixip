@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.6.4
-Release:        8%{?dist}
+Version:        1.6.5
+Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,10 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-1
+- Released together with kelixip 1.6.5-1; the SIP stack it shares no longer
+  raises on a P-Asserted-Identity holding two bracketed values on one line.
+
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-8
 - Released together with kelixip 1.6.4-8; nothing changes in the tool.
 
