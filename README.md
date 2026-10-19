@@ -56,6 +56,7 @@ In terms of capabilities, the emphasis will be on:
   policy per media: implemented
 - FSL: [Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
   concept inspired by Jain SLEE 1.1
+- full IP V6 support
 
 ### Testing tool: elixipp
 - Interactive command elixipp for testing tools: done
@@ -77,6 +78,7 @@ In terms of capabilities, the emphasis will be on:
 - kelixip B2BUA and call processing: done
 - kelixip and elixip `presence` support: basic presence and dialog presence.
 - Total Conversation call recorder (separate module)
+- Private / Public network separation
 
 ## Roadmap
 
@@ -97,7 +99,6 @@ In terms of capabilities, the emphasis will be on:
   - domain based partitions of transaction and dialog layers
   - use of RabbitMQ as link to the mediaserver
   - Wesh Wesh Mesh network with auto discovery feature
-  - full IP V6 support
   - XMPP support as first class citizen
   - Matrix protocol support as first class citizen
 
