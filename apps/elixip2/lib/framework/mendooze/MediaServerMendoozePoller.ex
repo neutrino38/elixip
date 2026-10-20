@@ -255,10 +255,44 @@ defmodule MediaServer.Mendooze.EventPoller do
   defp translate_event([7, sess, endpoint_id, media, role]),
     do: {:ok, {:endpoint_connected, sess, endpoint_id, media_atom(media), role}}
 
+  # SpeechProcessor events (mediaserver docs/JSR-309-API.md §5, types 8-12).
+  # The media is always the port's audio: the port is what names the leg.
+  defp translate_event([8, sess, sp, _media, port, text, final]),
+    do: {:ok, {:speech_processor, sess, sp, port, {:speech_recognized, text, final}}}
+
+  defp translate_event([9, sess, sp, _media, port, say_id]),
+    do: {:ok, {:speech_processor, sess, sp, port, {:speech_started, say_id}}}
+
+  defp translate_event([10, sess, sp, _media, port, say_id, interrupted]),
+    do: {:ok, {:speech_processor, sess, sp, port, {:speech_done, say_id, interrupted}}}
+
+  defp translate_event([11, sess, sp, _media, port, speaking]),
+    do: {:ok, {:speech_processor, sess, sp, port, {:speech_activity, speaking}}}
+
+  defp translate_event([12, sess, sp, _media, port, function, st, reason]) do
+    Logger.info(
+      module: __MODULE__,
+      session: sess,
+      event: :speech_service,
+      function: function,
+      state: st
+    )
+
+    {:ok,
+     {:speech_processor, sess, sp, port,
+      {:speech_service, speech_word(function), speech_word(st), reason}}}
+  end
+
   defp translate_event(other) do
     Logger.warning("Mendooze.EventPoller: unknown event tuple: #{inspect(other)}")
     {:error, {:unknown_event, other}}
   end
+
+  defp speech_word("asr"), do: :asr
+  defp speech_word("tts"), do: :tts
+  defp speech_word("up"), do: :up
+  defp speech_word("down"), do: :down
+  defp speech_word(other), do: other
 
   defp media_atom(0), do: :audio
   defp media_atom(1), do: :video

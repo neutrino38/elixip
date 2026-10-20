@@ -4453,4 +4453,193 @@ defmodule Mendooze.ConnTest do
       assert_received {:jsr309_call, "EndpointDettach", [3, 5, 1, 2]}
     end
   end
+
+  # ── SpeechProcessor between the legs (`speech:`) ────────────────────────────
+
+  @pcma 8
+
+  defp speech_handler("SpeechProcessorCreate", [3, _tag]), do: {:ok, [40]}
+  defp speech_handler(method, params), do: two_leg_handler(method, params)
+
+  # The caller on PCMU, the callee on PCMA, both with T.140: two legs a relay
+  # could not join on audio, which the SpeechProcessor joins anyway.
+  defp two_speech_legs(server) do
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: [:audio, :text])
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :text],
+        audio_codec: "PCMA",
+        bridge_with: conn
+      )
+
+    text = %{type: :text, port: 40_004, codecs: ["T140"]}
+
+    {:ok, _answer} =
+      Mendooze.set_remote_offer(
+        conn,
+        Sdp.build(%{
+          ip: "10.9.8.7",
+          medias: [%{type: :audio, port: 40_000, codecs: ["PCMU"], dtmf: true}, text]
+        })
+      )
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+
+    :ok =
+      Mendooze.set_remote_answer(
+        out,
+        Sdp.build(%{
+          ip: "10.9.8.6",
+          medias: [%{type: :audio, port: 40_000, codecs: ["PCMA"], dtmf: true}, text]
+        })
+      )
+
+    {conn, out, sess_tag}
+  end
+
+  defp flush_calls do
+    receive do
+      {:jsr309_call, _, _} -> flush_calls()
+    after
+      0 -> :ok
+    end
+  end
+
+  # The deaf caller types and reads; the hearing callee speaks and listens.
+  @deaf_caller [inbound: [speak: true, voice: "fr"], outbound: [transcribe: true]]
+
+  test "speech: audio and text go through one SpeechProcessor, each port in its leg's codec" do
+    %{server: server} = start_media_server(&speech_handler/2)
+    {conn, out, _tag} = two_speech_legs(server)
+
+    assert :ok = Mendooze.bridge(conn, out, audio: :force, speech: @deaf_caller)
+
+    assert_receive {:jsr309_call, "SpeechProcessorCreate", [3, _]}, 1_000
+    # Without its codec a port emits no audio: each encodes for its own leg.
+    assert_receive {:jsr309_call, "SpeechProcessorPortSetCodec", [3, 40, 0, @pcmu]}, 1_000
+    assert_receive {:jsr309_call, "SpeechProcessorPortSetCodec", [3, 40, 1, @pcma]}, 1_000
+
+    for {port, ep} <- [{0, 4}, {1, 5}], media <- [0, 2] do
+      assert_receive {:jsr309_call, "SpeechProcessorAttachToEndpoint",
+                      [3, 40, ^port, ^ep, ^media]},
+                     1_000
+
+      assert_receive {:jsr309_call, "EndpointAttachToSpeechProcessor",
+                      [3, ^ep, 40, ^port, ^media]},
+                     1_000
+    end
+
+    # The callee's voice is written to the caller (port 0); the caller's typing
+    # is spoken to the callee (port 1), from the caller's text (port 0).
+    assert_receive {:jsr309_call, "SpeechProcessorStartRecognition", [3, 40, 1, false, 0, false]},
+                   1_000
+
+    assert_receive {:jsr309_call, "SpeechProcessorStartSynthesis", [3, 40, 1, 0, "fr", true]},
+                   1_000
+
+    # Nothing of audio or text runs endpoint to endpoint, nor through a transcoder.
+    refute_receive {:jsr309_call, "EndpointAttachToEndpoint", _}, 200
+    refute_receive {:jsr309_call, "AudioTranscoderCreate", _}, 200
+  end
+
+  test "speech: a re-bridge neither creates a second SpeechProcessor nor restarts its speech" do
+    %{server: server} = start_media_server(&speech_handler/2)
+    {conn, out, _tag} = two_speech_legs(server)
+    :ok = Mendooze.bridge(conn, out, audio: :force, speech: @deaf_caller)
+    assert_receive {:jsr309_call, "SpeechProcessorStartSynthesis", _}, 1_000
+    flush_calls()
+
+    assert :ok = Mendooze.bridge(conn, out, audio: :force, speech: @deaf_caller)
+
+    refute_receive {:jsr309_call, "SpeechProcessorCreate", _}, 200
+    refute_receive {:jsr309_call, "SpeechProcessorPortSetCodec", _}, 200
+    refute_receive {:jsr309_call, "SpeechProcessorStart" <> _, _}, 200
+  end
+
+  test "speech: unbridging detaches both ports and deletes the SpeechProcessor" do
+    %{server: server} = start_media_server(&speech_handler/2)
+    {conn, out, _tag} = two_speech_legs(server)
+    :ok = Mendooze.bridge(conn, out, audio: :force, speech: @deaf_caller)
+
+    assert :ok = Mendooze.unbridge(conn, out)
+
+    for media <- [0, 2], port <- [0, 1] do
+      assert_receive {:jsr309_call, "SpeechProcessorDettach", [3, 40, ^port, ^media]}, 1_000
+    end
+
+    assert_receive {:jsr309_call, "SpeechProcessorDelete", [3, 40]}, 1_000
+  end
+
+  test "speech: closing the call deletes the SpeechProcessor before the session" do
+    %{server: server} = start_media_server(&speech_handler/2)
+    {conn, out, _tag} = two_speech_legs(server)
+    :ok = Mendooze.bridge(conn, out, audio: :force, speech: @deaf_caller)
+
+    :ok = Mendooze.close_peer_connection(out)
+    :ok = Mendooze.close_peer_connection(conn)
+
+    assert_receive {:jsr309_call, "SpeechProcessorDelete", [3, 40]}, 1_000
+    assert_receive {:jsr309_call, "MediaSessionDelete", [3]}, 1_000
+  end
+
+  test "speech: a speech service that refuses to start is reported, and the bridge holds" do
+    handler = fn
+      "SpeechProcessorStartSynthesis", _ ->
+        {:error, "speech service not configured"}
+
+      m, p ->
+        speech_handler(m, p)
+    end
+
+    %{server: server} = start_media_server(handler)
+    {conn, out, _tag} = two_speech_legs(server)
+
+    assert :ok = Mendooze.bridge(conn, out, audio: :force, speech: @deaf_caller)
+    # Synthesis speaks on port 1, but the failure is the caller's: it is the
+    # caller's typing that will not be spoken.
+    assert_receive {:ms_event, ^conn, {:speech_error, _}}, 1_000
+    assert_receive {:jsr309_call, "SpeechProcessorStartRecognition", _}, 1_000
+  end
+
+  test "speech: each event reaches the leg its port names" do
+    %{server: server, stream: stream} = start_media_server(&speech_handler/2)
+    {conn, out, sess_tag} = two_speech_legs(server)
+    :ok = Mendooze.bridge(conn, out, audio: :force, speech: @deaf_caller)
+    assert_receive {:jsr309_call, "SpeechProcessorStartSynthesis", _}, 1_000
+
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([8, sess_tag, 40, 0, 1, "bonjour", true])})
+    assert_receive {:ms_event, ^out, {:speech_recognized, "bonjour", true}}, 1_000
+
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([11, sess_tag, 40, 0, 1, true])})
+    assert_receive {:ms_event, ^out, {:speech_activity, true}}, 1_000
+
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([9, sess_tag, 40, 0, 1, 7])})
+    assert_receive {:ms_event, ^out, {:speech_started, 7}}, 1_000
+
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([10, sess_tag, 40, 0, 1, 7, false])})
+    assert_receive {:ms_event, ^out, {:speech_done, 7, false}}, 1_000
+
+    send(
+      stream,
+      {:chunk, Jsr309FakeServer.event_frame([12, sess_tag, 40, 0, 0, "asr", "down", "timeout"])}
+    )
+
+    assert_receive {:ms_event, ^conn, {:speech_service, :asr, :down, "timeout"}}, 1_000
+
+    # Another SpeechProcessor's event is not this call's.
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([11, sess_tag, 41, 0, 0, true])})
+    refute_receive {:ms_event, _, {:speech_activity, _}}, 200
+  end
+
+  test "speech: an unknown option fails the bridge before anything is created" do
+    %{server: server} = start_media_server(&speech_handler/2)
+    {conn, out, _tag} = two_speech_legs(server)
+
+    assert {:error, {:bad_speech_option, :inbound, {:transcibe, true}}} =
+             Mendooze.bridge(conn, out, audio: :force, speech: [inbound: [transcibe: true]])
+
+    refute_receive {:jsr309_call, "SpeechProcessorCreate", _}, 200
+  end
 end

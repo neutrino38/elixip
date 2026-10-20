@@ -522,6 +522,10 @@ defmodule MediaServer.Mendooze.Conn do
       # cheap if we can tell what changed (`rebridge/4`).
       bridge_legs: nil,
       selection: %{},
+      # The SpeechProcessor of a `speech:` bridge: %{id, legs: {port 0, port 1},
+      # cfg, started}. Its id also sits in `bridges` under audio and text; this
+      # is what routes its events, whose port names the leg.
+      speech: nil,
       # The per-media transcoding policy, remembered rather than passed around:
       # `bridge/3` receives it, but an OFFER is built long before any bridge and
       # is shaped by it too (`offer_codecs/3`). Kept at connection level because
@@ -688,9 +692,10 @@ defmodule MediaServer.Mendooze.Conn do
   # costs nothing on the wire.
   def handle_call({:bridge, a, b, opts}, _from, state) do
     with {:ok, policy} <- MediaServer.transcoding_policy(opts),
+         {:ok, speech} <- speech_cfg(opts),
          {:ok, la, lb} <- both_legs(state, a, b),
          state = %{state | policy: policy},
-         {:ok, medias} <- bridgeable_medias(la, lb, policy) do
+         {:ok, medias} <- bridgeable_medias(la, lb, policy, speech) do
       case Enum.reduce_while(medias, {:ok, state}, fn {media, how, sel}, {:ok, st} ->
              case apply_wiring(st, la, lb, media, how, sel) do
                {:ok, st} -> {:cont, {:ok, st}}
@@ -699,6 +704,7 @@ defmodule MediaServer.Mendooze.Conn do
            end) do
         {:ok, state} ->
           state = attach_extra_videos(state, la, lb, medias)
+          state = start_speech(state, la, lb, speech)
 
           Logger.info(
             module: __MODULE__,
@@ -885,11 +891,16 @@ defmodule MediaServer.Mendooze.Conn do
           rpc(state, "#{kind}TranscoderDelete", [state.sess_id, tr])
         end)
 
+      {media, {:speech, sp}} ->
+        dettach_speech(state, sp, media)
+
       {_media, :attach} ->
         :ok
     end)
 
-    %{state | bridges: %{}, selection: %{}, bridge_legs: nil}
+    if state.speech, do: rpc(state, "SpeechProcessorDelete", [state.sess_id, state.speech.id])
+
+    %{state | bridges: %{}, selection: %{}, bridge_legs: nil, speech: nil}
   end
 
   # The leg a sub-resource is asked for. A player, a recorder or an echo names
@@ -916,7 +927,7 @@ defmodule MediaServer.Mendooze.Conn do
   #
   # Text is never transcoded — the Java gateway does not either, and the T.140 /
   # text-over-WebSocket gateway depends on it being a straight attach.
-  defp bridgeable_medias(la, lb, policy) do
+  defp bridgeable_medias(la, lb, policy, speech) do
     # A media either peer explicitly declined (a port-0 answer or re-offer
     # section — `leg.declined`) is dead on the WHOLE call, audio included: a
     # B2BUA cannot honour a media it holds only one end of. It is not bridged,
@@ -930,7 +941,7 @@ defmodule MediaServer.Mendooze.Conn do
     declines = Enum.map(declined, &{&1, :decline, nil})
 
     Enum.reduce_while(common, {:ok, declines}, fn media, {:ok, acc} ->
-      case bridge_decision(la, lb, media, policy) do
+      case bridge_decision(la, lb, media, policy, speech) do
         # One leg carries nothing at all on this media — nobody offered it.
         # There is no bridge to build and no policy to apply: it is simply not
         # part of this call. Fatal only for audio, on §11's own reasoning that a
@@ -949,7 +960,22 @@ defmodule MediaServer.Mendooze.Conn do
     end)
   end
 
-  defp bridge_decision(_la, _lb, :text, _policy), do: {:attach, nil}
+  # A SpeechProcessor carries audio and text, and never video: video keeps its
+  # endpoint-to-endpoint path, FPU and REMB included. Audio is decoded there
+  # whatever the codecs, so its selection only says what each port encodes.
+  defp bridge_decision(la, lb, media, policy, speech)
+
+  defp bridge_decision(_la, _lb, :text, _policy, nil), do: {:attach, nil}
+  defp bridge_decision(_la, _lb, :text, _policy, _speech), do: {:speech, nil}
+
+  defp bridge_decision(la, lb, :audio, policy, speech) when speech != nil do
+    case select_codecs(la, lb, :audio, policy) do
+      {:ok, code_a, code_b} -> {:speech, {code_a, code_b}}
+      err -> err
+    end
+  end
+
+  defp bridge_decision(la, lb, media, policy, _speech), do: bridge_decision(la, lb, media, policy)
 
   # The wiring is the POLICY's, not the selection's. `:forbid` says the media may
   # never be transcoded, so it is the only one that gets a direct
@@ -1120,6 +1146,9 @@ defmodule MediaServer.Mendooze.Conn do
       {:attach, :attach, true} ->
         {:ok, note_sel(state, media, sel)}
 
+      {{:speech, sp}, :speech, true} ->
+        retune_speech(state, sp, media, sel)
+
       _ ->
         state
         |> release_media(media)
@@ -1156,6 +1185,10 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp release_media(state, media) do
     case Map.get(state.bridges, media) do
+      {:speech, sp} ->
+        dettach_speech(state, sp, media)
+        %{state | bridges: Map.delete(state.bridges, media)}
+
       {:transcode, ids} ->
         kind = transcoder_kind(media)
 
@@ -1193,7 +1226,159 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
+  defp wire_media(state, la, lb, media, :speech, sel) do
+    with {:ok, state, sp} <- ensure_speech(state, la, lb),
+         :ok <- set_port_codecs(state, sp, media, sel, {nil, nil}),
+         :ok <- attach_port(state, sp, 0, la, media),
+         :ok <- attach_port(state, sp, 1, lb, media) do
+      {:ok, put_bridge(state, media, {:speech, sp})}
+    else
+      {:error, reason} -> {:error, {:speech_failed, media, reason}}
+    end
+  end
+
   defp put_bridge(state, media, how), do: %{state | bridges: Map.put(state.bridges, media, how)}
+
+  # ── SpeechProcessor (mediaserver docs/JSR-309-API.md §6.13) ─────────────────
+  #
+  # One per bridge, created by the first media wired through it. Port 0 is the
+  # leg `bridge/3` was given first, port 1 the other: the order is fixed at
+  # creation, and a re-bridge with the legs the other way round re-wires
+  # (`apply_wiring/6`'s `same_pair?`).
+
+  defp speech_cfg(opts) do
+    case Keyword.get(opts, :speech) do
+      cfg when is_map(cfg) -> {:ok, cfg}
+      cfg -> MediaServer.speech_options(cfg)
+    end
+  end
+
+  defp ensure_speech(%{speech: %{id: sp}} = state, _la, _lb), do: {:ok, state, sp}
+
+  defp ensure_speech(state, la, lb) do
+    case create(state, "SpeechProcessorCreate", [state.sess_id, "speech #{state.sess_tag}"]) do
+      {:ok, sp} ->
+        speech = %{id: sp, legs: {la.leg, lb.leg}, cfg: nil, started: false}
+        {:ok, %{state | speech: speech}, sp}
+
+      err ->
+        err
+    end
+  end
+
+  # XAttachToY: X receives from Y. Two calls per port and per media.
+  defp attach_port(state, sp, port, leg, media) do
+    m = @media_int[media]
+
+    with {:ok, _} <-
+           rpc(state, "SpeechProcessorAttachToEndpoint", [
+             state.sess_id,
+             sp,
+             port,
+             leg.endpoint_id,
+             m
+           ]),
+         {:ok, _} <-
+           rpc(state, "EndpointAttachToSpeechProcessor", [
+             state.sess_id,
+             leg.endpoint_id,
+             sp,
+             port,
+             m
+           ]) do
+      :ok
+    end
+  end
+
+  defp dettach_speech(state, sp, media) do
+    m = @media_int[media]
+    rpc(state, "SpeechProcessorDettach", [state.sess_id, sp, 0, m])
+    rpc(state, "SpeechProcessorDettach", [state.sess_id, sp, 1, m])
+  end
+
+  # Without its codec a port emits no audio at all. Only a codec that changed is
+  # set again, as `retune/6` does for a transcoder.
+  defp set_port_codecs(state, sp, :audio, {code_a, code_b}, {old_a, old_b}) do
+    with :ok <- set_port_codec(state, sp, 0, code_a, old_a) do
+      set_port_codec(state, sp, 1, code_b, old_b)
+    end
+  end
+
+  defp set_port_codecs(_state, _sp, _media, _sel, _old), do: :ok
+
+  defp set_port_codec(_state, _sp, _port, code, code), do: :ok
+
+  defp set_port_codec(state, sp, port, code, _old) do
+    case rpc(state, "SpeechProcessorPortSetCodec", [state.sess_id, sp, port, code]) do
+      {:ok, _} -> :ok
+      err -> err
+    end
+  end
+
+  defp retune_speech(state, sp, media, sel) do
+    case set_port_codecs(state, sp, media, sel, Map.get(state.selection, media, {nil, nil})) do
+      :ok -> {:ok, note_sel(state, media, sel)}
+      {:error, reason} -> {:error, {:speech_failed, media, reason}}
+    end
+  end
+
+  # Recognition and synthesis, once per SpeechProcessor: a re-bridge keeps them
+  # running. A failure is reported and the call goes on — `--speech-url` missing,
+  # speech-server down — because the relays work without them.
+  defp start_speech(%{speech: %{started: false} = sp} = state, la, lb, cfg) when cfg != nil do
+    text? = match?({:speech, _}, Map.get(state.bridges, :text))
+
+    for {leg, port, other} <- [{la, 0, 1}, {lb, 1, 0}],
+        leg_cfg = Map.fetch!(cfg, leg.leg),
+        {method, params} <- speech_calls(leg_cfg, port, other, text?) do
+      case rpc(state, method, [state.sess_id, sp.id | params]) do
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message:
+              "#{method} on port #{port} failed: #{inspect(reason)}; the call goes on without it"
+          )
+
+          send(state.event_sink, {:ms_event, handle_of(leg.leg), {:speech_error, reason}})
+      end
+    end
+
+    %{state | speech: %{sp | cfg: cfg, started: true}}
+  end
+
+  defp start_speech(state, _la, _lb, _cfg), do: state
+
+  # One leg's own voice and typing. Its voice is recognized on ITS port and
+  # written to the other's; its typing is spoken on the OTHER port.
+  defp speech_calls(cfg, port, other, text?) do
+    text_port = if text?, do: other, else: -1
+    source_port = if text?, do: port, else: -1
+
+    recognition =
+      if cfg.transcribe or cfg.events do
+        to_peer = if cfg.transcribe, do: text_port, else: -1
+
+        if cfg.events or to_peer != -1,
+          do: [{"SpeechProcessorStartRecognition", [port, cfg.events, to_peer, cfg.half_duplex]}],
+          else: []
+      else
+        []
+      end
+
+    synthesis =
+      if cfg.speak,
+        do: [
+          {"SpeechProcessorStartSynthesis",
+           [other, source_port, cfg.voice, cfg.announce_corrections]}
+        ],
+        else: []
+
+    recognition ++ synthesis
+  end
 
   # Two chains, one per direction — a transcoder is one-way. Reading the
   # attach direction right is the whole difference between a working call and a
@@ -1889,6 +2074,17 @@ defmodule MediaServer.Mendooze.Conn do
 
       {:noreply, state}
     end)
+  end
+
+  # The port names the leg: 0 is the one `bridge/3` was given first.
+  defp handle_server_event(
+         {:speech_processor, _tag, sp, port, event},
+         %{speech: %{id: sp}} = state
+       )
+       when port in [0, 1] do
+    leg = elem(state.speech.legs, port)
+    send(state.event_sink, {:ms_event, handle_of(leg), event})
+    {:noreply, state}
   end
 
   defp handle_server_event(event, state) do

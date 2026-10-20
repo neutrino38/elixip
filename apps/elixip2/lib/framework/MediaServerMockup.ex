@@ -66,6 +66,17 @@ defmodule MediaServer.Mockup do
   """
   @impl MediaServer.Behaviour
   def bridge(a, b, opts) do
+    case mock_speech(Keyword.get(opts, :speech)) do
+      {:ok, _speech} -> relay_bridge(a, b, opts)
+      err -> err
+    end
+  end
+
+  # The B2BUA hands over the map `MediaServer.speech_options/1` returned.
+  defp mock_speech(cfg) when is_map(cfg), do: {:ok, cfg}
+  defp mock_speech(cfg), do: MediaServer.speech_options(cfg)
+
+  defp relay_bridge(a, b, opts) do
     case MediaServer.transcoding_policy(opts) do
       {:ok, _policy} ->
         case GenServer.call(a, :bridge_failure) do
