@@ -4,8 +4,8 @@
 #     elixipp --listen udp:5060 apps/elixip2/scenarios/speech_bot.exs
 #
 # The bot greets the caller, then repeats every sentence it recognized
-# ("Vous avez dit : …"). Speaking while it talks cuts it off (barge-in). Each
-# speech event is a transition, so the run log is the record of the call: what
+# ("Vous avez dit : …"). It always finishes its phrase: speaking while it
+# talks does not cut it off (no barge-in). Each speech event is a transition, so the run log is the record of the call: what
 # was recognized, when each phrase started and ended, and any service outage.
 #
 # Needs a media server started with --speech-url and --speech-streaming-url;
@@ -109,9 +109,9 @@ defmodule UAS.SpeechBot do
       {:ms_event, _conn, {:speech_recognized, text, false}} ->
         stay("partial: #{text}")
 
-      # The barge-in is ours: the media server never cuts a phrase on its own.
+      # No barge-in: the phrase being said goes to its end. The media server
+      # never cuts one on its own; media_stop_speaking() here would.
       {:ms_event, _conn, {:speech_activity, true}} ->
-        media_stop_speaking()
         stay("caller speaks")
 
       {:ms_event, _conn, {:speech_activity, false}} ->
