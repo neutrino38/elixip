@@ -234,6 +234,10 @@ message ControlRequest {
     SpeechProcessorDettachReq speech_processor_dettach = 287;
     SpeechProcessorStartRecognitionReq speech_processor_start_recognition = 288;
     SpeechProcessorStopRecognitionReq speech_processor_stop_recognition = 289;
+    SpeechProcessorStartSynthesisReq speech_processor_start_synthesis = 290;
+    SpeechProcessorStopSynthesisReq speech_processor_stop_synthesis = 291;
+    SpeechProcessorSayReq speech_processor_say = 292;
+    SpeechProcessorStopSpeakingReq speech_processor_stop_speaking = 293;
   }
 }
 
@@ -288,6 +292,7 @@ message ControlResponse {
     StringResp get_media_candidates = 276;
     EndpointCreateVideoStreamResp endpoint_create_video_stream = 279;
     CreatedResp speech_processor_create = 281;
+    CreatedResp speech_processor_say = 292;
   }
 }
 

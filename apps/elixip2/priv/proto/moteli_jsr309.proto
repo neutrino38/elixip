@@ -764,6 +764,44 @@ message SpeechProcessorStopRecognitionReq {
   uint32 port = 3;
 }
 
+// speech-server speaks into the audio leaving `port`: the Say of the
+// controller, and the typing of `text_source_port` when it is 0 or 1. Fails
+// with "speech service not configured" without --speech-url. Calling it again
+// replaces the settings and reopens the stream.
+message SpeechProcessorStartSynthesisReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;              // where the voice goes out
+  int32 text_source_port = 4;   // typed text to speak, -1 for the controller only
+  string voice = 5;             // speech-server alias (GET /control/voices), empty for the default
+  bool announce_corrections = 6; // "Correction :" before a retyped line
+}
+
+// Says in progress stop with the stream, without a done event.
+message SpeechProcessorStopSynthesisReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+}
+
+// Fails with "speech synthesis not active on this port" before
+// StartSynthesis.
+message SpeechProcessorSayReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  string text = 4;
+}
+// -> CreatedResp (say_id)
+
+// Stops at once what is being said and what waits: every unfinished Say
+// ends with interrupted = true.
+message SpeechProcessorStopSpeakingReq {
+  uint32 session_id = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+}
+
 // --- Events (published on kelixip.events, routing key <instance>.jsr309.<session tag>) ----------
 // Wire event codes stay append-only server-side (1 player EOF, 2 external FIR,
 // 3 player started, 4 recorder started, 5 recorder stopped, 6 endpoint
@@ -829,6 +867,24 @@ message Jsr309SpeechRecognized {
   bool final = 5;
 }
 
+// The first phrase of a Say starts in the audio of `port`. say_id 0: a phrase
+// typed on the text source port.
+message Jsr309SpeechSynthesisStarted {
+  string session_tag = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  uint32 say_id = 4;
+}
+
+// The last phrase of a Say ended, or it was stopped (interrupted).
+message Jsr309SpeechSynthesisDone {
+  string session_tag = 1;
+  uint32 sp_id = 2;
+  uint32 port = 3;
+  uint32 say_id = 4;
+  bool interrupted = 5;
+}
+
 // The VAD of `port` heard someone start or stop speaking (barge-in).
 message Jsr309SpeechActivity {
   string session_tag = 1;
@@ -857,6 +913,8 @@ message Jsr309Event {
     Jsr309EndpointDisconnected endpoint_disconnected = 6;
     Jsr309EndpointConnected endpoint_connected = 7;
     Jsr309SpeechRecognized speech_recognized = 8;
+    Jsr309SpeechSynthesisStarted speech_synthesis_started = 9;
+    Jsr309SpeechSynthesisDone speech_synthesis_done = 10;
     Jsr309SpeechActivity speech_activity = 11;
     Jsr309SpeechService speech_service = 12;
   }
