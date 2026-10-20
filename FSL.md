@@ -244,6 +244,11 @@ not to collide with other events matched in the same `on_events`.
 | `media_record(file, duration_ms, opts \\ [])` | Record the peer's media to a file |
 | `media_start_echo()` | Loop the peer's media back to it |
 | `media_stop(opts \\ [])` | Stop the running player / recorder / echo |
+| `media_start_speech(opts \\ [])` | Start a voice dialogue on a leg (chatbot) |
+| `media_say(text, opts \\ [])` | Speak `text` to a leg; evaluates to `{:ok, say_id}` |
+| `media_stop_speaking(opts \\ [])` | Silence a leg now (barge-in) |
+| `media_stop_speech(opts \\ [])` | End the voice dialogue of a leg |
+| `media_voices()` | The voice aliases speech-server serves |
 | `media_leg_of(handle)` | Which leg a media handle carried by an `{:ms_event, …}` belongs to |
 | `media_cleanup_ressources()` | Release media resources at end of call |
 
@@ -314,6 +319,46 @@ server implements none of them.** `stop_on_silence` and `stop_on_dtmf` are
 logged as unsupported and dropped; the other two are ignored without a word. Use
 the `duration_ms` argument for a time limit — that one is enforced server-side,
 and reported by `RecorderStoppedEvent` with `reason=1`.
+
+### speech: a chatbot on one leg
+
+The media server recognizes what the caller says and speaks what the scenario
+gives it (mediaserver `docs/JSR-309-API.md` §6.13). It needs a media server
+started with `--speech-url`; `media_voices()` answers
+`{:error, :speech_not_configured}` otherwise.
+
+```elixir
+:ok = media_start_speech(voice: "fr-homme")
+{:ok, _say_id} = media_say("Bonjour, que puis-je pour vous ?")
+
+{:ms_event, _conn, {:speech_recognized, text, true}} ->
+  {:ok, _} = media_say(answer_to(text))
+  stay("the caller said #{text}")
+
+{:ms_event, _conn, {:speech_activity, true}} ->
+  media_stop_speaking()
+  stay("barge-in")
+```
+
+| Option of `media_start_speech` | Default | Effect |
+|---|---|---|
+| `voice: String.t()` | `""` | A voice alias of `media_voices()`; empty for the language's default |
+| `show_text: boolean` | `false` | The caller also reads what they said, as T.140 text |
+| `half_duplex: boolean` | `false` | No recognition while the synthesis speaks: for a hands-free phone that echoes it back |
+| `leg: atom` | `:inbound` | Which leg to talk with |
+
+The events arrive on the leg's peer connection:
+`{:speech_recognized, text, final}` (a partial with `final = false`, then the
+final text), `{:speech_activity, speaking}`, `{:speech_started, say_id}`,
+`{:speech_done, say_id, interrupted}` and
+`{:speech_service, :asr | :tts, :up | :down, reason}`. The barge-in is the
+scenario's: the media server never stops a `media_say` on its own.
+
+Each macro evaluates to the adapter's answer and leaves the call alone: a
+speech failure is for the scenario to judge. A leg whose B2BUA bridge carries
+`speech:` (see [B2BUA.md](B2BUA.md)) cannot start a chatbot
+(`{:error, :speech_busy}`), and `media_say(text, leg: …)` speaks to it only when
+the other leg has `speak: true`.
 
 ## transitions: the goto macro, stay(), scenario_success(), scenario_failure()
 

@@ -299,6 +299,26 @@ defmodule MediaServer.Mendooze.Conn do
 
   def stop_echo({conn, :echo, ref}), do: GenServer.call(conn, {:stop_echo, ref}, call_timeout())
 
+  def start_speech(conn, opts) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:start_speech, name, opts}, call_timeout())
+  end
+
+  def stop_speech(conn) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:stop_speech, name}, call_timeout())
+  end
+
+  def say(conn, text) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:say, name, text}, call_timeout())
+  end
+
+  def stop_speaking(conn) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:stop_speaking, name}, call_timeout())
+  end
+
   # ── Initialisation ──────────────────────────────────────────────────────────
 
   # ── Legs ────────────────────────────────────────────────────────────────────
@@ -878,6 +898,70 @@ defmodule MediaServer.Mendooze.Conn do
   def handle_call({:stop_echo, _ref}, _from, state),
     do: {:reply, {:error, :no_such_echo}, state}
 
+  # ── Speech on one leg: the chatbot (§6.13, port 0) ──────────────────────────
+
+  def handle_call({:start_speech, name, opts}, _from, state) do
+    with {:ok, l} <- one_leg(state, name),
+         nil <- state.speech,
+         [code | _] <- Map.get(l.peer_codecs, :audio, []) do
+      case create(state, "SpeechProcessorCreate", [state.sess_id, "speech #{state.sess_tag}"]) do
+        {:ok, sp} ->
+          case start_dialogue(state, sp, l, code, opts) do
+            :ok ->
+              speech = %{id: sp, legs: {name, nil}, cfg: nil, started: true}
+              {:reply, :ok, %{state | speech: speech}}
+
+            err ->
+              rpc(state, "SpeechProcessorDelete", [state.sess_id, sp])
+              {:reply, err, state}
+          end
+
+        err ->
+          {:reply, err, state}
+      end
+    else
+      %{} -> {:reply, {:error, :speech_busy}, state}
+      [] -> {:reply, {:error, {:not_negotiated, :audio}}, state}
+      {:error, _} = err -> {:reply, err, state}
+    end
+  end
+
+  def handle_call({:stop_speech, name}, _from, state) do
+    case state.speech do
+      %{id: sp, legs: {^name, nil}} ->
+        for m <- dialogue_medias(leg(state, name)),
+            do: rpc(state, "SpeechProcessorDettach", [state.sess_id, sp, 0, @media_int[m]])
+
+        rpc(state, "SpeechProcessorDelete", [state.sess_id, sp])
+        {:reply, :ok, %{state | speech: nil}}
+
+      nil ->
+        {:reply, :ok, state}
+
+      _bridge ->
+        {:reply, {:error, :speech_of_bridge}, state}
+    end
+  end
+
+  def handle_call({:say, name, text}, _from, state) do
+    case speech_port(state, name) do
+      {:ok, sp, port} ->
+        {:reply, create(state, "SpeechProcessorSay", [state.sess_id, sp, port, text]), state}
+
+      err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:stop_speaking, name}, _from, state) do
+    with {:ok, sp, port} <- speech_port(state, name),
+         {:ok, _} <- rpc(state, "SpeechProcessorStopSpeaking", [state.sess_id, sp, port]) do
+      {:reply, :ok, state}
+    else
+      err -> {:reply, err, state}
+    end
+  end
+
   # Detaching the endpoints is not enough: a transcoder is a session resource of
   # its own, and one left behind survives every re-bridge for the life of the
   # call. The Java gateway deletes them for the same reason.
@@ -1253,7 +1337,12 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  defp ensure_speech(%{speech: %{id: sp}} = state, _la, _lb), do: {:ok, state, sp}
+  defp ensure_speech(%{speech: %{id: sp, legs: {a, b}}} = state, la, lb)
+       when a == la.leg and b == lb.leg,
+       do: {:ok, state, sp}
+
+  # A chatbot still talking on one of the legs: it has to be stopped first.
+  defp ensure_speech(%{speech: %{}}, _la, _lb), do: {:error, :speech_busy}
 
   defp ensure_speech(state, la, lb) do
     case create(state, "SpeechProcessorCreate", [state.sess_id, "speech #{state.sess_tag}"]) do
@@ -1351,6 +1440,60 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   defp start_speech(state, _la, _lb, _cfg), do: state
+
+  defp speech_port(%{speech: %{id: sp, legs: {a, b}}}, name) do
+    cond do
+      name == a -> {:ok, sp, 0}
+      name == b -> {:ok, sp, 1}
+      true -> {:error, :no_speech}
+    end
+  end
+
+  defp speech_port(_state, _name), do: {:error, :no_speech}
+
+  # Text only where the leg carries it: an audio-only caller still talks to
+  # the bot, and reads nothing.
+  defp dialogue_medias(l),
+    do: Enum.filter([:audio, :text], &(&1 in l.medias and &1 not in l.declined))
+
+  # The caller's voice goes to the events (and to their own text with
+  # `show_text:`); the synthesis speaks only what `say/2` gives it.
+  defp start_dialogue(state, sp, l, code, opts) do
+    medias = dialogue_medias(l)
+    text_port = if Keyword.get(opts, :show_text, false) and :text in medias, do: 0, else: -1
+
+    with :ok <- set_port_codec(state, sp, 0, code, nil),
+         :ok <- attach_ports(state, sp, l, medias),
+         {:ok, _} <-
+           rpc(state, "SpeechProcessorStartRecognition", [
+             state.sess_id,
+             sp,
+             0,
+             true,
+             text_port,
+             Keyword.get(opts, :half_duplex, false)
+           ]),
+         {:ok, _} <-
+           rpc(state, "SpeechProcessorStartSynthesis", [
+             state.sess_id,
+             sp,
+             0,
+             -1,
+             Keyword.get(opts, :voice, ""),
+             false
+           ]) do
+      :ok
+    end
+  end
+
+  defp attach_ports(state, sp, l, medias) do
+    Enum.reduce_while(medias, :ok, fn m, :ok ->
+      case attach_port(state, sp, 0, l, m) do
+        :ok -> {:cont, :ok}
+        err -> {:halt, err}
+      end
+    end)
+  end
 
   # One leg's own voice and typing. Its voice is recognized on ITS port and
   # written to the other's; its typing is spoken on the OTHER port.
@@ -2082,8 +2225,11 @@ defmodule MediaServer.Mendooze.Conn do
          %{speech: %{id: sp}} = state
        )
        when port in [0, 1] do
-    leg = elem(state.speech.legs, port)
-    send(state.event_sink, {:ms_event, handle_of(leg), event})
+    case elem(state.speech.legs, port) do
+      nil -> :ok
+      leg -> send(state.event_sink, {:ms_event, handle_of(leg), event})
+    end
+
     {:noreply, state}
   end
 

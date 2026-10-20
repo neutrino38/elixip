@@ -614,5 +614,43 @@ defmodule MediaServer do
                 {:ok, echo :: MediaServer.resource_ref()} | {:error, term()}
 
     @callback stop_echo(echo :: MediaServer.resource_ref()) :: :ok
+
+    # ── Speech (mediaserver docs/JSR-309-API.md §6.13) ──────────────────────
+
+    @doc """
+    A voice dialogue on ONE leg — the chatbot. What the caller says arrives as
+    `{:speech_recognized, text, final}` events; what `say/2` is given is spoken
+    to them. Opts: `voice:` (a speech-server alias, `""` by default),
+    `half_duplex:` (no recognition while speaking, `false`), `show_text:`
+    (the caller also reads what they said, as T.140, `false`).
+
+    The barge-in is the scenario's: `{:speech_activity, true}` arrives while a
+    `say/2` is running, and the scenario decides to `stop_speaking/1`. A leg
+    whose bridge already carries `speech:` is refused with `:speech_busy`.
+    """
+    @callback start_speech(conn :: MediaServer.conn_ref(), opts :: keyword()) ::
+                :ok | {:error, term()}
+
+    @callback stop_speech(conn :: MediaServer.conn_ref()) :: :ok | {:error, term()}
+
+    @doc """
+    Speak `text` to `conn`, after what is already being said. The id comes back
+    in `{:speech_started, say_id}` and `{:speech_done, say_id, interrupted}`.
+    The leg must be spoken to: `start_speech/2` on it, or a bridge whose other
+    leg has `speak: true`.
+    """
+    @callback say(conn :: MediaServer.conn_ref(), text :: String.t()) ::
+                {:ok, say_id :: integer()} | {:error, term()}
+
+    @doc "Silence `conn` now; each unfinished `say/2` ends with `interrupted = true`."
+    @callback stop_speaking(conn :: MediaServer.conn_ref()) :: :ok | {:error, term()}
+
+    @doc """
+    The voice aliases speech-server serves, `[%{alias: "fr-homme", lang: "fr"}]`.
+    Asked to speech-server each time, at the address the media server states
+    in its own description — never configured, never kept.
+    """
+    @callback speech_voices(server :: pid()) ::
+                {:ok, [%{alias: String.t(), lang: String.t()}]} | {:error, term()}
   end
 end
