@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.7.1
+Version:        1.8.0
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
@@ -394,6 +394,24 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Wed Oct 21 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.0-1
+- A SpeechProcessor between the legs of a call (`speech:` in the media tuple):
+  what one leg says is written to the other as T.140, what it types is spoken
+  to the other. Audio and text go through it, video stays direct. Text goes
+  through it on whichever leg carries it, so a callee without text still has
+  its voice captioned.
+- A voice dialogue with a caller: start_speech, say, stop_speaking and
+  stop_speech, with the voices read from speech-server.
+- Reference script call-captioning.exs: a challenged call relayed through the
+  sip-trunk-prod trunk with audio and text only, AMR-WB then PCMA, the callee's
+  voice captioned and the caller's typing spoken; 488 when the caller offers
+  no text.
+- AMR-WB joins the codec vocabulary.
+- A conference that places a call without codec_order offers audio as OPUS,
+  AMR-WB, SPEEX, G722, PCMA, PCMU, instead of in alphabetical order.
+- The SpeechProcessor and AMR-WB on the wire need mediaserver 1.19.0.
+- User-Agent is now Kelixip/1.8.0.
+
 * Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.1-1
 - 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
   kelixip-mod-sip_servers subpackage (trunks, proxies and application servers,

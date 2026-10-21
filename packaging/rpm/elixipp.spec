@@ -9,7 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.7.1
+Version:        1.8.0
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
@@ -46,6 +46,14 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Wed Oct 21 2026 Emmanuel BUU <latribuu@proton.me> - 1.8.0-1
+- Released together with kelixip 1.8.0-1: a SpeechProcessor between the legs
+  of a B2BUA (`speech:` in the media tuple), the speech verbs of a scenario
+  (media_start_speech, media_say, media_stop_speaking, media_stop_speech,
+  media_voices), the speech_bot scenario, and AMR-WB in the codec
+  vocabulary. Needs mediaserver 1.19.0.
+- User-Agent is now Elixipp-1.8.0.
+
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.1-1
 - Released together with kelixip 1.7.1-1: 1.7.0 with the SIP stack changes of
   1.6.4-2 to 1.6.4-8 (B2BUA trunk reachability and outbound digest, a host
