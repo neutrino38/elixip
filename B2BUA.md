@@ -239,8 +239,11 @@ leg's own voice and typing:
   this leg: the remedy for a hands-free phone that echoes it back.
 - **`speak: true`** — this leg's typing is spoken to the other leg, in `voice`
   (an alias of the speech-server configuration; empty for the language's
-  default). A correction is said again after "Correction :" unless
-  `announce_corrections: false`.
+  default). A phrase leaves on `.`, `?`, `!`, `:` or `…`, at the end of a line,
+  or on a blank once more than five words wait — never on a pause, which
+  would cut a word. A backspace into text already said stops the voice and
+  says "Correction" at once (unless `announce_corrections: false`); the
+  touched phrase is said again once the line is stable for 2 s.
 
 Text goes onto the SpeechProcessor on each leg that carries it, and only one
 leg needs to. A callee that declines the text (port 0) still has its voice
