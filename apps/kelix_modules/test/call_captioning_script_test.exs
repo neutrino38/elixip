@@ -11,13 +11,14 @@ defmodule Kelix.CallCaptioningScriptTest do
   alias SIP.Test.Transport.Mockup
 
   @domain "example.com"
+  @realm "visioassistance.net"
   @caller "alice"
   @password "secret"
   @dialled "0612345678"
   @ruri "sip:#{@dialled}@example.com"
   @trunk_peer "cc-trunk"
 
-  @ha1 SIP.Auth.compute_ha1("MD5", @caller, @domain, @password)
+  @ha1 SIP.Auth.compute_ha1("MD5", @caller, @realm, @password)
 
   @audio """
   v=0\r
@@ -88,7 +89,7 @@ defmodule Kelix.CallCaptioningScriptTest do
     start_supervised!(SipServers.child_spec(:sip_servers, %{}))
 
     Application.put_env(:kelixip, :authdb_ha1_lookup, fn
-      @caller, @domain -> {:ok, @ha1}
+      @caller, @realm -> {:ok, @ha1}
       _user, _realm -> :notfound
     end)
 

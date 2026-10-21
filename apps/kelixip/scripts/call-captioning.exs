@@ -26,6 +26,7 @@ defmodule Kelix.CallCaptioning do
   config(uses_modules: [:auth_db, :sip_servers])
 
   @trunk "sip-trunk-prod"
+  @realm "visioassistance.net"
 
   @media {:mediaserver,
           inbound: [
@@ -54,7 +55,7 @@ defmodule Kelix.CallCaptioning do
   end
 
   state authenticate_caller do
-    AuthDb.SBB.authenticate()
+    AuthDb.SBB.authenticate(realm: @realm)
 
     on_events do
       {:auth, :authenticated, %{user: user}} ->
