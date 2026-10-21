@@ -319,7 +319,7 @@ fi
 # The core owns script_dir itself, so mod-mcu can drop its scripts in without
 # either package claiming the directory twice.
 %dir %{_datadir}/%{name}
-%{_datadir}/%{name}/*.exs
+%config(noreplace) %{_datadir}/%{name}/*.exs
 %exclude %{_datadir}/%{name}/mcu*.exs
 %exclude %{_datadir}/%{name}/presence-*.exs
 %exclude %{_datadir}/%{name}/registrar-presence.exs
@@ -357,7 +357,7 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Mcu.*.beam
 # The reference conference scripts. They call the module's verbs and nothing else
 # provides them, so a host that has them can run them.
-%{_datadir}/%{name}/mcu*.exs
+%config(noreplace) %{_datadir}/%{name}/mcu*.exs
 
 %files mod-presence
 %doc doc/modules/presence.md
@@ -365,8 +365,8 @@ fi
 # The reference scripts: one per method, plus the list server of RFC 4662 and
 # the registrar that reports registrations as presence. They call this module's
 # verbs and nothing else provides them.
-%{_datadir}/%{name}/presence-*.exs
-%{_datadir}/%{name}/registrar-presence.exs
+%config(noreplace) %{_datadir}/%{name}/presence-*.exs
+%config(noreplace) %{_datadir}/%{name}/registrar-presence.exs
 
 %files mod-mcu_presence
 %doc doc/modules/mcu_presence.md
@@ -382,7 +382,7 @@ fi
 %{_datadir}/%{name}/sql/silo
 # The reference chat scripts: the relay stores what nobody took, the registrar
 # variant delivers it. Both call this module's verbs.
-%{_datadir}/%{name}/*-chat.exs
+%config(noreplace) %{_datadir}/%{name}/*-chat.exs
 
 %files mod-conversation
 %doc doc/modules/conversation.md
@@ -411,6 +411,9 @@ fi
   AMR-WB, SPEEX, G722, PCMA, PCMU, instead of in alphabetical order.
 - The SpeechProcessor and AMR-WB on the wire need mediaserver 1.19.0.
 - User-Agent is now Kelixip/1.8.0.
+- call-captioning.exs challenges on the visioassistance.net realm.
+- The scenario scripts are %config(noreplace): an edited script survives the
+  upgrade, the packaged one lands next to it as .rpmnew.
 
 * Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.1-1
 - 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
