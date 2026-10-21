@@ -128,8 +128,11 @@ defmodule SBB.Call do
           "the caller's INVITE has been answered (500) and false if it is still " <>
           "pending, which it is once the caller has cancelled",
       failed:
-        "the establishment could not complete — %{reason}: `:outbound_leg_lost` " <>
-          "or `:no_ack`. The caller has been answered or hung up as the case needs"
+        "the establishment could not complete — %{reason}: `:outbound_leg_lost`, " <>
+          "`:no_ack`, or `:speech_unavailable` with its `cause` (the call asked " <>
+          "for speech processing and cannot have it; the caller got 503 Speech " <>
+          "Processing Unavailable). The caller has been answered or hung up as " <>
+          "the case needs"
     ]
 
     # A backstop, not the protocol timer: the ring timeout below and timer H in
@@ -155,6 +158,14 @@ defmodule SBB.Call do
       cond do
         ctx_get(:lasterr) == :ok ->
           goto(proceeding, "call forwarded")
+
+        # The call asked for speech processing and the media server cannot give
+        # it — not configured, speech-server down, Mistral down. Ours, so a 503,
+        # and nothing was dialled. Named in the reason phrase: a bare "Service
+        # Unavailable" sends whoever reads the trace to a media server that works.
+        reason = b2bua_speech_unavailable() ->
+          b2bua_reply(req, 503, "Speech Processing Unavailable")
+          sbb_return({:call, :failed, %{reason: :speech_unavailable, cause: reason}})
 
         # The media server was there a moment ago and is not any more — stopped,
         # or killed under the call. Ours, not a problem with what the caller
@@ -186,9 +197,25 @@ defmodule SBB.Call do
           b2bua_forward_reply(resp)
           stay("provisional #{code}")
 
+        # A 200 whose media cannot be bridged went out as a refusal, or to the
+        # next target: no ACK is coming, and waiting for one would hold the
+        # block for timer H.
         {:outbound, {200, resp, _trans, _dlg}} ->
           b2bua_forward_reply(resp)
-          goto(wait_ack, "200 OK relayed")
+
+          cond do
+            not b2bua_answer_unbridgeable?() ->
+              goto(wait_ack, "200 OK relayed")
+
+            b2bua_hunting?() ->
+              stay("200 OK whose media cannot be bridged, trying the next target")
+
+            reason = b2bua_speech_unavailable() ->
+              sbb_return({:call, :failed, %{reason: :speech_unavailable, cause: reason}})
+
+            true ->
+              sbb_return({:call, :rejected, %{code: 488, reason: "Not Acceptable Here"}})
+          end
 
         # A refusal. If the peer has another target, the hunt is already trying
         # it, and this was one device saying no rather than the call being over.
@@ -355,6 +382,7 @@ defmodule SBB.Call do
     """
 
     use SIP.SBB
+    require Logger
 
     @sbb_namespace :bridge
 
@@ -461,6 +489,39 @@ defmodule SBB.Call do
         # One media went quiet. Worth saying, not worth hanging up for.
         {:ms_event, _ref, {:media_timeout, media}} ->
           stay("#{media} went silent")
+
+        # Speech processing lost under a call that otherwise works: speech-server
+        # stopped, Mistral unreachable. The voices still cross and the media
+        # server reopens the stream on its own, so the call stays; the log says
+        # what is missing, and when it is back.
+        {:ms_event, ref, {:speech_service, function, :down, reason}} ->
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "speech processing unavailable on the #{media_leg_of(ref) || "unknown"} leg: " <>
+                "#{function} down (#{reason}); the call goes on without it"
+          )
+
+          stay("speech #{function} down")
+
+        {:ms_event, ref, {:speech_service, function, :up, _reason}} ->
+          Logger.info(
+            module: __MODULE__,
+            message:
+              "speech processing available on the #{media_leg_of(ref) || "unknown"} leg: #{function} up"
+          )
+
+          stay("speech #{function} up")
+
+        {:ms_event, ref, {:speech_error, reason}} ->
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "speech processing could not start on the #{media_leg_of(ref) || "unknown"} leg " <>
+                "(#{inspect(reason)}); the call goes on without it"
+          )
+
+          stay("speech not started")
 
         # A re-INVITE or an UPDATE. Four things arrive under this shape. A
         # session-timer refresh is answered here whatever the media mode — each
