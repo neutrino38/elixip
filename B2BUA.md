@@ -242,6 +242,12 @@ leg's own voice and typing:
   default). A correction is said again after "Correction :" unless
   `announce_corrections: false`.
 
+Text goes onto the SpeechProcessor on each leg that carries it, and only one
+leg needs to. A callee that declines the text (port 0) still has its voice
+written to the caller, and the caller's answer keeps its text section. Whether
+the caller must offer text is the scenario's call: `call-captioning.exs`
+answers 488 when it does not.
+
 The SpeechProcessor decodes all the audio it carries, so `speech:` implies
 `transcode: [audio: :force]`: each leg is answered with the head of its own
 list. With `transcode: [audio: :forbid]` the call fails with
