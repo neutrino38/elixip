@@ -4463,7 +4463,7 @@ defmodule Mendooze.ConnTest do
 
   # The caller on PCMU, the callee on PCMA, both with T.140: two legs a relay
   # could not join on audio, which the SpeechProcessor joins anyway.
-  defp two_speech_legs(server) do
+  defp two_speech_legs(server, callee_text \\ %{type: :text, port: 40_004, codecs: ["T140"]}) do
     {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: [:audio, :text])
     assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}, 1_000
 
@@ -4492,7 +4492,7 @@ defmodule Mendooze.ConnTest do
         out,
         Sdp.build(%{
           ip: "10.9.8.6",
-          medias: [%{type: :audio, port: 40_000, codecs: ["PCMA"], dtmf: true}, text]
+          medias: [%{type: :audio, port: 40_000, codecs: ["PCMA"], dtmf: true}, callee_text]
         })
       )
 
@@ -4631,6 +4631,26 @@ defmodule Mendooze.ConnTest do
     # Another SpeechProcessor's event is not this call's.
     send(stream, {:chunk, Jsr309FakeServer.event_frame([11, sess_tag, 41, 0, 0, true])})
     refute_receive {:ms_event, _, {:speech_activity, _}}, 200
+  end
+
+  test "speech: a callee that declines text still has its voice written to the caller" do
+    %{server: server} = start_media_server(&speech_handler/2)
+    {conn, out, _tag} = two_speech_legs(server, %{type: :text, port: 0, codecs: ["T140"]})
+
+    # Nothing to rebuild: the caller's answer keeps the text it was given.
+    assert :ok = Mendooze.bridge(conn, out, audio: :force, speech: @deaf_caller)
+
+    assert_receive {:jsr309_call, "SpeechProcessorAttachToEndpoint", [3, 40, 0, 4, 2]}, 1_000
+    assert_receive {:jsr309_call, "EndpointAttachToSpeechProcessor", [3, 4, 40, 0, 2]}, 1_000
+
+    assert_receive {:jsr309_call, "SpeechProcessorStartRecognition", [3, 40, 1, false, 0, false]},
+                   1_000
+
+    assert_receive {:jsr309_call, "SpeechProcessorStartSynthesis", [3, 40, 1, 0, "fr", true]},
+                   1_000
+
+    refute_received {:jsr309_call, "SpeechProcessorAttachToEndpoint", [3, 40, 1, 5, 2]}
+    refute_received {:jsr309_call, "EndpointAttachToSpeechProcessor", [3, 5, 40, 1, 2]}
   end
 
   test "speech: an unknown option fails the bridge before anything is created" do

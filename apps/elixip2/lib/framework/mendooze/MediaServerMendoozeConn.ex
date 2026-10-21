@@ -1021,10 +1021,13 @@ defmodule MediaServer.Mendooze.Conn do
     # void (traffic of 2026-08-14). This is distinct from the "nothing
     # negotiated" errors below: a decline is a definite verdict, not a hole.
     declined = MapSet.union(la.declined, lb.declined)
-    common = Enum.filter(la.medias, &(&1 in lb.medias and &1 not in declined))
-    declines = Enum.map(declined, &{&1, :decline, nil})
+    speech_text = speech_text(la, lb, speech)
+    skipped = if speech_text == [], do: declined, else: MapSet.put(declined, :text)
+    common = Enum.filter(la.medias, &(&1 in lb.medias and &1 not in skipped))
+    declines = for m <- declined, speech_text == [] or m != :text, do: {m, :decline, nil}
 
-    Enum.reduce_while(common, {:ok, declines}, fn media, {:ok, acc} ->
+    common
+    |> Enum.reduce_while({:ok, declines}, fn media, {:ok, acc} ->
       case bridge_decision(la, lb, media, policy, speech) do
         # One leg carries nothing at all on this media — nobody offered it.
         # There is no bridge to build and no policy to apply: it is simply not
@@ -1042,6 +1045,10 @@ defmodule MediaServer.Mendooze.Conn do
           {:cont, {:ok, acc ++ [{media, how, sel}]}}
       end
     end)
+    |> case do
+      {:ok, medias} -> {:ok, medias ++ speech_text}
+      err -> err
+    end
   end
 
   # A SpeechProcessor carries audio and text, and never video: video keeps its
@@ -1050,7 +1057,6 @@ defmodule MediaServer.Mendooze.Conn do
   defp bridge_decision(la, lb, media, policy, speech)
 
   defp bridge_decision(_la, _lb, :text, _policy, nil), do: {:attach, nil}
-  defp bridge_decision(_la, _lb, :text, _policy, _speech), do: {:speech, nil}
 
   defp bridge_decision(la, lb, :audio, policy, speech) when speech != nil do
     case select_codecs(la, lb, :audio, policy) do
@@ -1060,6 +1066,22 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   defp bridge_decision(la, lb, media, policy, _speech), do: bridge_decision(la, lb, media, policy)
+
+  # A SpeechProcessor port takes each media on its own (mediaserver SPEC
+  # SPEECH-PROCESSOR §2, case 1): the voice of a leg without text is still
+  # written to the other leg, and that leg's typing still spoken to it. So text
+  # is wired on whichever legs carry it, its selection says which, and one leg
+  # declining it does not take it from the other.
+  defp speech_text(_la, _lb, nil), do: []
+
+  defp speech_text(la, lb, _speech) do
+    case {carries?(la, :text), carries?(lb, :text)} do
+      {false, false} -> []
+      carriers -> [{:text, :speech, carriers}]
+    end
+  end
+
+  defp carries?(l, media), do: media in l.medias and media not in l.declined
 
   # The wiring is the POLICY's, not the selection's. `:forbid` says the media may
   # never be transcoded, so it is the only one that gets a direct
@@ -1313,11 +1335,22 @@ defmodule MediaServer.Mendooze.Conn do
   defp wire_media(state, la, lb, media, :speech, sel) do
     with {:ok, state, sp} <- ensure_speech(state, la, lb),
          :ok <- set_port_codecs(state, sp, media, sel, {nil, nil}),
-         :ok <- attach_port(state, sp, 0, la, media),
-         :ok <- attach_port(state, sp, 1, lb, media) do
+         :ok <- attach_speech_ports(state, sp, la, lb, media, sel) do
       {:ok, put_bridge(state, media, {:speech, sp})}
     else
       {:error, reason} -> {:error, {:speech_failed, media, reason}}
+    end
+  end
+
+  defp attach_speech_ports(state, sp, la, lb, :text, {a?, b?}) do
+    with :ok <- if(a?, do: attach_port(state, sp, 0, la, :text), else: :ok) do
+      if b?, do: attach_port(state, sp, 1, lb, :text), else: :ok
+    end
+  end
+
+  defp attach_speech_ports(state, sp, la, lb, media, _sel) do
+    with :ok <- attach_port(state, sp, 0, la, media) do
+      attach_port(state, sp, 1, lb, media)
     end
   end
 
@@ -1415,11 +1448,17 @@ defmodule MediaServer.Mendooze.Conn do
   # running. A failure is reported and the call goes on — `--speech-url` missing,
   # speech-server down — because the relays work without them.
   defp start_speech(%{speech: %{started: false} = sp} = state, la, lb, cfg) when cfg != nil do
-    text? = match?({:speech, _}, Map.get(state.bridges, :text))
+    {text_a, text_b} =
+      if match?({:speech, _}, Map.get(state.bridges, :text)),
+        do: Map.fetch!(state.selection, :text),
+        else: {false, false}
 
-    for {leg, port, other} <- [{la, 0, 1}, {lb, 1, 0}],
+    for {leg, port, other, own_text, other_text} <- [
+          {la, 0, 1, text_a, text_b},
+          {lb, 1, 0, text_b, text_a}
+        ],
         leg_cfg = Map.fetch!(cfg, leg.leg),
-        {method, params} <- speech_calls(leg_cfg, port, other, text?) do
+        {method, params} <- speech_calls(leg_cfg, port, other, own_text, other_text) do
       case rpc(state, method, [state.sess_id, sp.id | params]) do
         {:ok, _} ->
           :ok
@@ -1497,9 +1536,9 @@ defmodule MediaServer.Mendooze.Conn do
 
   # One leg's own voice and typing. Its voice is recognized on ITS port and
   # written to the other's; its typing is spoken on the OTHER port.
-  defp speech_calls(cfg, port, other, text?) do
-    text_port = if text?, do: other, else: -1
-    source_port = if text?, do: port, else: -1
+  defp speech_calls(cfg, port, other, own_text?, other_text?) do
+    text_port = if other_text?, do: other, else: -1
+    source_port = if own_text?, do: port, else: -1
 
     recognition =
       if cfg.transcribe or cfg.events do
