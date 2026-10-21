@@ -213,6 +213,33 @@ defmodule MediaServer.Mendooze do
     end
   end
 
+  # Read now, not from the description cached at connection: speech-server and
+  # Mistral come and go while the connection stays.
+  @impl MediaServer.Behaviour
+  def speech_available(server) do
+    case read_server_status(rpc_info(server).base_url, :health_check) do
+      %{"speech" => %{"available" => true}} ->
+        :ok
+
+      %{"speech" => %{"available" => false} = speech} ->
+        {:error, {:speech_unavailable, speech["unavailableReason"] || "no reason given"}}
+
+      # A mediaserver older than its availability probe: whether it is
+      # configured is all it can say.
+      %{"speech" => %{"configured" => true}} ->
+        :ok
+
+      %{"speech" => _} ->
+        {:error, {:speech_unavailable, "speech-server not configured (--speech-url)"}}
+
+      %{} ->
+        {:error, {:speech_unavailable, "the media server predates speech processing"}}
+
+      :unsupported ->
+        {:error, {:speech_unavailable, "the media server does not describe itself"}}
+    end
+  end
+
   defp fetch_voices(control_url) do
     url = String.to_charlist(String.trim_trailing(control_url, "/") <> "/control/voices")
     timeout = status_timeout()

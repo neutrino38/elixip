@@ -12,6 +12,11 @@
 # callee need not: a trunk that declines the text still has its voice captioned,
 # and the caller keeps its text section.
 #
+# Without speech processing — speech-server not configured on the media server,
+# not running, or Mistral not answering — the call has no purpose: 503 Speech
+# Processing Unavailable, before anything reaches the trunk. Speech lost during
+# a call does not end it: the voices still cross, and the log says so.
+#
 # Audio and text only, video is declined on both legs. Towards the trunk, the
 # offer is AMR-WB then PCMA and nothing else. Towards the caller, the same two
 # come first when it offered them; its other codecs stay, the SpeechProcessor
@@ -92,8 +97,13 @@ defmodule Kelix.CallCaptioning do
     req = last_uas_req()
     media_connect()
 
-    case ctx_get(:lasterr) do
-      :ok ->
+    case {ctx_get(:lasterr), media_speech_available()} do
+      {:ok, {:error, {:speech_unavailable, reason}}} ->
+        b2bua_reply(req, 503, "Speech Processing Unavailable")
+        media_cleanup_ressources()
+        scenario_failure("speech processing unavailable: #{reason}")
+
+      {:ok, :ok} ->
         case Kelix.Mod.SipServers.forward(sip_ctx, req, @trunk) do
           {:error, :not_found} ->
             b2bua_reply(req, 503, "Service Unavailable")
@@ -135,16 +145,20 @@ defmodule Kelix.CallCaptioning do
               {:call, :timeout, _} ->
                 goto(releasing, "the callee never answered")
 
+              {:call, :failed, %{reason: :speech_unavailable, cause: cause}} ->
+                media_cleanup_ressources()
+                scenario_failure("speech processing unavailable: #{cause}")
+
               {:call, :failed, %{reason: reason}} ->
                 goto(releasing, "call setup failed: #{inspect(reason)}")
             end
         end
 
-      {:error, :no_media_server} ->
+      {{:error, :no_media_server}, _} ->
         b2bua_reply(req, 503, "Service Unavailable")
         goto(releasing, "no media server available")
 
-      other ->
+      {other, _} ->
         b2bua_reply(req, 503, "Service Unavailable")
         goto(releasing, "media connect failed: #{inspect(other)}")
     end

@@ -718,6 +718,75 @@ defmodule SIP.Test.B2bua.Session do
       B2bua.release_legs(ctx)
     end
 
+    test "speech: nothing is dialled when the media server says speech is unavailable", %{
+      ctx: ctx
+    } do
+      _tp_pid = arm_media_peer!()
+      reason = "speech-server unreachable at http://127.0.0.1:9200: Couldn't connect to server"
+
+      Application.put_env(:elixip2, MediaServer.Mockup,
+        speech_available: {:error, {:speech_unavailable, reason}}
+      )
+
+      on_exit(fn -> Application.delete_env(:elixip2, MediaServer.Mockup) end)
+
+      mode =
+        {:mediaserver,
+         inbound: [webrtc: :no, media: :audio],
+         outbound: [webrtc: :no, media: :audio],
+         speech: [outbound: [transcribe: true]]}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), mode)
+          send(self(), {:ctx, ctx})
+        end)
+
+      assert_received {:ctx, ctx}
+      assert {:b2bua, :media_setup_failed, {:speech_unavailable, ^reason}} = ctx.lasterr
+      assert B2bua.outbound_leg(ctx) == nil
+      assert B2bua.speech_unavailable(ctx) == reason
+      refute B2bua.media_unavailable?(ctx)
+      refute_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 300
+      assert log =~ "speech processing unavailable (#{reason}); the call is not forwarded"
+    end
+
+    test "speech: a 2xx whose SpeechProcessor cannot be set up becomes a 503", %{ctx: ctx} do
+      tp_pid = arm_media_peer!()
+
+      mode =
+        {:mediaserver,
+         inbound: [webrtc: :no, media: :audio],
+         outbound: [webrtc: :no, media: :audio],
+         speech: [outbound: [transcribe: true]]}
+
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), mode)
+      assert ctx.lasterr == :ok
+      dlg = B2bua.outbound_leg(ctx).dialogpid
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+
+      MediaServer.Mockup.fail_bridge(
+        SIP.Session.Media.peer_connection(ctx, :inbound),
+        {:speech_failed, :audio, {:jsr309_error, "Could not create speech processor\n"}}
+      )
+
+      Manual.simulate(tp_pid, 200, 100)
+      assert_receive {:outbound, {200, resp, tid, ^dlg}}, 5_000
+      B2bua.note_event({:outbound, {200, resp, tid, self()}})
+      ctx = B2bua.do_relay_reply(ctx, resp)
+
+      # Ours, not the callee's offer: a 503 that names the cause, and no profile
+      # ladder mistakes it for a codec refusal.
+      assert_receive {:replied, 503, "Speech Processing Unavailable", _req, fields}, 2_000
+      assert Keyword.get(fields, :body) in [nil, []]
+      assert B2bua.answer_unbridgeable?(ctx)
+      assert B2bua.speech_unavailable(ctx) =~ "could not set up speech processing on audio"
+      # The callee's 2xx is acknowledged, then its leg hung up.
+      assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+
+      B2bua.release_legs(ctx)
+    end
+
     test "a 2xx whose media cannot be bridged becomes a failed attempt, not the answer", %{
       ctx: ctx
     } do

@@ -249,6 +249,7 @@ not to collide with other events matched in the same `on_events`.
 | `media_stop_speaking(opts \\ [])` | Silence a leg now (barge-in) |
 | `media_stop_speech(opts \\ [])` | End the voice dialogue of a leg |
 | `media_voices()` | The voice aliases speech-server serves |
+| `media_speech_available()` | `:ok`, or `{:error, {:speech_unavailable, reason}}` when speech cannot serve now |
 | `media_leg_of(handle)` | Which leg a media handle carried by an `{:ms_event, …}` belongs to |
 | `media_cleanup_ressources()` | Release media resources at end of call |
 
@@ -326,6 +327,17 @@ The media server recognizes what the caller says and speaks what the scenario
 gives it (mediaserver `docs/JSR-309-API.md` §6.13). It needs a media server
 started with `--speech-url`; `media_voices()` answers
 `{:error, :speech_not_configured}` otherwise.
+
+Ask before answering the call: `media_speech_available()` asks the media server
+now. It returns `:ok`, or `{:error, {:speech_unavailable, reason}}` when the
+media server has no `--speech-url`, speech-server does not respond, or Mistral
+does not. `reason` is a sentence for the log. It never raises: an absent or
+dead media server is one more reason. `speech_bot.exs` then answers
+`503 Speech Processing Unavailable`.
+
+A `media_say` sent while speech is down ends at once with
+`{:speech_done, say_id, true}`. It is never spoken late, when the service comes
+back.
 
 ```elixir
 :ok = media_start_speech(voice: "fr-homme")

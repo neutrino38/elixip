@@ -217,6 +217,98 @@ defmodule Kelix.CallCaptioningScriptTest do
     refute_received {:sip_mockup, {:request_sent, :INVITE, _}}
   end
 
+  defp put_mockup_env(env) do
+    Application.put_env(:elixip2, MediaServer.Mockup, env)
+    on_exit(fn -> Application.delete_env(:elixip2, MediaServer.Mockup) end)
+  end
+
+  test "without speech processing the caller gets 503 and the trunk never sees the call",
+       %{scenario: module} do
+    reason = "speech-server unreachable at http://127.0.0.1:9200: Couldn't connect to server"
+    put_mockup_env(speech_available: {:error, {:speech_unavailable, reason}})
+    :ok = create_trunk()
+    _tp = trunk_mockup()
+    {:ok, dialog} = MockDialog.start_link(self())
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {instance, ref, _req} = authenticated_call(module, dialog, "cc-no-speech", @audio_text)
+
+        assert_receive {:replied, 503, "Speech Processing Unavailable", _f, _r}, 5_000
+
+        assert_receive {:instance_done, {:error, "speech processing unavailable: " <> ^reason}},
+                       10_000
+
+        assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+      end)
+
+    refute_received {:sip_mockup, {:request_sent, :INVITE, _}}
+    assert log =~ "failed (state place_call): \"speech processing unavailable: #{reason}\""
+  end
+
+  test "a SpeechProcessor that cannot be set up on the answer refuses the call at once",
+       %{scenario: module} do
+    put_mockup_env(
+      speech_bridge_failure:
+        {:speech_failed, :audio, {:jsr309_error, "Could not create speech processor\n"}}
+    )
+
+    :ok = create_trunk()
+    tp = trunk_mockup()
+    {:ok, dialog} = MockDialog.start_link(self())
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      {instance, ref, _req} = authenticated_call(module, dialog, "cc-sp-fails", @audio_text)
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 5_000
+
+      Manual.simulate(tp, 200, 50)
+      assert_receive {:replied, 503, "Speech Processing Unavailable", _f, _r}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+
+      # At once, not after timer H waiting for an ACK no 503 ever gets.
+      assert_receive {:instance_done,
+                      {:error, "speech processing unavailable: the media server could not" <> _}},
+                     5_000
+
+      assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+    end)
+  end
+
+  test "speech lost during the call keeps the call and says so in the log",
+       %{scenario: module} do
+    :ok = create_trunk()
+    tp = trunk_mockup()
+    {:ok, dialog} = MockDialog.start_link(self())
+
+    {instance, ref, req} = authenticated_call(module, dialog, "cc-speech-lost", @audio_text)
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 5_000
+    Manual.simulate(tp, 200, 50)
+    assert_receive {:replied, 200, _reason, _f, _r}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, req), self(), dialog})
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(
+          instance,
+          {:ms_event, make_ref(), {:speech_service, :asr, :down, "backend unavailable"}}
+        )
+
+        send(instance, {:ms_event, make_ref(), {:speech_service, :asr, :up, ""}})
+        Process.sleep(300)
+      end)
+
+    assert log =~ "speech processing unavailable on the"
+    assert log =~ "asr down (backend unavailable); the call goes on without it"
+    assert log =~ "speech processing available on the"
+    refute_received {:sip_mockup, {:request_sent, :BYE, _}}
+    assert Process.alive?(instance)
+
+    send(instance, {:BYE, in_dialog(:BYE, req), self(), dialog})
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
   test "the call goes to the trunk with audio and text, AMR-WB then PCMA",
        %{scenario: module} do
     :ok = create_trunk()

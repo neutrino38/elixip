@@ -251,11 +251,25 @@ answers 488 when it does not.
 The SpeechProcessor decodes all the audio it carries, so `speech:` implies
 `transcode: [audio: :force]`: each leg is answered with the head of its own
 list. With `transcode: [audio: :forbid]` the call fails with
-`{:speech_needs_audio_transcoding, :forbid}`. A speech service that does not
-start — the media server has no `--speech-url`, or speech-server is down — does
-**not** fail the call. The scenario receives `{:speech_error, reason}` on the
-leg concerned, and the audio and text relays keep working. Contract:
-mediaserver `docs/JSR-309-API.md` §6.13.
+`{:speech_needs_audio_transcoding, :forbid}`.
+
+Whether speech is available is asked **before anything is dialled**
+(`MediaServer.speech_available/1`). The media server answers: it knows whether
+speech-server responds, and whether Mistral behind it does. When speech is not
+available — no `--speech-url`, speech-server stopped, Mistral down or refusing
+the key — nothing is dialled and a warning names the reason. `lasterr` is then
+`{:b2bua, :media_setup_failed, {:speech_unavailable, reason}}`,
+`b2bua_speech_unavailable/0` returns `reason`, and `SBB.Call` answers
+`503 Speech Processing Unavailable`. A SpeechProcessor that the media server
+cannot create when the callee answers gives the same 503, not a 488: the
+failure is ours, not the offer's.
+
+Speech lost later does **not** fail the call. This covers a stream that does not
+open (`{:speech_error, reason}`) and a stream that goes down
+(`{:speech_service, function, :down, reason}`), on the leg concerned. The audio
+and text relays keep working, the media server reopens the stream on its own,
+and `SBB.Call.Bridge` logs the loss and the return. Contract: mediaserver
+`docs/JSR-309-API.md` §6.13.
 
 `transcode:` is the only lever that can fail a media. Two others steer which
 codec is used without ever failing anything, and **each one belongs on a named
@@ -307,12 +321,16 @@ The bridge is **automatic**: `b2bua_forward_reply/1` builds it when it relays th
 b2bua_bridge(opts \\ [])   # wire the legs together ahead of the 2xx (early media)
 b2bua_unbridge()           # take the media path down without ending the call
 b2bua_media_error()        # why the media plane failed, or nil
+b2bua_speech_unavailable() # why speech processing failed this call, or nil
+b2bua_answer_unbridgeable?() # the 2xx just relayed went out as a refusal
 ```
 
-A `2xx` whose media cannot be bridged reaches the scenario as a `488`, so it
-reads as one device refusing rather than as the call failing.
+A `2xx` whose media cannot be bridged reaches the caller as a `488`, so it
+reads as one device refusing rather than as the call failing. When the
+SpeechProcessor is what failed, it is a `503 Speech Processing Unavailable`.
 `b2bua_media_error/0` is where the reason is, since the relay that followed
-succeeded and `lasterr` truthfully says `:ok`.
+succeeded and `lasterr` truthfully says `:ok`. After `b2bua_forward_reply/1` of
+a 2xx, `b2bua_answer_unbridgeable?/0` says this happened: no ACK will follow.
 
 #### Offer profiles
 
