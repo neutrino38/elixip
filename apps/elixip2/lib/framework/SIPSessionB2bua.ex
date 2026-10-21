@@ -214,6 +214,8 @@ defmodule SIP.B2bua.MediaPlan do
   """
   defstruct opts: [],
             policy: %{},
+            # `MediaServer.speech_options/1`, nil without `speech:`.
+            speech: nil,
             inbound_answer: nil,
             outbound_offer: nil,
             bridged: false,
@@ -916,6 +918,8 @@ defmodule SIP.Session.B2bua do
     outbound_opts = profiled_outbound_opts(opts, rung) ++ target_profile_opts(peer)
 
     with {:ok, policy} <- MediaServer.transcoding_policy(Keyword.get(opts, :transcode, [])),
+         {:ok, speech} <- MediaServer.speech_options(Keyword.get(opts, :speech)),
+         {:ok, policy} <- speech_policy(policy, speech),
          :ok <- media_plane(sip_ctx),
          {:ok, offer_a} <- caller_offer(req),
          # The policy travels with the connection options, not only with
@@ -930,6 +934,7 @@ defmodule SIP.Session.B2bua do
       plan = %MediaPlan{
         opts: opts,
         policy: policy,
+        speech: speech,
         inbound_answer: answer_a,
         outbound_offer: offer_b
       }
@@ -946,6 +951,16 @@ defmodule SIP.Session.B2bua do
         {:error, fail(sip_ctx, {:b2bua, :media_setup_failed, reason})}
     end
   end
+
+  # A SpeechProcessor decodes all the audio it carries, so each leg keeps the
+  # head of its own list — `:force`, which also leaves the answers unshaped.
+  # `:forbid` says the audio must never be decoded: the two cannot both hold.
+  defp speech_policy(policy, nil), do: {:ok, policy}
+
+  defp speech_policy(%{audio: :forbid}, _speech),
+    do: {:error, {:speech_needs_audio_transcoding, :forbid}}
+
+  defp speech_policy(policy, _speech), do: {:ok, %{policy | audio: :force}}
 
   # Nothing is attempted without a media plane to attempt it on. `media_connect()`
   # may have found none — `Kelix.MediaPool` reporting `:unavailable`, see
@@ -2570,7 +2585,7 @@ defmodule SIP.Session.B2bua do
     if is_nil(pc_in) or is_nil(pc_out) do
       {sip_ctx, {:error, :media_legs_incomplete}}
     else
-      opts = Keyword.merge(Map.to_list(plan.policy), overrides)
+      opts = Keyword.merge(bridge_opts(plan), overrides)
 
       case protected_bridge(sip_ctx, pc_in, pc_out, opts) do
         :ok ->
@@ -2619,7 +2634,7 @@ defmodule SIP.Session.B2bua do
     if is_nil(plan) or is_nil(pc_in) or is_nil(pc_out) do
       {sip_ctx, held}
     else
-      case protected_bridge(sip_ctx, pc_in, pc_out, Map.to_list(plan.policy)) do
+      case protected_bridge(sip_ctx, pc_in, pc_out, bridge_opts(plan)) do
         {:ok, %{answers: answers}} ->
           {sip_ctx, Map.get(answers, answered_leg, held)}
 
@@ -2641,6 +2656,11 @@ defmodule SIP.Session.B2bua do
       end
     end
   end
+
+  defp bridge_opts(%MediaPlan{policy: policy, speech: nil}), do: Map.to_list(policy)
+
+  defp bridge_opts(%MediaPlan{policy: policy, speech: speech}),
+    do: [{:speech, speech} | Map.to_list(policy)]
 
   defp protected_bridge(sip_ctx, pc_in, pc_out, opts) do
     apply(sip_ctx.mediaservermodule, :bridge, [pc_in, pc_out, opts])

@@ -147,6 +147,27 @@ defmodule SIP.Test.B2bua.Session do
       refute B2bua.media_unavailable?(ctx)
     end
 
+    # A SpeechProcessor decodes all the audio: `:forbid` and `speech:` cannot both hold.
+    test "speech with audio :forbid is refused before anything is dialled", %{ctx: ctx} do
+      mode = {:mediaserver, transcode: [audio: :forbid], speech: [inbound: [speak: true]]}
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), mode)
+
+      assert {:b2bua, :media_setup_failed, {:speech_needs_audio_transcoding, :forbid}} =
+               ctx.lasterr
+
+      assert B2bua.outbound_leg(ctx) == nil
+    end
+
+    test "a bad speech option is refused before anything is dialled", %{ctx: ctx} do
+      mode = {:mediaserver, speech: [inbound: [speak: "yes"]]}
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), mode)
+
+      assert {:b2bua, :media_setup_failed, {:bad_speech_option, :inbound, {:speak, "yes"}}} =
+               ctx.lasterr
+
+      assert B2bua.outbound_leg(ctx) == nil
+    end
+
     test "Max-Forwards exhausted is refused as such (the scenario answers 483)", %{ctx: ctx} do
       req = Map.put(inbound_invite(), "Max-Forwards", 0)
       ctx = B2bua.do_create_leg(ctx, req, mockup_peer(), false)
@@ -586,6 +607,34 @@ defmodule SIP.Test.B2bua.Session do
       # …and the two endpoints are attached, which is what makes the media flow.
       assert %{bridged: true} = B2bua.media_plan(ctx)
 
+      B2bua.release_legs(ctx)
+    end
+
+    test "speech: the audio is transcoded per leg, and the call is bridged", %{ctx: ctx} do
+      tp_pid = arm_media_peer!()
+
+      mode =
+        {:mediaserver,
+         inbound: [webrtc: :no, media: :audio],
+         outbound: [webrtc: :no, media: :audio],
+         transcode: [audio: :avoid, video: :avoid],
+         speech: [inbound: [speak: true, voice: "fr"], outbound: [transcribe: true]]}
+
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), mode)
+      assert ctx.lasterr == :ok
+
+      plan = B2bua.media_plan(ctx)
+      assert plan.policy.audio == :force
+      assert %{inbound: %{speak: true, voice: "fr"}, outbound: %{transcribe: true}} = plan.speech
+
+      dlg = B2bua.outbound_leg(ctx).dialogpid
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+      Manual.simulate(tp_pid, 200, 100)
+      assert_receive {:outbound, {200, resp, tid, ^dlg}}, 5_000
+      B2bua.note_event({:outbound, {200, resp, tid, self()}})
+      ctx = B2bua.do_relay_reply(ctx, resp)
+
+      assert %{bridged: true} = B2bua.media_plan(ctx)
       B2bua.release_legs(ctx)
     end
 

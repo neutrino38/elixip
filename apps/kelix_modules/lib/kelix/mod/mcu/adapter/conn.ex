@@ -62,6 +62,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # pick among what the peer offered (§6): Main over Baseline. The JSR309 adapter,
   # which relays another peer's stream, does not set this.
   @fmt_order_opts [prefer_h264_profile: true]
+  # The order a conference's offer prefers when the script states none. Stated because
+  # the vocabulary's own is alphabetical: without it, whichever audio name sorts first
+  # led every offer — G722, then AMR-WB.
+  @default_offer_order [audio: ["OPUS", "AMR-WB", "SPEEX", "G722", "PCMA", "PCMU"]]
   # RTP participant (1 is RTMP, unused)
   @participant_rtp 0
   # the default mosaic and the default sidebar (decision 6b)
@@ -2194,9 +2198,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   # The order our offer states its preference in: the script's `codec_order`, then the
-  # conference's preferred video codec, then the rest of the vocabulary. A name the
-  # tables do not know is dropped rather than raised on — it is the script's typo, and
-  # the call is worth more than the order.
+  # conference's preferred video codec, then the module's default order, then the rest
+  # of the vocabulary. A name the tables do not know is dropped rather than raised on —
+  # it is the script's typo, and the call is worth more than the order.
   defp offer_names(state, conf, media) do
     stated =
       state.offer_codec_order
@@ -2205,7 +2209,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
     preferred = if media == :video, do: List.wrap(Map.get(conf, :preferred_video_codec)), else: []
 
-    (stated ++ preferred ++ Sdp.codec_names(media))
+    (stated ++ preferred ++ Keyword.get(@default_offer_order, media, []) ++ Sdp.codec_names(media))
     |> Enum.filter(&(Sdp.codec_code(media, &1) != :error))
     |> Enum.uniq()
   end

@@ -218,6 +218,45 @@ stays in the path and decides *per packet*, forwarding untouched while the legs
 agree, which is what lets it follow a peer that switches codec mid-stream.
 `:forbid` is the only policy that gets a direct attachment.
 
+`speech:` puts a **SpeechProcessor** between the legs, for a deaf caller and a
+hearing callee: what one leg types is spoken to the other, and what one leg
+says is written to the other as T.140. It carries audio and text; video stays
+endpoint to endpoint. The options are per leg, and each one describes that
+leg's own voice and typing:
+
+```elixir
+@media {:mediaserver,
+        inbound:  [webrtc: :no, media: :tc],
+        outbound: [webrtc: :no, media: :audio_video],
+        speech: [inbound:  [speak: true, voice: "fr"],
+                 outbound: [transcribe: true]]}
+```
+
+- **`transcribe: true`** — this leg's voice goes as text to the other leg.
+  `events: true` also delivers it to the scenario as
+  `{:speech_recognized, text, final}` on this leg.
+  `half_duplex: true` pauses the recognition while the synthesis speaks to
+  this leg: the remedy for a hands-free phone that echoes it back.
+- **`speak: true`** — this leg's typing is spoken to the other leg, in `voice`
+  (an alias of the speech-server configuration; empty for the language's
+  default). A correction is said again after "Correction :" unless
+  `announce_corrections: false`.
+
+Text goes onto the SpeechProcessor on each leg that carries it, and only one
+leg needs to. A callee that declines the text (port 0) still has its voice
+written to the caller, and the caller's answer keeps its text section. Whether
+the caller must offer text is the scenario's call: `call-captioning.exs`
+answers 488 when it does not.
+
+The SpeechProcessor decodes all the audio it carries, so `speech:` implies
+`transcode: [audio: :force]`: each leg is answered with the head of its own
+list. With `transcode: [audio: :forbid]` the call fails with
+`{:speech_needs_audio_transcoding, :forbid}`. A speech service that does not
+start — the media server has no `--speech-url`, or speech-server is down — does
+**not** fail the call. The scenario receives `{:speech_error, reason}` on the
+leg concerned, and the audio and text relays keep working. Contract:
+mediaserver `docs/JSR-309-API.md` §6.13.
+
 `transcode:` is the only lever that can fail a media. Two others steer which
 codec is used without ever failing anything, and **each one belongs on a named
 line of the tuple** — they are not interchangeable:

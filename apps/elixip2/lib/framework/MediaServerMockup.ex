@@ -66,6 +66,17 @@ defmodule MediaServer.Mockup do
   """
   @impl MediaServer.Behaviour
   def bridge(a, b, opts) do
+    case mock_speech(Keyword.get(opts, :speech)) do
+      {:ok, _speech} -> relay_bridge(a, b, opts)
+      err -> err
+    end
+  end
+
+  # The B2BUA hands over the map `MediaServer.speech_options/1` returned.
+  defp mock_speech(cfg) when is_map(cfg), do: {:ok, cfg}
+  defp mock_speech(cfg), do: MediaServer.speech_options(cfg)
+
+  defp relay_bridge(a, b, opts) do
     case MediaServer.transcoding_policy(opts) do
       {:ok, _policy} ->
         case GenServer.call(a, :bridge_failure) do
@@ -197,6 +208,37 @@ defmodule MediaServer.Mockup do
     GenServer.stop(echo, :normal)
     :ok
   end
+
+  # ── Speech ────────────────────────────────────────────────────────────────
+  #
+  # The chatbot only. Nothing is recognized and nothing is heard: a `say/2`
+  # starts and ends at once, and what the caller would have said is played by
+  # `simulate_speech/2`.
+
+  @impl MediaServer.Behaviour
+  def start_speech(conn, _opts), do: GenServer.call(conn, {:set_speech, true})
+
+  @impl MediaServer.Behaviour
+  def stop_speech(conn), do: GenServer.call(conn, {:set_speech, false})
+
+  @impl MediaServer.Behaviour
+  def say(conn, _text), do: GenServer.call(conn, :say)
+
+  @impl MediaServer.Behaviour
+  def stop_speaking(_conn), do: :ok
+
+  @impl MediaServer.Behaviour
+  def speech_voices(_server), do: {:ok, [%{alias: "fr-mock", lang: "fr"}]}
+
+  @doc """
+  Test hook: play a speech event on `conn`, as the media server would send it —
+  `{:speech_recognized, "bonjour", true}`, `{:speech_activity, true}`…
+  """
+  @spec simulate_speech(pid(), term()) :: :ok
+  def simulate_speech(conn, event) do
+    send(GenServer.call(conn, :get_event_sink), {:ms_event, conn, event})
+    :ok
+  end
 end
 
 # ── Server ────────────────────────────────────────────────────────────────────
@@ -270,7 +312,10 @@ defmodule MediaServer.Mockup.Conn do
     # Whether the framework announced the call answered on this leg. The mock has
     # no watchdog to arm with it; it records the moment so a call-flow test can
     # check it happened, and happened after the ringing rather than during it.
-    answered: false
+    answered: false,
+    # `start_speech/2` ran on this leg, and the last `say/2` id
+    speech: false,
+    say_id: 0
   ]
 
   @impl true
@@ -368,6 +413,18 @@ defmodule MediaServer.Mockup.Conn do
 
   # Half of a bridge (MediaServer.Mockup.bridge/3): where this connection's
   # incoming media goes. nil takes the path down again.
+  def handle_call({:set_speech, on}, _from, state), do: {:reply, :ok, %{state | speech: on}}
+
+  def handle_call(:say, _from, %{speech: false} = state),
+    do: {:reply, {:error, :no_speech}, state}
+
+  def handle_call(:say, _from, state) do
+    id = state.say_id + 1
+    send(state.event_sink, {:ms_event, self(), {:speech_started, id}})
+    send(state.event_sink, {:ms_event, self(), {:speech_done, id, false}})
+    {:reply, {:ok, id}, %{state | say_id: id}}
+  end
+
   def handle_call({:set_bridge_peer, peer}, _from, state) do
     {:reply, :ok, %{state | bridge_peer: peer}}
   end
