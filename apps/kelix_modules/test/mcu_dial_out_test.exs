@@ -35,6 +35,10 @@ defmodule Kelix.Mod.McuDialOutTest do
   defp start_receiving([_conf, _part, 0 | _]),
     do: {:ok, [@rec_port, @media_ip, %{"8" => "", "0" => "", "101" => "0-16"}]}
 
+  # A server that accepts every codec it is proposed: what is left to see is our order.
+  defp accept_everything([_conf, _part, 0, rtp_map | _]),
+    do: {:ok, [@rec_port, @media_ip, Map.new(rtp_map, fn {pt, _code} -> {pt, ""} end)]}
+
   defp start_receiving([_conf, _part, 1 | _]),
     do:
       {:ok, [@rec_port + 2, @media_ip, %{"99" => "profile-level-id=42e01f;packetization-mode=1"}]}
@@ -61,10 +65,12 @@ defmodule Kelix.Mod.McuDialOutTest do
   setup context do
     {:ok, config} = Config.parse(%{"did_range" => "8000-8009"})
 
+    start_receiving = if context[:accept_all], do: &accept_everything/1, else: &start_receiving/1
+
     returns =
       if context[:profiles],
-        do: %{"StartReceiving" => &start_receiving/1, "GetNetworkProfiles" => {:ok, @profiles}},
-        else: %{"StartReceiving" => &start_receiving/1}
+        do: %{"StartReceiving" => start_receiving, "GetNetworkProfiles" => {:ok, @profiles}},
+        else: %{"StartReceiving" => start_receiving}
 
     start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
 
@@ -190,7 +196,7 @@ defmodule Kelix.Mod.McuDialOutTest do
       assert {:ok, offer} = Adapter.get_local_offer(conn)
 
       assert offer =~ "c=IN IP4 #{@media_ip}"
-      # the vocabulary's order (the tables', alphabetical), filtered by the verdict
+      # the default order, filtered by the verdict
       assert offer =~ "m=audio #{@rec_port} RTP/AVP 8 0 101"
       assert offer =~ "a=fmtp:101 0-16"
       assert offer =~ "m=video #{@rec_port + 2} RTP/AVP 99"
@@ -208,6 +214,13 @@ defmodule Kelix.Mod.McuDialOutTest do
       # every audio name the tables carry, plus telephone-event
       assert Map.keys(rtp_map) |> Enum.sort() == ~w(0 101 117 120 8 9 98)
       refute Enum.any?(calls, fn {method, _} -> method == "StartSending" end)
+    end
+
+    @tag :accept_all
+    test "without codec_order, audio is offered OPUS, AMR-WB, SPEEX, G722, PCMA, PCMU", ctx do
+      {conn, _part} = leg(ctx.did, media: :audio)
+      assert {:ok, offer} = Adapter.get_local_offer(conn)
+      assert offer =~ "m=audio #{@rec_port} RTP/AVP 98 120 117 9 8 0 101"
     end
 
     test "codec_order puts the script's choice first", ctx do
