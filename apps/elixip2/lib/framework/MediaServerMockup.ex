@@ -67,8 +67,18 @@ defmodule MediaServer.Mockup do
   @impl MediaServer.Behaviour
   def bridge(a, b, opts) do
     case mock_speech(Keyword.get(opts, :speech)) do
-      {:ok, _speech} -> relay_bridge(a, b, opts)
+      {:ok, nil} -> relay_bridge(a, b, opts)
+      {:ok, _speech} -> speech_bridge(a, b, opts)
       err -> err
+    end
+  end
+
+  # A SpeechProcessor that the server cannot create, set by a test the same way
+  # as `speech_available/1`: `speech_bridge_failure: {:speech_failed, :audio, …}`.
+  defp speech_bridge(a, b, opts) do
+    case Application.get_env(:elixip2, __MODULE__, []) |> Keyword.get(:speech_bridge_failure) do
+      nil -> relay_bridge(a, b, opts)
+      reason -> {:error, reason}
     end
   end
 
@@ -229,6 +239,17 @@ defmodule MediaServer.Mockup do
 
   @impl MediaServer.Behaviour
   def speech_voices(_server), do: {:ok, [%{alias: "fr-mock", lang: "fr"}]}
+
+  @doc """
+  `:ok` unless a test said otherwise:
+  `Application.put_env(:elixip2, MediaServer.Mockup, speech_available: {:error,
+  {:speech_unavailable, "…"}})`. The scenario connects its own server, so the
+  answer cannot be set on it before the call.
+  """
+  @impl MediaServer.Behaviour
+  def speech_available(_server) do
+    Application.get_env(:elixip2, __MODULE__, []) |> Keyword.get(:speech_available, :ok)
+  end
 
   @doc """
   Test hook: play a speech event on `conn`, as the media server would send it —

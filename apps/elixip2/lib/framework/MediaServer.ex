@@ -551,9 +551,11 @@ defmodule MediaServer do
 
     `speech:` (see `MediaServer.speech_options/1`) puts a SpeechProcessor
     between the legs for audio and text; video stays endpoint to endpoint. The
-    SpeechProcessor decodes all audio, so the caller sets `audio: :force`. A
-    speech service that fails to start is reported as `{:speech_error, reason}`,
-    never as a bridge failure: the call is worth more than its transcription.
+    SpeechProcessor decodes all audio, so the caller sets `audio: :force`, and
+    asks `speech_available/1` before dialling. A SpeechProcessor the server
+    cannot create is a bridge failure, `{:speech_failed, media, reason}`. A
+    speech service that fails to start on it is reported as
+    `{:speech_error, reason}`, never as a bridge failure: the voices still cross.
 
     Idempotent: bridging an already-bridged pair changes nothing.
 
@@ -652,5 +654,18 @@ defmodule MediaServer do
     """
     @callback speech_voices(server :: pid()) ::
                 {:ok, [%{alias: String.t(), lang: String.t()}]} | {:error, term()}
+
+    @doc """
+    Can this media server recognize and synthesize speech **now**? Asked each
+    time, before a call is offered speech: the server knows whether speech-server
+    answers and whether Mistral behind it does, and that changes without notice.
+
+    `{:error, {:speech_unavailable, reason}}` otherwise, `reason` a sentence
+    for the log — `"speech-server not configured (--speech-url)"`,
+    `"speech-server unreachable at http://…: Couldn't connect to server"`,
+    `"Mistral refuses the API key (HTTP 401)"`.
+    """
+    @callback speech_available(server :: pid()) ::
+                :ok | {:error, {:speech_unavailable, String.t()}}
   end
 end

@@ -247,6 +247,61 @@ defmodule Mendooze.ServerTest do
     end
   end
 
+  describe "whether speech is available is asked to the media server, each time" do
+    defp speech_fake(speech) do
+      Jsr309FakeServer.start(self(), status_handler(),
+        status: %{"server" => %{"version" => "1.19.0"}, "speech" => speech}
+      )
+    end
+
+    test "available, then not, then back: read now, never from the connection's copy" do
+      {:ok, state} = Agent.start_link(fn -> %{"configured" => true, "available" => true} end)
+
+      fake =
+        Jsr309FakeServer.start(self(), status_handler(),
+          status: fn -> %{"speech" => Agent.get(state, & &1)} end
+        )
+
+      server = connect!(fake)
+      assert Mendooze.speech_available(server) == :ok
+
+      reason = "speech-server unreachable at http://127.0.0.1:9200: Couldn't connect to server"
+
+      Agent.update(state, fn _ ->
+        %{"configured" => true, "available" => false, "unavailableReason" => reason}
+      end)
+
+      assert Mendooze.speech_available(server) == {:error, {:speech_unavailable, reason}}
+
+      Agent.update(state, fn _ -> %{"configured" => true, "available" => true} end)
+      assert Mendooze.speech_available(server) == :ok
+    end
+
+    test "a media server without --speech-url says so" do
+      fake =
+        speech_fake(%{
+          "configured" => false,
+          "available" => false,
+          "unavailableReason" => "speech-server not configured (--speech-url)"
+        })
+
+      assert {:error, {:speech_unavailable, "speech-server not configured (--speech-url)"}} =
+               Mendooze.speech_available(connect!(fake))
+    end
+
+    test "a media server older than the probe: configured is all it can say" do
+      assert :ok = Mendooze.speech_available(connect!(speech_fake(%{"configured" => true})))
+
+      assert {:error, {:speech_unavailable, "speech-server not configured (--speech-url)"}} =
+               Mendooze.speech_available(connect!(speech_fake(%{"configured" => false})))
+    end
+
+    test "a media server that does not describe itself has no speech to offer" do
+      assert {:error, {:speech_unavailable, "the media server does not describe itself"}} =
+               Mendooze.speech_available(connect!(Jsr309FakeServer.start(self())))
+    end
+  end
+
   test "connect creates the event queue and polls the returned source path" do
     fake = Jsr309FakeServer.start(self())
     server = connect!(fake)

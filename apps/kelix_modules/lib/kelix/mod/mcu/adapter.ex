@@ -198,4 +198,7 @@ defmodule Kelix.Mod.Mcu.Adapter do
   def stop_speaking(_conn), do: {:error, :not_supported}
   @impl MediaServer.Behaviour
   def speech_voices(_server), do: {:error, :not_supported}
+  @impl MediaServer.Behaviour
+  def speech_available(_server),
+    do: {:error, {:speech_unavailable, "a conference carries no speech processing"}}
 end

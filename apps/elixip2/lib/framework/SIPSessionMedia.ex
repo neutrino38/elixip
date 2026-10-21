@@ -109,6 +109,14 @@ defmodule SIP.Session.Media do
         end
       end
 
+      # Whether speech can be offered now: `:ok` or `{:error, {:speech_unavailable,
+      # reason}}`. A reader, so no monitor command.
+      defmacro media_speech_available() do
+        quote do
+          SIP.Session.Media.speech_available(var!(sip_ctx))
+        end
+      end
+
       # Which leg a media handle belongs to. A reader, so no monitor command.
       defmacro media_leg_of(handle) do
         quote do
@@ -764,6 +772,26 @@ defmodule SIP.Session.Media do
     end
 
     apply(sip_ctx.mediaservermodule, :speech_voices, [sip_ctx.mediaserverpid])
+  end
+
+  @doc """
+  Can the connected media server recognize and synthesize speech now? `:ok`, or
+  `{:error, {:speech_unavailable, reason}}` with a reason for the log. Never
+  raises: an absent or dead media server is one more reason speech is not
+  available.
+  """
+  @spec speech_available(%SIP.Context{}) :: :ok | {:error, {:speech_unavailable, String.t()}}
+  def speech_available(sip_ctx = %SIP.Context{}) do
+    if is_pid(sip_ctx.mediaserverpid) do
+      try do
+        apply(sip_ctx.mediaservermodule, :speech_available, [sip_ctx.mediaserverpid])
+      catch
+        :exit, reason ->
+          {:error, {:speech_unavailable, "the media server is gone: #{inspect(reason)}"}}
+      end
+    else
+      {:error, {:speech_unavailable, "no media server connected"}}
+    end
   end
 
   def start_echo(sip_ctx = %SIP.Context{}, opts \\ []) do

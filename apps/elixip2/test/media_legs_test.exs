@@ -325,5 +325,23 @@ defmodule SIP.Test.Media.Legs do
     test "the voices are the media server's answer", %{ctx: ctx} do
       assert {:ok, [%{alias: "fr-mock", lang: "fr"}]} = Media.speech_voices(ctx)
     end
+
+    test "speech availability is the media server's answer, and never raises", %{ctx: ctx} do
+      assert :ok = Media.speech_available(ctx)
+
+      assert {:error, {:speech_unavailable, "no media server connected"}} =
+               Media.speech_available(%{ctx | mediaserverpid: nil})
+
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, _, _, _}
+
+      assert {:error, {:speech_unavailable, "the media server is gone: " <> _}} =
+               Media.speech_available(%{
+                 ctx
+                 | mediaserverpid: dead,
+                   mediaservermodule: MediaServer.Mendooze
+               })
+    end
   end
 end

@@ -20,7 +20,9 @@ defmodule Jsr309FakeServer do
 
   Option `stream_status: 404` answers every stream GET with the server's
   "queue not found" reply instead, and notifies `{:stream_404, path}`.
-  Option `status:` is a map (encoded to JSON) or `{:raw, body}`.
+  Option `status:` is a map (encoded to JSON), `{:raw, body}`, or a function
+  of no argument returning either, called on each request: a status that
+  changes while the connection stays.
   """
 
   def start(test_pid, rpc_handler \\ &default_handler/2, opts \\ []) do
@@ -218,6 +220,7 @@ defmodule Jsr309FakeServer do
       "content-length: 9\r\nconnection: close\r\n\r\nNot found"
   end
 
+  defp status_response(fun) when is_function(fun, 0), do: status_response(fun.())
   defp status_response({:raw, body}), do: status_ok(body)
   defp status_response(status) when is_map(status), do: status_ok(Jason.encode!(status))
 
