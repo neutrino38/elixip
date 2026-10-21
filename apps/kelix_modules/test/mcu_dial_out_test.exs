@@ -206,7 +206,7 @@ defmodule Kelix.Mod.McuDialOutTest do
       calls = TestStub.rpc_calls()
       assert [rtp_map] = for({"StartReceiving", [_, _, 0, map | _]} <- calls, do: map)
       # every audio name the tables carry, plus telephone-event
-      assert Map.keys(rtp_map) |> Enum.sort() == ~w(0 101 117 8 9 98)
+      assert Map.keys(rtp_map) |> Enum.sort() == ~w(0 101 117 120 8 9 98)
       refute Enum.any?(calls, fn {method, _} -> method == "StartSending" end)
     end
 
