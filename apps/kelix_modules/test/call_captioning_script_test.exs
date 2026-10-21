@@ -309,7 +309,7 @@ defmodule Kelix.CallCaptioningScriptTest do
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
 
-  test "the call goes to the trunk with audio and text, AMR-WB then PCMA",
+  test "the call goes to the trunk with audio and text, AMR-WB, PCMA then PCMU",
        %{scenario: module} do
     :ok = create_trunk()
     tp = trunk_mockup()
@@ -322,8 +322,7 @@ defmodule Kelix.CallCaptioningScriptTest do
     assert SIP.Msg.Ops.media_kinds(offer) == [:audio, :text]
     [audio_line] = Regex.run(~r/^m=audio .*$/m, offer)
     assert offer =~ ~r/a=rtpmap:\d+ AMR-WB\/16000/
-    assert audio_line =~ ~r/RTP\/AVP \d+ 8( |\r|$)/
-    refute offer =~ "PCMU"
+    assert audio_line =~ ~r/RTP\/AVP \d+ 8 0( |\r|$)/
     refute offer =~ "opus"
 
     Manual.simulate(tp, 200, 50)

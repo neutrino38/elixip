@@ -18,9 +18,9 @@
 # a call does not end it: the voices still cross, and the log says so.
 #
 # Audio and text only, video is declined on both legs. Towards the trunk, the
-# offer is AMR-WB then PCMA and nothing else. Towards the caller, the same two
-# come first when it offered them; its other codecs stay, the SpeechProcessor
-# decodes whatever each leg carries.
+# offer is AMR-WB, PCMA then PCMU and nothing else. Towards the caller, the same
+# three come first when it offered them; its other codecs stay, the
+# SpeechProcessor decodes whatever each leg carries.
 defmodule Kelix.CallCaptioning do
   use SIP.Scenario
   use SBB.Call
@@ -37,9 +37,9 @@ defmodule Kelix.CallCaptioning do
           inbound: [
             webrtc: :if_offered,
             media: [:audio, :text],
-            prefer_codecs: [audio: ["AMR-WB", "PCMA"]]
+            prefer_codecs: [audio: ["AMR-WB", "PCMA", "PCMU"]]
           ],
-          outbound: [webrtc: :no, media: [:audio, :text], audio_codec: ["AMR-WB", "PCMA"]],
+          outbound: [webrtc: :no, media: [:audio, :text], audio_codec: ["AMR-WB", "PCMA", "PCMU"]],
           speech: [inbound: [speak: true], outbound: [transcribe: true]]}
 
   state initial_state do
