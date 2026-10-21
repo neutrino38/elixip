@@ -415,36 +415,6 @@ fi
 - The scenario scripts are %config(noreplace): an edited script survives the
   upgrade, the packaged one lands next to it as .rpmnew.
 
-* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.1-1
-- 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
-  kelixip-mod-sip_servers subpackage (trunks, proxies and application servers,
-  OPTIONS liveness, tertiary_uri, source_networks, use_fqdn_contact,
-  publish_contact_host, ext_domain), the client certificate of config.toml
-  [tls], the registration binding's User-Agent, Call-ID and CSeq, the PUBLISH
-  received_time, trust_asserted_identity/1 and the SHA-256 digest spelling.
-- And everything delivered in 1.6.5-1 to 1.6.5-5: a P-Asserted-Identity
-  holding two bracketed values on one line is refused instead of raising
-  (Teams Direct Routing), the 2xx names the remote tag of an outbound dialog,
-  a conference places calls (mcu dial_out/4, sip_servers dial_target/3),
-  admit/3 takes the conference number (did:), a script starts on demand
-  (POST /scripts/<name>/run, kelictl run), a trunk's keepalive OPTIONS comes
-  from its account with a user part in its Contact, no module sends outbound
-  SIP before the listeners are bound, and compile_and_restart_all keeps the
-  installed distribution cookie.
-- User-Agent is now Kelixip/1.7.1.
-
-* Wed Oct 07 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.0-1
-- Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
-  Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
-  store-and-forward intact.
-- A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
-  a 415 without deflate in Accept-Encoding gets the page again in clear.
-- The page relay keeps the sender's multipart Content-Type and relays a bare
-  multipart byte for byte.
-- Multipart parts keep their trailing whitespace; a blank line before a
-  part's Content-* headers is tolerated.
-- User-Agent is now Kelixip/1.7.0.
-
 * Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-5
 - mcu: admit/3 takes the conference number as an option (did:), for a script
   that computes it rather than reading it off the R-URI.
@@ -478,6 +448,24 @@ fi
   user-less one).
 - kelixip: no module sends outbound SIP before the listeners are bound.
 - compile_and_restart_all keeps the installed distribution cookie.
+
+* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.1-1
+- 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
+  kelixip-mod-sip_servers subpackage (trunks, proxies and application servers,
+  OPTIONS liveness, tertiary_uri, source_networks, use_fqdn_contact,
+  publish_contact_host, ext_domain), the client certificate of config.toml
+  [tls], the registration binding's User-Agent, Call-ID and CSeq, the PUBLISH
+  received_time, trust_asserted_identity/1 and the SHA-256 digest spelling.
+- And everything delivered in 1.6.5-1 to 1.6.5-5: a P-Asserted-Identity
+  holding two bracketed values on one line is refused instead of raising
+  (Teams Direct Routing), the 2xx names the remote tag of an outbound dialog,
+  a conference places calls (mcu dial_out/4, sip_servers dial_target/3),
+  admit/3 takes the conference number (did:), a script starts on demand
+  (POST /scripts/<name>/run, kelictl run), a trunk's keepalive OPTIONS comes
+  from its account with a user part in its Contact, no module sends outbound
+  SIP before the listeners are bound, and compile_and_restart_all keeps the
+  installed distribution cookie.
+- User-Agent is now Kelixip/1.7.1.
 
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-8
 - sip_servers: with an ext_domain, the keepalive OPTIONS asks for
@@ -553,6 +541,18 @@ fi
   colon without a space after it (RFC 3261 section 7.3).
 - The reference media call script carries text too (T.140 data channel).
 - User-Agent is now Kelixip/1.6.4.
+
+* Wed Oct 07 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.0-1
+- Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
+  Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
+  store-and-forward intact.
+- A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
+  a 415 without deflate in Accept-Encoding gets the page again in clear.
+- The page relay keeps the sender's multipart Content-Type and relays a bare
+  multipart byte for byte.
+- Multipart parts keep their trailing whitespace; a blank line before a
+  part's Content-* headers is tolerated.
+- User-Agent is now Kelixip/1.7.0.
 
 * Tue Oct 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-2
 - RFC 4028 session timers, one per call leg. A long call relayed between two
