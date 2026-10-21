@@ -37,9 +37,21 @@ defmodule UAS.SpeechBot do
       {:INVITE, _req, _trans, _dlg} ->
         media_connect()
 
-        case ctx_get(:lasterr) do
-          :ok -> goto(ringing, "INVITE")
-          _ -> goto(no_media_server, "no media server")
+        case {ctx_get(:lasterr), media_speech_available()} do
+          {:ok, :ok} ->
+            goto(ringing, "INVITE")
+
+          # A speech bot without speech has nothing to answer with.
+          {:ok, {:error, {:speech_unavailable, reason}}} ->
+            reply_invite(503, "Speech Processing Unavailable")
+            media_cleanup_ressources()
+            scenario_failure("speech processing unavailable: #{reason}")
+
+          # Answered here, not in a state of its own: `goto` with `lasterr` set
+          # never runs the state it names, and the caller would get nothing.
+          _ ->
+            reply_invite(503, "Service Unavailable")
+            scenario_failure("no media server available")
         end
 
       {:scenario_ctl, :shutdown, _reason} ->
@@ -52,11 +64,6 @@ defmodule UAS.SpeechBot do
   state ringing do
     reply_invite(180, "Ringing")
     goto(answering)
-  end
-
-  state no_media_server do
-    reply_invite(503, "Service Unavailable")
-    scenario_failure("no media server available")
   end
 
   # Speech starts on the first media packet, not on the 200: the recognition
