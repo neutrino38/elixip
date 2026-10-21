@@ -32,7 +32,7 @@ Version:        1.8.0
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,21 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Wed Oct 21 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.0-2
+- A call that asks for speech is refused with 503 Speech Processing
+  Unavailable when the media server cannot serve it: speech-server not
+  configured, not running, or Mistral not answering. Nothing reaches the
+  trunk, and the reason is in the log. Speech lost during a call keeps the
+  call, and the log says when it goes and when it comes back.
+- A SpeechProcessor that cannot be created on the answer gives the caller a
+  503 at once, instead of a 488 after 32 s waiting for an ACK.
+- speech_bot.exs answers 503 without a media server instead of nothing.
+- The availability of speech needs mediaserver 1.19.0; an older one is
+  only asked whether it is configured.
+- call-captioning.exs challenges on the visioassistance.net realm.
+- The scenario scripts are %config(noreplace): an edited script survives the
+  upgrade, the packaged one lands next to it as .rpmnew.
+
 * Wed Oct 21 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.0-1
 - A SpeechProcessor between the legs of a call (`speech:` in the media tuple):
   what one leg says is written to the other as T.140, what it types is spoken
@@ -411,9 +426,6 @@ fi
   AMR-WB, SPEEX, G722, PCMA, PCMU, instead of in alphabetical order.
 - The SpeechProcessor and AMR-WB on the wire need mediaserver 1.19.0.
 - User-Agent is now Kelixip/1.8.0.
-- call-captioning.exs challenges on the visioassistance.net realm.
-- The scenario scripts are %config(noreplace): an edited script survives the
-  upgrade, the packaged one lands next to it as .rpmnew.
 
 * Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-5
 - mcu: admit/3 takes the conference number as an option (did:), for a script
