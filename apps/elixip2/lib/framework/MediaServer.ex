@@ -248,6 +248,81 @@ defmodule MediaServer do
     end
   end
 
+  @typedoc """
+  What a SpeechProcessor does for ONE leg of a bridge (mediaserver
+  `docs/JSR-309-API.md` §6.13). A leg's own voice and its own typing:
+
+  * `transcribe`  — what this leg says goes as T.140 text to the other leg;
+  * `events`      — and as `{:speech_recognized, text, final}` events on this leg;
+  * `half_duplex` — recognition pauses while the synthesis speaks to this leg
+    (echo of a hands-free phone);
+  * `speak`       — what this leg types is spoken to the other leg, in `voice`
+    (a speech-server alias, `""` for the language's default);
+  * `announce_corrections` — a corrected phrase is said again after
+    "Correction :".
+  """
+  @type speech_leg :: %{
+          transcribe: boolean(),
+          events: boolean(),
+          half_duplex: boolean(),
+          speak: boolean(),
+          voice: String.t(),
+          announce_corrections: boolean()
+        }
+
+  @speech_leg_defaults %{
+    transcribe: false,
+    events: false,
+    half_duplex: false,
+    speak: false,
+    voice: "",
+    announce_corrections: true
+  }
+
+  @doc """
+  Read a `speech:` option, per leg: `[inbound: [transcribe: true], outbound: [speak: true]]`.
+  A leg it does not name gets every function off; `nil` means no SpeechProcessor.
+
+  Here for the reason `transcoding_policy/1` is: a typo must fail when the
+  scenario states it, not inside the media server mid-call.
+  """
+  @spec speech_options(keyword() | nil) ::
+          {:ok, nil | %{inbound: speech_leg(), outbound: speech_leg()}} | {:error, term()}
+  def speech_options(nil), do: {:ok, nil}
+
+  def speech_options(opts) when is_list(opts) do
+    Enum.reduce_while(
+      opts,
+      {:ok, %{inbound: @speech_leg_defaults, outbound: @speech_leg_defaults}},
+      fn
+        {leg, leg_opts}, {:ok, acc} when leg in [:inbound, :outbound] and is_list(leg_opts) ->
+          case speech_leg(leg, leg_opts) do
+            {:ok, l} -> {:cont, {:ok, Map.put(acc, leg, l)}}
+            err -> {:halt, err}
+          end
+
+        other, _acc ->
+          {:halt, {:error, {:bad_speech_option, other}}}
+      end
+    )
+  end
+
+  def speech_options(other), do: {:error, {:bad_speech_option, other}}
+
+  defp speech_leg(leg, opts) do
+    Enum.reduce_while(opts, {:ok, @speech_leg_defaults}, fn
+      {:voice, v}, {:ok, acc} when is_binary(v) ->
+        {:cont, {:ok, %{acc | voice: v}}}
+
+      {key, v}, {:ok, acc}
+      when is_map_key(@speech_leg_defaults, key) and key != :voice and is_boolean(v) ->
+        {:cont, {:ok, Map.put(acc, key, v)}}
+
+      other, _acc ->
+        {:halt, {:error, {:bad_speech_option, leg, other}}}
+    end)
+  end
+
   @type ms_event :: {:ms_event, resource_ref(), event()}
 
   @type conn_opts :: [
@@ -369,6 +444,14 @@ defmodule MediaServer do
         # Echo
         {:ms_event, echo, :echo_started}
 
+        # SpeechProcessor of a bridge (`speech:`), on the leg concerned
+        {:ms_event, conn, {:speech_recognized, text :: String.t(), final :: boolean()}}
+        {:ms_event, conn, {:speech_activity, speaking :: boolean()}}
+        {:ms_event, conn, {:speech_started, say_id :: integer()}}
+        {:ms_event, conn, {:speech_done, say_id :: integer(), interrupted :: boolean()}}
+        {:ms_event, conn, {:speech_service, :asr | :tts, :up | :down, reason :: String.t()}}
+        {:ms_event, conn, {:speech_error, reason :: term()}}
+
         # Server
         {:ms_event, server, :server_disconnected}
 
@@ -466,6 +549,14 @@ defmodule MediaServer do
     `MediaServer.transcoding_policy/1`): `[audio: :avoid, video: :avoid]`.
     `{:error, :no_common_codec}` is the expected refusal under `:forbid`.
 
+    `speech:` (see `MediaServer.speech_options/1`) puts a SpeechProcessor
+    between the legs for audio and text; video stays endpoint to endpoint. The
+    SpeechProcessor decodes all audio, so the caller sets `audio: :force`, and
+    asks `speech_available/1` before dialling. A SpeechProcessor the server
+    cannot create is a bridge failure, `{:speech_failed, media, reason}`. A
+    speech service that fails to start on it is reported as
+    `{:speech_error, reason}`, never as a bridge failure: the voices still cross.
+
     Idempotent: bridging an already-bridged pair changes nothing.
 
     `{:ok, %{inbound_answer: sdp}}` hands back leg `a`'s answer, **rebuilt** now
@@ -525,5 +616,56 @@ defmodule MediaServer do
                 {:ok, echo :: MediaServer.resource_ref()} | {:error, term()}
 
     @callback stop_echo(echo :: MediaServer.resource_ref()) :: :ok
+
+    # ── Speech (mediaserver docs/JSR-309-API.md §6.13) ──────────────────────
+
+    @doc """
+    A voice dialogue on ONE leg — the chatbot. What the caller says arrives as
+    `{:speech_recognized, text, final}` events; what `say/2` is given is spoken
+    to them. Opts: `voice:` (a speech-server alias, `""` by default),
+    `half_duplex:` (no recognition while speaking, `false`), `show_text:`
+    (the caller also reads what they said, as T.140, `false`).
+
+    The barge-in is the scenario's: `{:speech_activity, true}` arrives while a
+    `say/2` is running, and the scenario decides to `stop_speaking/1`. A leg
+    whose bridge already carries `speech:` is refused with `:speech_busy`.
+    """
+    @callback start_speech(conn :: MediaServer.conn_ref(), opts :: keyword()) ::
+                :ok | {:error, term()}
+
+    @callback stop_speech(conn :: MediaServer.conn_ref()) :: :ok | {:error, term()}
+
+    @doc """
+    Speak `text` to `conn`, after what is already being said. The id comes back
+    in `{:speech_started, say_id}` and `{:speech_done, say_id, interrupted}`.
+    The leg must be spoken to: `start_speech/2` on it, or a bridge whose other
+    leg has `speak: true`.
+    """
+    @callback say(conn :: MediaServer.conn_ref(), text :: String.t()) ::
+                {:ok, say_id :: integer()} | {:error, term()}
+
+    @doc "Silence `conn` now; each unfinished `say/2` ends with `interrupted = true`."
+    @callback stop_speaking(conn :: MediaServer.conn_ref()) :: :ok | {:error, term()}
+
+    @doc """
+    The voice aliases speech-server serves, `[%{alias: "fr-homme", lang: "fr"}]`.
+    Asked to speech-server each time, at the address the media server states
+    in its own description — never configured, never kept.
+    """
+    @callback speech_voices(server :: pid()) ::
+                {:ok, [%{alias: String.t(), lang: String.t()}]} | {:error, term()}
+
+    @doc """
+    Can this media server recognize and synthesize speech **now**? Asked each
+    time, before a call is offered speech: the server knows whether speech-server
+    answers and whether Mistral behind it does, and that changes without notice.
+
+    `{:error, {:speech_unavailable, reason}}` otherwise, `reason` a sentence
+    for the log — `"speech-server not configured (--speech-url)"`,
+    `"speech-server unreachable at http://…: Couldn't connect to server"`,
+    `"Mistral refuses the API key (HTTP 401)"`.
+    """
+    @callback speech_available(server :: pid()) ::
+                :ok | {:error, {:speech_unavailable, String.t()}}
   end
 end

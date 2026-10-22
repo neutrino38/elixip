@@ -182,6 +182,80 @@ defmodule MediaServer.Mendooze do
   @impl MediaServer.Behaviour
   def stop_echo(echo), do: Conn.stop_echo(echo)
 
+  # ── Speech ──────────────────────────────────────────────────────────────────
+
+  @impl MediaServer.Behaviour
+  def start_speech(conn, opts), do: Conn.start_speech(conn, opts)
+
+  @impl MediaServer.Behaviour
+  def stop_speech(conn), do: Conn.stop_speech(conn)
+
+  @impl MediaServer.Behaviour
+  def say(conn, text), do: Conn.say(conn, text)
+
+  @impl MediaServer.Behaviour
+  def stop_speaking(conn), do: Conn.stop_speaking(conn)
+
+  # speech-server's address is the media server's own statement
+  # (`speech.controlUrl` of /status/general): the media server is what talks to
+  # it, so a second address written on this side could only drift.
+  @impl MediaServer.Behaviour
+  def speech_voices(server) do
+    case server_status(server) do
+      %{"speech" => %{"configured" => true, "controlUrl" => url}} when is_binary(url) ->
+        fetch_voices(url)
+
+      %{"speech" => _} ->
+        {:error, :speech_not_configured}
+
+      _ ->
+        {:error, :unsupported}
+    end
+  end
+
+  # Read now, not from the description cached at connection: speech-server and
+  # Mistral come and go while the connection stays.
+  @impl MediaServer.Behaviour
+  def speech_available(server) do
+    case read_server_status(rpc_info(server).base_url, :health_check) do
+      %{"speech" => %{"available" => true}} ->
+        :ok
+
+      %{"speech" => %{"available" => false} = speech} ->
+        {:error, {:speech_unavailable, speech["unavailableReason"] || "no reason given"}}
+
+      # A mediaserver older than its availability probe: whether it is
+      # configured is all it can say.
+      %{"speech" => %{"configured" => true}} ->
+        :ok
+
+      %{"speech" => _} ->
+        {:error, {:speech_unavailable, "speech-server not configured (--speech-url)"}}
+
+      %{} ->
+        {:error, {:speech_unavailable, "the media server predates speech processing"}}
+
+      :unsupported ->
+        {:error, {:speech_unavailable, "the media server does not describe itself"}}
+    end
+  end
+
+  defp fetch_voices(control_url) do
+    url = String.to_charlist(String.trim_trailing(control_url, "/") <> "/control/voices")
+    timeout = status_timeout()
+    http_opts = [timeout: timeout, connect_timeout: timeout]
+
+    with {:ok, {{_, 200, _}, _headers, body}} <-
+           :httpc.request(:get, {url, []}, http_opts, body_format: :binary),
+         {:ok, %{"voices" => voices}} when is_list(voices) <- Jason.decode(body) do
+      {:ok, for(%{"alias" => a, "lang" => l} <- voices, do: %{alias: a, lang: l})}
+    else
+      {:ok, {{_, status, _}, _headers, _body}} -> {:error, {:speech_server_http, status}}
+      {:ok, other} -> {:error, {:speech_server_answer, other}}
+      {:error, reason} -> {:error, {:speech_server_unreachable, reason}}
+    end
+  end
+
   # ── Internal API for Conn processes ─────────────────────────────────────────
 
   @doc false

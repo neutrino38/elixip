@@ -302,4 +302,46 @@ defmodule SIP.Test.Media.Legs do
       assert Media.peer_connection(ctx) == nil
     end
   end
+
+  describe "speech on a leg" do
+    test "a chatbot speaks to the leg it was started on, and only once started", %{ctx: ctx} do
+      {ctx, _} = Media.get_sdp_offer(ctx, :no, :audio)
+      {ctx, _} = Media.get_sdp_offer(ctx, :no, :audio, leg: :outbound)
+      outbound = Media.peer_connection(ctx, :outbound)
+
+      assert {:error, :no_speech} = Media.speech(ctx, {:say, "Bonjour"}, leg: :outbound)
+
+      assert :ok = Media.speech(ctx, :start_speech, leg: :outbound, voice: "fr")
+      assert {:ok, say_id} = Media.speech(ctx, {:say, "Bonjour"}, leg: :outbound)
+      assert_receive {:ms_event, ^outbound, {:speech_done, ^say_id, false}}
+
+      # The inbound leg was never started.
+      assert {:error, :no_speech} = Media.speech(ctx, {:say, "Bonjour"})
+
+      assert :ok = Media.speech(ctx, :stop_speech, leg: :outbound)
+      assert {:error, :no_speech} = Media.speech(ctx, {:say, "Bonjour"}, leg: :outbound)
+    end
+
+    test "the voices are the media server's answer", %{ctx: ctx} do
+      assert {:ok, [%{alias: "fr-mock", lang: "fr"}]} = Media.speech_voices(ctx)
+    end
+
+    test "speech availability is the media server's answer, and never raises", %{ctx: ctx} do
+      assert :ok = Media.speech_available(ctx)
+
+      assert {:error, {:speech_unavailable, "no media server connected"}} =
+               Media.speech_available(%{ctx | mediaserverpid: nil})
+
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, _, _, _}
+
+      assert {:error, {:speech_unavailable, "the media server is gone: " <> _}} =
+               Media.speech_available(%{
+                 ctx
+                 | mediaserverpid: dead,
+                   mediaservermodule: MediaServer.Mendooze
+               })
+    end
+  end
 end

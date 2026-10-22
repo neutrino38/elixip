@@ -152,6 +152,11 @@ labelling is applied anyway, and costs nothing.
 survives the upgrade and the packaged one lands next to it — as `*.rpmnew` on the RPM
 (`%config(noreplace)`), as `*.dpkg-dist` on the deb (a `conffile`; an interactive
 `dpkg` may ask instead). Worth diffing either way, since new keys show up there first.
+
+On the RPM, the scenario scripts of `/usr/share/kelixip/` are kept the same way: a
+script you edited stays as you left it, and the packaged version lands next to it as
+`*.rpmnew`. That includes the fixes it carries, so diff it and merge by hand, then
+`kelictl reload-script <name>`. An unedited script is replaced as usual.
 The unit is restarted by the upgrade, which drains in-progress scenarios first.
 
 After an upgrade, check the `version:` line of `kelictl status`. It is the version of

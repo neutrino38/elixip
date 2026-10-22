@@ -3,7 +3,8 @@ defmodule SIP.Session.Media do
   Media helpers mixin for SIP sessions.
 
   This module provides the `media_connect`, `media_play`, `media_record`,
-  `media_start_echo`, `media_stop` and `media_cleanup_ressources` FSL macros
+  `media_start_echo`, `media_stop`, `media_cleanup_ressources` and speech
+  (`media_start_speech`, `media_say`, …) FSL macros
   (through `__using__/1`) plus the backing functions that drive the configured
   `MediaServer.Behaviour` adapter.
   """
@@ -66,6 +67,53 @@ defmodule SIP.Session.Media do
         quote do
           SIP.Scenario.Monitor.note_command(:media, "media_stop")
           var!(sip_ctx) = SIP.Session.Media.stop_media(var!(sip_ctx), unquote(opts))
+        end
+      end
+
+      # Speech (MediaServer.Behaviour, "Speech"). Each one evaluates to the
+      # adapter's answer — `media_say/2` to `{:ok, say_id}` — and leaves the
+      # context alone: a speech failure is the scenario's to judge, not a reason
+      # to stop the call.
+      defmacro media_start_speech(opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "media_start_speech")
+          SIP.Session.Media.speech(var!(sip_ctx), :start_speech, unquote(opts))
+        end
+      end
+
+      defmacro media_stop_speech(opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "media_stop_speech")
+          SIP.Session.Media.speech(var!(sip_ctx), :stop_speech, unquote(opts))
+        end
+      end
+
+      defmacro media_say(text, opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "media_say")
+          SIP.Session.Media.speech(var!(sip_ctx), {:say, unquote(text)}, unquote(opts))
+        end
+      end
+
+      defmacro media_stop_speaking(opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "media_stop_speaking")
+          SIP.Session.Media.speech(var!(sip_ctx), :stop_speaking, unquote(opts))
+        end
+      end
+
+      # The voices speech-server serves. A reader, so no monitor command.
+      defmacro media_voices() do
+        quote do
+          SIP.Session.Media.speech_voices(var!(sip_ctx))
+        end
+      end
+
+      # Whether speech can be offered now: `:ok` or `{:error, {:speech_unavailable,
+      # reason}}`. A reader, so no monitor command.
+      defmacro media_speech_available() do
+        quote do
+          SIP.Session.Media.speech_available(var!(sip_ctx))
         end
       end
 
@@ -698,6 +746,53 @@ defmodule SIP.Session.Media do
 
   defp clear_action(sip_ctx, leg, kind),
     do: SIP.Context.appdata_set(sip_ctx, action_key(leg, kind), nil)
+
+  @doc """
+  One speech request on `leg:` (`:inbound` by default): `:start_speech` (the
+  remaining opts go to the adapter), `:stop_speech`, `{:say, text}` or
+  `:stop_speaking`. Returns the adapter's answer.
+  """
+  @spec speech(%SIP.Context{}, atom() | {:say, String.t()}, keyword()) :: term()
+  def speech(sip_ctx = %SIP.Context{}, request, opts \\ []) do
+    cnx = peer_connection!(sip_ctx, leg_of(opts))
+    mod = sip_ctx.mediaservermodule
+
+    case request do
+      :start_speech -> apply(mod, :start_speech, [cnx, adapter_opts(opts)])
+      {:say, text} -> apply(mod, :say, [cnx, text])
+      other when other in [:stop_speech, :stop_speaking] -> apply(mod, other, [cnx])
+    end
+  end
+
+  @doc "The voice aliases speech-server serves, asked through the media server."
+  @spec speech_voices(%SIP.Context{}) :: {:ok, list()} | {:error, term()}
+  def speech_voices(sip_ctx = %SIP.Context{}) do
+    if not is_pid(sip_ctx.mediaserverpid) do
+      raise "No media server connected to the session context"
+    end
+
+    apply(sip_ctx.mediaservermodule, :speech_voices, [sip_ctx.mediaserverpid])
+  end
+
+  @doc """
+  Can the connected media server recognize and synthesize speech now? `:ok`, or
+  `{:error, {:speech_unavailable, reason}}` with a reason for the log. Never
+  raises: an absent or dead media server is one more reason speech is not
+  available.
+  """
+  @spec speech_available(%SIP.Context{}) :: :ok | {:error, {:speech_unavailable, String.t()}}
+  def speech_available(sip_ctx = %SIP.Context{}) do
+    if is_pid(sip_ctx.mediaserverpid) do
+      try do
+        apply(sip_ctx.mediaservermodule, :speech_available, [sip_ctx.mediaserverpid])
+      catch
+        :exit, reason ->
+          {:error, {:speech_unavailable, "the media server is gone: #{inspect(reason)}"}}
+      end
+    else
+      {:error, {:speech_unavailable, "no media server connected"}}
+    end
+  end
 
   def start_echo(sip_ctx = %SIP.Context{}, opts \\ []) do
     leg = leg_of(opts)

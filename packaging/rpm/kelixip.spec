@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.7.1
+Version:        1.8.0
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -319,7 +319,7 @@ fi
 # The core owns script_dir itself, so mod-mcu can drop its scripts in without
 # either package claiming the directory twice.
 %dir %{_datadir}/%{name}
-%{_datadir}/%{name}/*.exs
+%config(noreplace) %{_datadir}/%{name}/*.exs
 %exclude %{_datadir}/%{name}/mcu*.exs
 %exclude %{_datadir}/%{name}/presence-*.exs
 %exclude %{_datadir}/%{name}/registrar-presence.exs
@@ -357,7 +357,7 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Mcu.*.beam
 # The reference conference scripts. They call the module's verbs and nothing else
 # provides them, so a host that has them can run them.
-%{_datadir}/%{name}/mcu*.exs
+%config(noreplace) %{_datadir}/%{name}/mcu*.exs
 
 %files mod-presence
 %doc doc/modules/presence.md
@@ -365,8 +365,8 @@ fi
 # The reference scripts: one per method, plus the list server of RFC 4662 and
 # the registrar that reports registrations as presence. They call this module's
 # verbs and nothing else provides them.
-%{_datadir}/%{name}/presence-*.exs
-%{_datadir}/%{name}/registrar-presence.exs
+%config(noreplace) %{_datadir}/%{name}/presence-*.exs
+%config(noreplace) %{_datadir}/%{name}/registrar-presence.exs
 
 %files mod-mcu_presence
 %doc doc/modules/mcu_presence.md
@@ -382,7 +382,7 @@ fi
 %{_datadir}/%{name}/sql/silo
 # The reference chat scripts: the relay stores what nobody took, the registrar
 # variant delivers it. Both call this module's verbs.
-%{_datadir}/%{name}/*-chat.exs
+%config(noreplace) %{_datadir}/%{name}/*-chat.exs
 
 %files mod-conversation
 %doc doc/modules/conversation.md
@@ -394,35 +394,38 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
-* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.1-1
-- 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
-  kelixip-mod-sip_servers subpackage (trunks, proxies and application servers,
-  OPTIONS liveness, tertiary_uri, source_networks, use_fqdn_contact,
-  publish_contact_host, ext_domain), the client certificate of config.toml
-  [tls], the registration binding's User-Agent, Call-ID and CSeq, the PUBLISH
-  received_time, trust_asserted_identity/1 and the SHA-256 digest spelling.
-- And everything delivered in 1.6.5-1 to 1.6.5-5: a P-Asserted-Identity
-  holding two bracketed values on one line is refused instead of raising
-  (Teams Direct Routing), the 2xx names the remote tag of an outbound dialog,
-  a conference places calls (mcu dial_out/4, sip_servers dial_target/3),
-  admit/3 takes the conference number (did:), a script starts on demand
-  (POST /scripts/<name>/run, kelictl run), a trunk's keepalive OPTIONS comes
-  from its account with a user part in its Contact, no module sends outbound
-  SIP before the listeners are bound, and compile_and_restart_all keeps the
-  installed distribution cookie.
-- User-Agent is now Kelixip/1.7.1.
+* Wed Oct 21 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.0-2
+- A call that asks for speech is refused with 503 Speech Processing
+  Unavailable when the media server cannot serve it: speech-server not
+  configured, not running, or Mistral not answering. Nothing reaches the
+  trunk, and the reason is in the log. Speech lost during a call keeps the
+  call, and the log says when it goes and when it comes back.
+- A SpeechProcessor that cannot be created on the answer gives the caller a
+  503 at once, instead of a 488 after 32 s waiting for an ACK.
+- speech_bot.exs answers 503 without a media server instead of nothing.
+- The availability of speech needs mediaserver 1.19.0; an older one is
+  only asked whether it is configured.
+- call-captioning.exs challenges on the visioassistance.net realm.
+- The scenario scripts are %config(noreplace): an edited script survives the
+  upgrade, the packaged one lands next to it as .rpmnew.
 
-* Wed Oct 07 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.0-1
-- Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
-  Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
-  store-and-forward intact.
-- A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
-  a 415 without deflate in Accept-Encoding gets the page again in clear.
-- The page relay keeps the sender's multipart Content-Type and relays a bare
-  multipart byte for byte.
-- Multipart parts keep their trailing whitespace; a blank line before a
-  part's Content-* headers is tolerated.
-- User-Agent is now Kelixip/1.7.0.
+* Wed Oct 21 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.0-1
+- A SpeechProcessor between the legs of a call (`speech:` in the media tuple):
+  what one leg says is written to the other as T.140, what it types is spoken
+  to the other. Audio and text go through it, video stays direct. Text goes
+  through it on whichever leg carries it, so a callee without text still has
+  its voice captioned.
+- A voice dialogue with a caller: start_speech, say, stop_speaking and
+  stop_speech, with the voices read from speech-server.
+- Reference script call-captioning.exs: a challenged call relayed through the
+  sip-trunk-prod trunk with audio and text only, AMR-WB then PCMA, the callee's
+  voice captioned and the caller's typing spoken; 488 when the caller offers
+  no text.
+- AMR-WB joins the codec vocabulary.
+- A conference that places a call without codec_order offers audio as OPUS,
+  AMR-WB, SPEEX, G722, PCMA, PCMU, instead of in alphabetical order.
+- The SpeechProcessor and AMR-WB on the wire need mediaserver 1.19.0.
+- User-Agent is now Kelixip/1.8.0.
 
 * Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-5
 - mcu: admit/3 takes the conference number as an option (did:), for a script
@@ -457,6 +460,24 @@ fi
   user-less one).
 - kelixip: no module sends outbound SIP before the listeners are bound.
 - compile_and_restart_all keeps the installed distribution cookie.
+
+* Sun Oct 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.1-1
+- 1.7.0 together with everything delivered in 1.6.4-2 to 1.6.4-8: the
+  kelixip-mod-sip_servers subpackage (trunks, proxies and application servers,
+  OPTIONS liveness, tertiary_uri, source_networks, use_fqdn_contact,
+  publish_contact_host, ext_domain), the client certificate of config.toml
+  [tls], the registration binding's User-Agent, Call-ID and CSeq, the PUBLISH
+  received_time, trust_asserted_identity/1 and the SHA-256 digest spelling.
+- And everything delivered in 1.6.5-1 to 1.6.5-5: a P-Asserted-Identity
+  holding two bracketed values on one line is refused instead of raising
+  (Teams Direct Routing), the 2xx names the remote tag of an outbound dialog,
+  a conference places calls (mcu dial_out/4, sip_servers dial_target/3),
+  admit/3 takes the conference number (did:), a script starts on demand
+  (POST /scripts/<name>/run, kelictl run), a trunk's keepalive OPTIONS comes
+  from its account with a user part in its Contact, no module sends outbound
+  SIP before the listeners are bound, and compile_and_restart_all keeps the
+  installed distribution cookie.
+- User-Agent is now Kelixip/1.7.1.
 
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-8
 - sip_servers: with an ext_domain, the keepalive OPTIONS asks for
@@ -532,6 +553,18 @@ fi
   colon without a space after it (RFC 3261 section 7.3).
 - The reference media call script carries text too (T.140 data channel).
 - User-Agent is now Kelixip/1.6.4.
+
+* Wed Oct 07 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.7.0-1
+- Chat attachments the way Linphone sends them (RCS fthttp over HTTP): the
+  Silo stores a multipart MESSAGE whole, so a photo and its caption survive a
+  store-and-forward intact.
+- A MESSAGE that would pass 1300 octets on UDP leaves with its body deflated;
+  a 415 without deflate in Accept-Encoding gets the page again in clear.
+- The page relay keeps the sender's multipart Content-Type and relays a bare
+  multipart byte for byte.
+- Multipart parts keep their trailing whitespace; a blank line before a
+  part's Content-* headers is tolerated.
+- User-Agent is now Kelixip/1.7.0.
 
 * Tue Oct 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-2
 - RFC 4028 session timers, one per call leg. A long call relayed between two

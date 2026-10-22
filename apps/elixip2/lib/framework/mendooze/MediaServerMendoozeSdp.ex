@@ -47,7 +47,8 @@ defmodule MediaServer.Mendooze.Sdp do
     # 8000, 16000 and 32000 Hz, and the server factory carries only the 16 kHz
     # variant (SPEEX16 = 117). The clock in this table is therefore part of the
     # codec's identity, not a display default — codec_name_for_pt/3 matches it.
-    "SPEEX" => {117, 117, 16_000, 1}
+    "SPEEX" => {117, 117, 16_000, 1},
+    "AMR-WB" => {120, 120, 16_000, 1}
   }
 
   @video_codecs %{

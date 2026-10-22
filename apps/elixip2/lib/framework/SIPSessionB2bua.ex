@@ -214,6 +214,8 @@ defmodule SIP.B2bua.MediaPlan do
   """
   defstruct opts: [],
             policy: %{},
+            # `MediaServer.speech_options/1`, nil without `speech:`.
+            speech: nil,
             inbound_answer: nil,
             outbound_offer: nil,
             bridged: false,
@@ -574,6 +576,28 @@ defmodule SIP.Session.B2bua do
       end
 
       @doc """
+      Why speech processing failed this call — a sentence for the log — or nil.
+      Asked before `b2bua_media_unavailable?/0`: a call that asked for speech
+      and cannot have it is answered `503 Speech Processing Unavailable`.
+      """
+      defmacro b2bua_speech_unavailable() do
+        quote do
+          SIP.Session.B2bua.speech_unavailable(var!(sip_ctx))
+        end
+      end
+
+      @doc """
+      After `b2bua_forward_reply/1` of a 2xx: true when its media could not be
+      bridged, so that it went out as a refusal (or to the next target) and no
+      ACK will follow.
+      """
+      defmacro b2bua_answer_unbridgeable?() do
+        quote do
+          SIP.Session.B2bua.answer_unbridgeable?(var!(sip_ctx))
+        end
+      end
+
+      @doc """
       What a re-INVITE or an UPDATE just received asks for, compared with the
       last description the same leg gave us: `:hold`, `:resume`,
       `:media_change`, `:address_change`, `:no_sdp`, `:no_change` or `:unknown`
@@ -871,6 +895,40 @@ defmodule SIP.Session.B2bua do
     no_media_plane?(sip_ctx.lasterr) or no_media_plane?(media_error(sip_ctx))
   end
 
+  @doc """
+  Why speech processing failed this call, as a sentence for the log, or nil.
+  Backs `b2bua_speech_unavailable/0`.
+
+  Two moments: before dialling, when the media server says speech is
+  unavailable (`lasterr`), and when the callee answered and the SpeechProcessor
+  could not be set up (`b2bua_media_error`).
+  """
+  @spec speech_unavailable(%SIP.Context{}) :: String.t() | nil
+  def speech_unavailable(sip_ctx = %SIP.Context{}) do
+    speech_reason(sip_ctx.lasterr) || speech_reason(media_error(sip_ctx))
+  end
+
+  defp speech_reason({:b2bua, :media_setup_failed, reason}), do: speech_reason(reason)
+  defp speech_reason({:speech_unavailable, reason}) when is_binary(reason), do: reason
+
+  defp speech_reason({:speech_failed, media, reason}),
+    do: "the media server could not set up speech processing on #{media}: #{inspect(reason)}"
+
+  defp speech_reason(:speech_busy),
+    do: "the media server already runs speech processing on this call"
+
+  defp speech_reason(_other), do: nil
+
+  @doc """
+  Did the callee's 2xx just relayed turn into a failed attempt, because its
+  media could not be bridged? Then the caller got a refusal, or the hunt went
+  on, and no ACK is coming. Backs `b2bua_answer_unbridgeable?/0`.
+  """
+  @spec answer_unbridgeable?(%SIP.Context{}) :: boolean()
+  def answer_unbridgeable?(sip_ctx = %SIP.Context{}) do
+    match?(%MediaPlan{bridged: false, error: error} when error != nil, media_plan(sip_ctx))
+  end
+
   defp no_media_plane?({:b2bua, :media_setup_failed, reason}), do: no_media_plane?(reason)
   defp no_media_plane?({:b2bua, :reoffer_answer_failed, reason}), do: no_media_plane?(reason)
   defp no_media_plane?({:b2bua, :reoffer_relay_failed, reason}), do: no_media_plane?(reason)
@@ -916,7 +974,10 @@ defmodule SIP.Session.B2bua do
     outbound_opts = profiled_outbound_opts(opts, rung) ++ target_profile_opts(peer)
 
     with {:ok, policy} <- MediaServer.transcoding_policy(Keyword.get(opts, :transcode, [])),
+         {:ok, speech} <- MediaServer.speech_options(Keyword.get(opts, :speech)),
+         {:ok, policy} <- speech_policy(policy, speech),
          :ok <- media_plane(sip_ctx),
+         :ok <- speech_ready(sip_ctx, speech),
          {:ok, offer_a} <- caller_offer(req),
          # The policy travels with the connection options, not only with
          # `bridge/3`: our OFFER to the callee is shaped by it too — under
@@ -930,6 +991,7 @@ defmodule SIP.Session.B2bua do
       plan = %MediaPlan{
         opts: opts,
         policy: policy,
+        speech: speech,
         inbound_answer: answer_a,
         outbound_offer: offer_b
       }
@@ -944,6 +1006,36 @@ defmodule SIP.Session.B2bua do
 
       {:error, reason} ->
         {:error, fail(sip_ctx, {:b2bua, :media_setup_failed, reason})}
+    end
+  end
+
+  # A SpeechProcessor decodes all the audio it carries, so each leg keeps the
+  # head of its own list — `:force`, which also leaves the answers unshaped.
+  # `:forbid` says the audio must never be decoded: the two cannot both hold.
+  defp speech_policy(policy, nil), do: {:ok, policy}
+
+  defp speech_policy(%{audio: :forbid}, _speech),
+    do: {:error, {:speech_needs_audio_transcoding, :forbid}}
+
+  defp speech_policy(policy, _speech), do: {:ok, %{policy | audio: :force}}
+
+  # Asked before anything is dialled: a call that asks for speech is a call
+  # whose purpose is speech, and the far end must not ring for one that cannot
+  # have it.
+  defp speech_ready(_sip_ctx, nil), do: :ok
+
+  defp speech_ready(sip_ctx, _speech) do
+    case Media.speech_available(sip_ctx) do
+      :ok ->
+        :ok
+
+      {:error, {:speech_unavailable, reason}} = error ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "b2bua: speech processing unavailable (#{reason}); the call is not forwarded"
+        )
+
+        error
     end
   end
 
@@ -2570,7 +2662,7 @@ defmodule SIP.Session.B2bua do
     if is_nil(pc_in) or is_nil(pc_out) do
       {sip_ctx, {:error, :media_legs_incomplete}}
     else
-      opts = Keyword.merge(Map.to_list(plan.policy), overrides)
+      opts = Keyword.merge(bridge_opts(plan), overrides)
 
       case protected_bridge(sip_ctx, pc_in, pc_out, opts) do
         :ok ->
@@ -2619,7 +2711,7 @@ defmodule SIP.Session.B2bua do
     if is_nil(plan) or is_nil(pc_in) or is_nil(pc_out) do
       {sip_ctx, held}
     else
-      case protected_bridge(sip_ctx, pc_in, pc_out, Map.to_list(plan.policy)) do
+      case protected_bridge(sip_ctx, pc_in, pc_out, bridge_opts(plan)) do
         {:ok, %{answers: answers}} ->
           {sip_ctx, Map.get(answers, answered_leg, held)}
 
@@ -2641,6 +2733,11 @@ defmodule SIP.Session.B2bua do
       end
     end
   end
+
+  defp bridge_opts(%MediaPlan{policy: policy, speech: nil}), do: Map.to_list(policy)
+
+  defp bridge_opts(%MediaPlan{policy: policy, speech: speech}),
+    do: [{:speech, speech} | Map.to_list(policy)]
 
   defp protected_bridge(sip_ctx, pc_in, pc_out, opts) do
     apply(sip_ctx.mediaservermodule, :bridge, [pc_in, pc_out, opts])
@@ -2687,7 +2784,7 @@ defmodule SIP.Session.B2bua do
           sip_ctx
       end
 
-    {sip_ctx, media_failed_response(resp)}
+    {sip_ctx, media_failed_response(resp, reason)}
   end
 
   defp end_unbridgeable_leg(sip_ctx, tid) do
@@ -2706,8 +2803,15 @@ defmodule SIP.Session.B2bua do
     end
   end
 
-  defp media_failed_response(resp) do
-    %{resp | response: 488, reason: "Not Acceptable Here"}
+  # A SpeechProcessor that cannot be set up is ours, not the callee's offer: a
+  # 503, which no profile ladder takes for a codec problem.
+  defp media_failed_response(resp, reason) do
+    {code, phrase} =
+      if speech_reason(reason),
+        do: {503, "Speech Processing Unavailable"},
+        else: {488, "Not Acceptable Here"}
+
+    %{resp | response: code, reason: phrase}
     |> SIP.Msg.Ops.update_sip_msg({:body, []})
   end
 
