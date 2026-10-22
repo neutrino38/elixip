@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.8.0
-Release:        2%{?dist}
+Version:        1.8.1
+Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,10 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Thu Oct 22 2026 Emmanuel BUU <latribuu@proton.me> - 1.8.1-1
+- Released together with kelixip 1.8.1-1.
+- User-Agent is now Elixipp-1.8.1.
+
 * Wed Oct 21 2026 Emmanuel BUU <latribuu@proton.me> - 1.8.0-2
 - media_speech_available(): whether the media server can serve speech now.
   A B2BUA call that asks for speech is refused with 503 Speech Processing

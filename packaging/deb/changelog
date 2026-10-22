@@ -1,3 +1,13 @@
+kelixip (1.8.1-1) stable; urgency=low
+
+  * sip_servers server.show and the push give, per URI, its resolved
+    addresses: the transport and address a request is recognised by, and
+    whether another server of the domain shares it. A change of resolution
+    is pushed.
+  * User-Agent is now Kelixip/1.8.1.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Thu, 22 Oct 2026 14:53:30 +0000
+
 kelixip (1.8.0-2) stable; urgency=low
 
   * A call that asks for speech is refused with 503 Speech Processing
