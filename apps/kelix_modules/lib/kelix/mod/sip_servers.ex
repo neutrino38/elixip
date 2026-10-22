@@ -37,8 +37,8 @@ defmodule Kelix.Mod.SipServers do
   `{:kelix_sip_servers, domain, {:upsert, row}}`,
   `{:kelix_sip_servers, domain, {:remove, slug}}` and, when one is raised,
   `{:kelix_sip_servers, domain, {:alarm, alarm}}`. A row is whole — definition,
-  `reachability`, `registration`, `aor_states`, `metrics`, active `alarms` — never
-  a diff.
+  `uris` with each one's `state` and resolved `addresses`, `reachability`,
+  `registration`, `aor_states`, `metrics`, active `alarms` — never a diff.
   """
   use GenServer
   @behaviour Kelix.Module
@@ -163,7 +163,7 @@ defmodule Kelix.Mod.SipServers do
                initiate_connection use_fqdn_contact ha_mode ext_domain ext_domain_aliases probe_remote_aors
                probe_interval aors register register_expires register_retry auth_username auth_realm
                auth registration aor_states metrics alarms),
-          nested: %{"uris" => %{columns: ~w(role uri state)}},
+          nested: %{"uris" => %{columns: ~w(role uri state addresses)}},
           hide: ~w(primary_uri backup_uri tertiary_uri reachability)
         },
         help: "Show one SIP server (never its credentials)"
@@ -504,7 +504,13 @@ defmodule Kelix.Mod.SipServers do
   @impl GenServer
   def handle_info({:resolved, key, gen, result}, state) do
     if Map.get(state.gen, key) == gen and Map.has_key?(state.servers, key) do
-      {:noreply, state |> apply_resolution(key, gen, result) |> rebuild_index()}
+      new = state |> apply_resolution(key, gen, result) |> rebuild_index()
+      server = Map.fetch!(new.servers, key)
+
+      if Map.get(new.resolved, key) != Map.get(state.resolved, key),
+        do: push(new, server.domain, {:upsert, row(new, server)})
+
+      {:noreply, new}
     else
       {:noreply, state}
     end
@@ -559,11 +565,19 @@ defmodule Kelix.Mod.SipServers do
 
     reachability = Map.get(status, :reachability, %{})
     public = Server.public(server)
+    targets = state.resolved |> Map.get(key(server), %{}) |> Map.get(:targets)
 
     public
     |> Map.put(
       :uris,
-      for(u <- public.uris, do: Map.put(u, :state, Map.get(reachability, u.uri, "unknown")))
+      for(
+        u <- public.uris,
+        do:
+          Map.merge(u, %{
+            state: Map.get(reachability, u.uri, "unknown"),
+            addresses: matched_addresses(state, server, targets, u.uri)
+          })
+      )
     )
     |> Map.merge(%{
       reachability: reachability,
@@ -572,6 +586,21 @@ defmodule Kelix.Mod.SipServers do
       metrics: Map.get(status, :metrics),
       alarms: Map.get(status, :alarms, []) ++ shared_address_alarms(state, server)
     })
+  end
+
+  # What matches_server/2 recognises a request of this URI by — transport and
+  # address, never the port — or nil before the first resolution. A `shared`
+  # address is one another server has too: the index answers neither for it.
+  defp matched_addresses(_state, _server, nil, _uri), do: nil
+
+  defp matched_addresses(state, %Server{domain: domain}, targets, uri) do
+    for {transport, ip, _port} <- Map.get(targets, uri, []), uniq: true do
+      %{
+        transport: to_string(transport),
+        address: to_string(:inet.ntoa(ip)),
+        shared: Enum.any?(state.conflicts, &match?({^domain, ^ip, _}, &1))
+      }
+    end
   end
 
   # A list entry: the definition, plus what a glance at the list answers — whether

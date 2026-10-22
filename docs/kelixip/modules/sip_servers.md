@@ -260,7 +260,7 @@ send_INVITE(target, :mediaserver, media: :audio, srtp: :sdes, timeout: 90)
 |---|---|---|
 | `kelictl sip_servers server.create …` | `POST /modules/sip_servers/servers` | Declares a server (`201`). `409` when its name, host, address or remote domain is taken; `400` for a domain the node does not serve |
 | `kelictl sip_servers server.list [domain]` | `GET /modules/sip_servers/servers` | The servers, optionally of one domain. Each carries `reachable` (no URI is known `down`; `unknown` counts as reachable) and `additional_uris` (a backup or tertiary URI exists). kelictl shows the primary URI, cut at 48 characters, and the two flags as `Y`/`N` |
-| `kelictl sip_servers server.show <server>` | `GET /modules/sip_servers/servers/<server>` | One server: its fields (never the password; `auth` says `set` or `none`), `uris`, `reachability`, `registration`, `aor_states`, `metrics`, `alarms`. kelictl lays the URIs out as a table, role, URI and state |
+| `kelictl sip_servers server.show <server>` | `GET /modules/sip_servers/servers/<server>` | One server: its fields (never the password; `auth` says `set` or `none`), `uris`, `reachability`, `registration`, `aor_states`, `metrics`, `alarms`. kelictl lays the URIs out as a table, role, URI, state and addresses |
 | `kelictl sip_servers server.update <server> …` | `PUT` or `PATCH /modules/sip_servers/servers/<server>` | Changes the fields given |
 | `kelictl sip_servers server.delete <server>` | `DELETE /modules/sip_servers/servers/<server>` | Deletes it; a registered trunk is un-registered |
 | `kelictl sip_servers aor.add <server> <aor>` | `POST /modules/sip_servers/servers/<server>/aors` | Attaches a remote AOR (`user@domain`) to a proxy |
@@ -271,7 +271,8 @@ In `server.show`:
 
 | Key | Content |
 |---|---|
-| `uris` | The URIs in the order they are tried, each with its `role` (`primary`, `backup`, `tertiary`), `uri` and `state` |
+| `uris` | The URIs in the order they are tried, each with its `role` (`primary`, `backup`, `tertiary`), `uri`, `state` and `addresses` |
+| `uris[].addresses` | What the URI resolved to, and what a request from it is recognised by: a list of `transport` (upper case: `UDP`, `TCP`, `TLS`…), `address` (IPv4 or IPv6, without port) and `shared` (another server of the domain resolved to it too, so a request from it is recognised as neither). `null` before the first resolution |
 | `reachability` | Each URI and its state: `up`, `down`, `unknown` |
 | `registration` | A registering trunk's `state` (`unregistered`, `registering`, `registered`, `failed`) and last `error`; `null` otherwise |
 | `aor_states` | A proxy's remote AORs and their probed state |
@@ -290,7 +291,7 @@ sends `pid`:
 
 | Message | When |
 |---|---|
-| `{:kelix_sip_servers, domain, {:upsert, row}}` | a server is created or changed, or its state, counters or alarms change. The whole row |
+| `{:kelix_sip_servers, domain, {:upsert, row}}` | a server is created or changed, its URIs resolve to other addresses, or its state, counters or alarms change. The whole row |
 | `{:kelix_sip_servers, domain, {:remove, slug}}` | a server is deleted |
 | `{:kelix_sip_servers, domain, {:alarm, alarm}}` | an alarm is raised |
 
