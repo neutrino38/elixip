@@ -53,6 +53,14 @@ test:
   script:
     - mix test --exclude live --exclude flaky --max-failures 1 --raise
 
+# Fails on a retired package or a security advisory against a locked dependency,
+# dev-only tooling included: the SBoM published with the packages lists it too.
+audit:
+  stage: test
+  script:
+    - mix deps.get
+    - mix hex.audit
+
 package:
   stage: package
   script:
