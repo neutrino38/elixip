@@ -1,3 +1,14 @@
+kelixip (1.8.2-1) stable; urgency=low
+
+  * sip_servers: a call forwarded to a sip-trunk goes out with the trunk
+    account in the From and the trunk's domain (ext_domain, else the trunk
+    host) in the To, as the R-URI already was. A sip-proxy gets its
+    ext_domain in the To. Both were left as the caller wrote them on real
+    traffic.
+  * User-Agent is now Kelixip/1.8.2.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 24 Oct 2026 17:38:55 +0000
+
 kelixip (1.8.1-1) stable; urgency=low
 
   * sip_servers server.show and the push give, per URI, its resolved

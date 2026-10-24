@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.8.1
+Version:        1.8.2
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
@@ -394,6 +394,14 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Sat Oct 24 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.2-1
+- sip_servers: a call forwarded to a sip-trunk goes out with the trunk
+  account in the From and the trunk's domain (ext_domain, else the trunk
+  host) in the To, as the R-URI already was. A sip-proxy gets its
+  ext_domain in the To. Both were left as the caller wrote them on real
+  traffic.
+- User-Agent is now Kelixip/1.8.2.
+
 * Sat Oct 24 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.1-1
 - sip_servers server.show and the push give, per URI, its resolved addresses:
   the transport and address a request is recognised by, and whether another
