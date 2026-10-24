@@ -48,6 +48,7 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %changelog
 * Sat Oct 24 2026 Emmanuel BUU <latribuu@proton.me> - 1.8.1-1
 - Released together with kelixip 1.8.1-1.
+- certifi 2.18.0 (root CA bundle) and req 0.7.5.
 - The package's changelog is whole again: rpm stopped reading it at an entry
   out of date order, so the 1.8.0 packages carried it down to 1.7.0 only.
 - User-Agent is now Elixipp-1.8.1.

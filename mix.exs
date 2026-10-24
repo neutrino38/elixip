@@ -32,7 +32,10 @@ defmodule Elixip.Umbrella.MixProject do
       {:sbom, "~> 0.10.0", only: :dev, runtime: false},
       # sbom 0.10 pins protobuf ~> 0.16, which carries CVE-2026-104635; sbom 0.11
       # fixes the pin but needs OTP 27 through purl 0.5. Forced until the OTP bump.
-      {:protobuf, "~> 0.17.1", only: :dev, runtime: false, override: true}
+      {:protobuf, "~> 0.17.1", only: :dev, runtime: false, override: true},
+      # sbom 0.10 also pins hex_core ~> 0.15.0, which carries CVE-2026-103502,
+      # CVE-2026-105274 and CVE-2026-96596. Forced until the same bump.
+      {:hex_core, "~> 0.21.1", only: :dev, runtime: false, override: true}
     ]
   end
 end

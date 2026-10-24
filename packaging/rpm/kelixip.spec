@@ -394,10 +394,14 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
-* Thu Oct 22 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.1-1
+* Sat Oct 24 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.1-1
 - sip_servers server.show and the push give, per URI, its resolved addresses:
   the transport and address a request is recognised by, and whether another
   server of the domain shares it. A change of resolution is pushed.
+- Security updates: bandit 1.13.1 (CVE-2026-105659, CVE-2026-105660) and
+  plug_crypto 2.2.1 (CVE-2026-105963).
+- certifi 2.18.0 (root CA bundle), req 0.7.5, myxql 0.9.0 (auth_db's
+  MySQL / MariaDB driver).
 - User-Agent is now Kelixip/1.8.1.
 
 * Wed Oct 21 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.0-2
