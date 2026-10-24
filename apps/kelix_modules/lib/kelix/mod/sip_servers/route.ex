@@ -158,7 +158,7 @@ defmodule Kelix.Mod.SipServers.Route do
   # The display name of a From is the caller's claim about itself; on a trunk the
   # From is the account, and a name the operator did not give it is dropped.
   defp put_header(req, :from, user, domain) do
-    case Map.get(req, :from) do
+    case SIP.Msg.Ops.header_uri(req, :from) do
       %SIP.Uri{} = from ->
         Map.put(req, :from, %SIP.Uri{
           from
@@ -174,7 +174,7 @@ defmodule Kelix.Mod.SipServers.Route do
   end
 
   defp put_header(req, :to, user, domain) do
-    case Map.get(req, :to) do
+    case SIP.Msg.Ops.header_uri(req, :to) do
       %SIP.Uri{} = to ->
         Map.put(req, :to, %SIP.Uri{to | userpart: user, domain: domain, port: nil})
 
@@ -184,7 +184,7 @@ defmodule Kelix.Mod.SipServers.Route do
   end
 
   defp put_header_domain(req, header, domain) do
-    case Map.get(req, header) do
+    case SIP.Msg.Ops.header_uri(req, header) do
       %SIP.Uri{} = uri -> Map.put(req, header, %SIP.Uri{uri | domain: domain, port: nil})
       _ -> req
     end

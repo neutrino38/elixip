@@ -318,6 +318,8 @@ defmodule Kelix.CallCaptioningScriptTest do
     {instance, ref, req} = authenticated_call(module, dialog, "cc-ok", @audio_text)
 
     assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
+    assert SIP.Msg.Ops.header_aor(fwd, :from) == {"0123456789", "10.0.0.9"}
+    assert SIP.Msg.Ops.header_aor(fwd, :to) == {@dialled, "10.0.0.9"}
     offer = SIP.Msg.Ops.sdp_body(fwd)
     assert SIP.Msg.Ops.media_kinds(offer) == [:audio, :text]
     [audio_line] = Regex.run(~r/^m=audio .*$/m, offer)
