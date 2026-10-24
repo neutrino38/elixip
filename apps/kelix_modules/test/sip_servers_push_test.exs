@@ -144,6 +144,18 @@ defmodule Kelix.Mod.SipServersPushTest do
     refute_receive {:kelix_sip_servers, @domain, {:remove, "acd"}}, 300
   end
 
+  test "a resolution is pushed, with the addresses a request is recognised by" do
+    {:ok, _} = SipServers.subscribe_sip_servers(self(), @domain)
+
+    :ok =
+      create("res", "sip-appsrv", "sip:res.example.net", %{
+        "send_keepalive" => "false"
+      })
+
+    row = pushed!("res", &(hd(&1.uris).addresses != nil))
+    assert [%{transport: "UDP", address: "10.0.3." <> _, shared: false}] = hd(row.uris).addresses
+  end
+
   test "a URI coming up is pushed, with the OPTIONS response time" do
     {:ok, _} = SipServers.subscribe_sip_servers(self(), @domain)
     _tp = peer!("push1")
@@ -251,8 +263,18 @@ defmodule Kelix.Mod.SipServersPushTest do
     {:ok, shown} = SipServers.handle_control("server.show", %{"domain" => @domain, "slug" => "a"})
     assert [%{kind: "shared_address", servers: ["a", "b"]}] = shown.alarms
 
+    assert [%{addresses: [%{transport: "UDP", address: "10.0.3.254", shared: true}]}] =
+             shown.uris
+
     {:ok, _} = delete("b")
-    assert pushed!("a", &(&1.alarms == []))
+
+    assert pushed!(
+             "a",
+             &(&1.alarms == [] and
+                 hd(&1.uris).addresses == [
+                   %{transport: "UDP", address: "10.0.3.254", shared: false}
+                 ])
+           )
   end
 
   test "a subscriber that dies is forgotten" do

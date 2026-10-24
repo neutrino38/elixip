@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.8.0
-Release:        2%{?dist}
+Version:        1.8.1
+Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,13 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sat Oct 24 2026 Emmanuel BUU <latribuu@proton.me> - 1.8.1-1
+- Released together with kelixip 1.8.1-1.
+- certifi 2.18.0 (root CA bundle) and req 0.7.5.
+- The package's changelog is whole again: rpm stopped reading it at an entry
+  out of date order, so the 1.8.0 packages carried it down to 1.7.0 only.
+- User-Agent is now Elixipp-1.8.1.
+
 * Wed Oct 21 2026 Emmanuel BUU <latribuu@proton.me> - 1.8.0-2
 - media_speech_available(): whether the media server can serve speech now.
   A B2BUA call that asks for speech is refused with 503 Speech Processing
@@ -61,6 +68,10 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
   vocabulary. Needs mediaserver 1.19.0.
 - User-Agent is now Elixipp-1.8.0.
 
+* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-1
+- Released together with kelixip 1.6.5-1; the SIP stack it shares no longer
+  raises on a P-Asserted-Identity holding two bracketed values on one line.
+
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.1-1
 - Released together with kelixip 1.7.1-1: 1.7.0 with the SIP stack changes of
   1.6.4-2 to 1.6.4-8 (B2BUA trunk reachability and outbound digest, a host
@@ -69,17 +80,6 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
   bracketed values on one line no longer raises, the 2xx names the remote tag
   of an outbound dialog).
 - User-Agent is now Elixipp-1.7.1.
-
-* Wed Oct 07 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.0-1
-- Released together with kelixip 1.7.0-1.
-- File transfer verbs for scenarios (upload_file, download_file,
-  send_file_page, file_info) and the example pair uac_file_message.exs /
-  uas_file_message.exs.
-- User-Agent is now Elixipp-1.7.0.
-
-* Mon Oct 19 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.5-1
-- Released together with kelixip 1.6.5-1; the SIP stack it shares no longer
-  raises on a P-Asserted-Identity holding two bracketed values on one line.
 
 * Sun Oct 18 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.4-8
 - Released together with kelixip 1.6.4-8; nothing changes in the tool.
@@ -121,6 +121,13 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 - Elixip.Security.report/1: a no-op without a sink, so the tool reports
   nothing and needs nothing.
 - User-Agent is now Elixipp-1.6.4.
+
+* Wed Oct 07 2026 Emmanuel BUU <latribuu@proton.me> - 1.7.0-1
+- Released together with kelixip 1.7.0-1.
+- File transfer verbs for scenarios (upload_file, download_file,
+  send_file_page, file_info) and the example pair uac_file_message.exs /
+  uas_file_message.exs.
+- User-Agent is now Elixipp-1.7.0.
 
 * Tue Oct 06 2026 Emmanuel BUU <latribuu@proton.me> - 1.6.3-2
 - Released together with kelixip 1.6.3-2.

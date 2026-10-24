@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.8.0
+Version:        1.8.1
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        2%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -394,6 +394,16 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
 
 %changelog
+* Sat Oct 24 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.1-1
+- sip_servers server.show and the push give, per URI, its resolved addresses:
+  the transport and address a request is recognised by, and whether another
+  server of the domain shares it. A change of resolution is pushed.
+- Security updates: bandit 1.13.1 (CVE-2026-105659, CVE-2026-105660) and
+  plug_crypto 2.2.1 (CVE-2026-105963).
+- certifi 2.18.0 (root CA bundle), req 0.7.5, myxql 0.9.0 (auth_db's
+  MySQL / MariaDB driver).
+- User-Agent is now Kelixip/1.8.1.
+
 * Wed Oct 21 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.0-2
 - A call that asks for speech is refused with 503 Speech Processing
   Unavailable when the media server cannot serve it: speech-server not

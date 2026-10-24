@@ -400,15 +400,43 @@ defmodule Kelix.Mod.SipServersTest do
 
       assert out =~ ~r"""
              ^Uris:
-               role      uri                                                state
-               primary   sip:sip\.pstnhub\.microsoft\.com:5061;transport=tls   \w+
-               backup    sip:sip2\.pstnhub\.microsoft\.com:5061;transport=tls  \w+
-               tertiary  sip:sip3\.pstnhub\.microsoft\.com:5061;transport=tls  \w+
+               role      uri                                                state\s+addresses
+               primary   sip:sip\.pstnhub\.microsoft\.com:5061;transport=tls   \w+\s+.+
+               backup    sip:sip2\.pstnhub\.microsoft\.com:5061;transport=tls  \w+\s+.+
+               tertiary  sip:sip3\.pstnhub\.microsoft\.com:5061;transport=tls  \w+\s+.+
              """m
 
       assert out =~ ~r{^Source networks:\s+52\.112\.0\.0/14, 52\.120\.0\.0/14$}m
       refute out =~ "Primary uri:"
       refute out =~ "Reachability:"
+    end
+
+    test "server.show gives, per URI, the transport and address a request is recognised by" do
+      {:ok, _} =
+        create(%{
+          "slug" => "acd",
+          "type" => "sip-appsrv",
+          "primary_uri" => "sip:10.0.0.5:5070;transport=tcp",
+          "backup_uri" => "sip:[2001:db8::5]"
+        })
+
+      SIP.Test.Wait.until!(fn ->
+        Map.has_key?(:sys.get_state(SipServers).resolved, {@domain, "acd"})
+      end)
+
+      {0, out} =
+        Kelix.Control.CLI.run(
+          ["sip_servers", "server.show", "domain=#{@domain}", "slug=acd"],
+          node()
+        )
+
+      assert out =~ ~r/^\s+role\s+uri\s+state\s+addresses$/m
+
+      assert out =~
+               ~r/^\s+primary\s+sip:10\.0\.0\.5:5070;transport=tcp\s+\w+\s+\(address=10\.0\.0\.5 shared=false transport=TCP\)$/m
+
+      assert out =~
+               ~r/^\s+backup\s+sip:\[2001:db8::5\]\s+\w+\s+\(address=2001:db8::5 shared=false transport=UDP\)$/m
     end
   end
 

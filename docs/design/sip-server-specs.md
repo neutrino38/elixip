@@ -523,7 +523,9 @@ As implemented (L6a): each server's process publishes its status to the service
 second for the metrics alone; the service keeps the last one, so `server.show`,
 `aor.list` and the push read it without calling the process. A row adds to the
 definition `reachability`, `registration`, `aor_states` (`aor => state`), `metrics`
-and `alarms`. `metrics` is `calls_in`, `calls_out`, `answered`, `failures`
+and `alarms`, and to each of its `uris` its `state` and `addresses` (`transport`,
+`address`, `shared`; `nil` before the first resolution). A resolution that changes
+what a server's URIs resolved to pushes its row. `metrics` is `calls_in`, `calls_out`, `answered`, `failures`
 (`code => count`, `transport_error` included) and `options_rtt_ms` (`last`, `mean`),
 counted since the process started. An alarm is a map with `kind`
 (`realm_mismatch`: `expected`, `received`; `shared_address`: `address`, `servers`)
