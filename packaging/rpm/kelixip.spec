@@ -63,7 +63,8 @@ The core ships NO SIP function. The registrar, the authentication back-end, the
 conference mixer and the presence collection are loadable modules delivered as
 separate packages (kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu,
 kelixip-mod-presence, kelixip-mod-mcu_presence, kelixip-mod-dialog_state,
-kelixip-mod-silo, kelixip-mod-conversation, kelixip-mod-sip_servers) which
+kelixip-mod-silo, kelixip-mod-conversation, kelixip-mod-sip_servers,
+kelixip-mod-captioning) which
 drop their bytecode into the
 root-owned module directory; a deployment installs only what it uses.
 
@@ -179,6 +180,18 @@ one known to be down; a trunk registers its account and answers the operator's
 challenges; a proxy's remote AORs are probed and reported to presence. Servers
 are declared with kelictl, the REST API or kelescope, and kept in the module's
 file. Enable it with a [module.sip_servers] block in config.toml.
+
+%package mod-captioning
+Summary:        Correction service of a captioned call, for kelixip
+Requires:       %{name} = %{version}
+
+%description mod-captioning
+Answers the captioning INFO a client sends during a call placed by
+call-captioning.exs and, for the domains that have the service, hands it the
+URL of a correction stream on the speech-server, with a single-use token minted
+on the speech-server's control API. Renewals are bounded per call, and the token
+is masked in every log and trace. Enable it with a [module.captioning] block in
+config.toml.
 
 %prep
 %setup -q
@@ -392,6 +405,10 @@ fi
 %files mod-sip_servers
 %doc doc/modules/sip_servers.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.SipServers*.beam
+
+%files mod-captioning
+%doc doc/modules/captioning.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.Captioning*.beam
 
 %changelog
 * Sat Oct 24 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.2-1

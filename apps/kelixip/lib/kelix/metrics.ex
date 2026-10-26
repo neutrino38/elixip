@@ -122,7 +122,29 @@ defmodule Kelix.Metrics do
         tags: [:mcu],
         description: "Media server serviceable (enabled + healthy) — 1/0"
       )
-    ] ++ mcu_metrics() ++ silo_metrics()
+    ] ++ mcu_metrics() ++ silo_metrics() ++ captioning_metrics()
+  end
+
+  # Call captioning (the `captioning` module), defined here for the reason the
+  # mcu's are: the correction tokens asked of the speech-server, by outcome, and
+  # how long the speech-server takes to give one — the delay a client waits for.
+  defp captioning_metrics() do
+    [
+      counter("kelix.captioning.token.count",
+        event_name: [:kelix, :captioning, :token],
+        measurement: :count,
+        tags: [:result],
+        description:
+          "Correction tokens by outcome (obtained / forbidden / busy / down / timeout / speech_<status>)"
+      ),
+      distribution("kelix.captioning.token_request.duration.seconds",
+        event_name: [:kelix, :captioning, :token_request],
+        measurement: :duration,
+        unit: {:native, :second},
+        reporter_options: [buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0]],
+        description: "Duration of a POST /control/token to the speech-server"
+      )
+    ]
   end
 
   # Store-and-forward (the `silo` module, chat-basic-plan C6), defined here for

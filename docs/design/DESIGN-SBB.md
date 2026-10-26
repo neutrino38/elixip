@@ -633,7 +633,7 @@ One block per side of that seam:
 | Block | Absorbs | Returns |
 |---|---|---|
 | `call(opts)` | `place_call`, `proceeding`, the provisionals, the serial hunt, `cancelling`, `wait_ack` | `:connected` `%{uri, code}` · `:rejected` `%{code, reason}` · `:cancelled` `%{}` · `:answered_after_cancel` `%{uri}` · `:timeout` `%{}` |
-| `bridge(opts)` | `connected`, `wait_far_bye_ok` | `:caller_hung_up` `%{reason}` · `:callee_hung_up` `%{reason}` · `:callee_left` `%{reason}` · `:interrupted` `%{message}` · `:max_duration` `%{}` · `:media_lost` `%{reason}` |
+| `bridge(opts)` | `connected`, `wait_far_bye_ok` | `:caller_hung_up` `%{reason}` · `:callee_hung_up` `%{reason}` · `:callee_left` `%{reason}` · `:interrupted` `%{message}` · `:max_duration` `%{}` · `:media_lost` `%{reason}` · `:request` `%{leg, method, req, transaction}` |
 
 Both under the return contract (`{namespace, outcome, data}`), so the
 table lists outcomes and the keys their map carries: `call()` speaks `:call`,
@@ -707,6 +707,16 @@ This is the same shape of window as the one that produced the cancel race
 — a scenario that stopped early, and what followed arriving with
 nobody listening. It is bounded here rather than unbounded, but it is the same
 family, and it deserves a test that sends a re-INVITE during an interruption.
+
+The same window serves a second purpose: a request the host answers itself. A
+host naming `{leg, method, content_type}` triples in `:intercept` gets the
+matching in-dialog requests back as `{:bridge, :request, %{leg, method, req,
+transaction}}`, unanswered and not relayed; it answers on the named leg
+(`b2bua_reply_on/5`) and resumes. Matching is the only thing the block does —
+what the request means is the host's — and only the methods of the default relay
+qualify: a re-INVITE, an UPDATE, an ACK or a BYE have rules here that a host
+must not be able to step around. The first user is the captioning INFO of
+`call-captioning.exs`, answered with a token for the correction service.
 
 ### 8.4 A reservation on the name
 

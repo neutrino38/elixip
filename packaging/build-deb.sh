@@ -281,6 +281,8 @@ build_module kelixip-mod-conversation 'Elixir.Kelix.Mod.Conversation*.beam' \
   "$DEBDIR/control-mod-conversation.in" 'conversation.md' '' conversation
 build_module kelixip-mod-sip-servers 'Elixir.Kelix.Mod.SipServers*.beam' \
   "$DEBDIR/control-mod-sip-servers.in" 'sip_servers.md'
+build_module kelixip-mod-captioning 'Elixir.Kelix.Mod.Captioning*.beam' \
+  "$DEBDIR/control-mod-captioning.in" 'captioning.md'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

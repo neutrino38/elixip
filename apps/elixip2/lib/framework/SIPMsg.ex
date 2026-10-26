@@ -1367,7 +1367,7 @@ defmodule SIPMsg do
     end
   end
 
-  def readable(msg) when is_map(msg), do: readable_clear(msg)
+  def readable(msg) when is_map(msg), do: readable_clear(redact_body(msg))
 
   defp readable_clear(msg) do
     case SIP.Msg.Ops.body_encoding(msg) do
@@ -1418,7 +1418,7 @@ defmodule SIPMsg do
           other
       end)
     else
-      msg
+      redact_body(msg)
     end
   end
 
@@ -1428,6 +1428,9 @@ defmodule SIPMsg do
   (`redacted/1`) is returned instead. Only a MESSAGE is parsed again, so the
   cost is paid by the one method that needs it — and only when the log line is
   actually written (callers pass it inside a `Logger.debug/1` function).
+
+  A message whose body has a registered redactor (`register_redactor/2`) is
+  parsed again too, and only when the text names that media type.
   """
   @spec loggable(binary()) :: binary()
   def loggable("MESSAGE " <> _ = wire) do
@@ -1439,7 +1442,88 @@ defmodule SIPMsg do
     end
   end
 
-  def loggable(wire) when is_binary(wire), do: wire
+  def loggable(wire) when is_binary(wire) do
+    case redactors() do
+      none when map_size(none) == 0 ->
+        wire
+
+      redactors ->
+        if :binary.match(String.downcase(wire), Map.keys(redactors)) == :nomatch do
+          wire
+        else
+          case parse(wire, fn _code, _errmsg, _lineno, _line -> :ok end) do
+            {:ok, msg} -> safe_serialize(redact_body(msg)) || placeholder(nil, byte_size(wire))
+            _ -> placeholder("an unparseable message", byte_size(wire))
+          end
+        end
+    end
+  end
+
+  # ── Body redactors ──────────────────────────────────────────────────────────
+  #
+  # A body that is not user content may still hold something no trace should
+  # show in clear: a bearer token handed to a client (the captioning INFO's
+  # answer carries the URL of a correction stream, token included). What it is,
+  # only the code that put it there knows, so that code registers how to hide
+  # it; WHERE it is hidden stays here — the journal, `kelictl debug` and the
+  # transport debug logs all read a message through `readable/1`,
+  # `redacted/1` or `loggable/1`, and nothing else has to remember.
+
+  @redactors_key {__MODULE__, :redactors}
+
+  @doc """
+  Have every trace of a body of media type `type` (`"application/captioning+xml"`)
+  show `fun.(body)` instead of the body. `type` is compared without parameters
+  and without case; registering a type again replaces its redactor.
+
+  Global to the node. `fun` must not raise: a redactor that does is answered
+  with a placeholder, never with the clear body.
+  """
+  @spec register_redactor(binary(), (binary() -> binary())) :: :ok
+  def register_redactor(type, fun) when is_binary(type) and is_function(fun, 1) do
+    :persistent_term.put(@redactors_key, Map.put(redactors(), media_type(type), fun))
+  end
+
+  @doc "Forget the redactor of `type` (`register_redactor/2`)."
+  @spec unregister_redactor(binary()) :: :ok
+  def unregister_redactor(type) when is_binary(type) do
+    case Map.delete(redactors(), media_type(type)) do
+      none when map_size(none) == 0 -> :persistent_term.erase(@redactors_key)
+      redactors -> :persistent_term.put(@redactors_key, redactors)
+    end
+
+    :ok
+  end
+
+  defp redactors(), do: :persistent_term.get(@redactors_key, %{})
+
+  defp media_type(type),
+    do: type |> String.split(";", parts: 2) |> hd() |> String.trim() |> String.downcase()
+
+  # The body as its registered redactor shows it; the message unchanged when its
+  # type has none. The part shape is kept, so the Content-Type stays readable.
+  defp redact_body(msg) do
+    with redactors when map_size(redactors) > 0 <- redactors(),
+         type when is_binary(type) <- SIP.Msg.Ops.body_content_type(msg),
+         fun when is_function(fun, 1) <- Map.get(redactors, type),
+         body when is_binary(body) <- SIP.Msg.Ops.body_string(msg) do
+      shown =
+        try do
+          fun.(body)
+        rescue
+          _ -> placeholder(type, byte_size(body))
+        catch
+          _, _ -> placeholder(type, byte_size(body))
+        end
+
+      case Map.get(msg, :body) do
+        [%{} = part | rest] -> Map.put(msg, :body, [%{part | data: shown} | rest])
+        _binary -> Map.put(msg, :body, shown)
+      end
+    else
+      _ -> msg
+    end
+  end
 
   defp redacted_body(msg) do
     octets = body_octets(Map.get(msg, :body))

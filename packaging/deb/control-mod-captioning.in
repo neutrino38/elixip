@@ -1,0 +1,20 @@
+Package: kelixip-mod-captioning
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@)
+Description: Correction service of a captioned call, for kelixip
+ Answers the captioning INFO a client sends during a call placed by
+ call-captioning.exs and, for the domains that have the service, hands it the
+ URL of a correction stream on the speech-server, with a single-use token
+ minted on the speech-server's control API. Renewals are bounded per call, and
+ the token is masked in every log and trace. Enable it with a
+ [module.captioning] block in config.toml.
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

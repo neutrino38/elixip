@@ -21,6 +21,13 @@
 # offer is AMR-WB, PCMA then PCMU and nothing else. Towards the caller, the same
 # three come first when it offered them; its other codecs stay, the
 # SpeechProcessor decodes whatever each leg carries.
+#
+# Once the call is up, the client sends an INFO of type
+# application/captioning+xml: it confirms the captions — already on — and may ask
+# for the correction of what the user types. That INFO is the caller's business
+# with us, never relayed to the trunk: the captioning module answers it, with the
+# URL of a correction stream when the caller's domain has the service. Without
+# the module the answer is the captions alone. No answer to it touches the call.
 defmodule Kelix.CallCaptioning do
   use SIP.Scenario
   use SBB.Call
@@ -32,6 +39,19 @@ defmodule Kelix.CallCaptioning do
 
   @trunk "sip-trunk-prod"
   @realm "visioassistance.net"
+
+  @captioning "application/captioning+xml"
+
+  # The answer of a node without the captioning module: captions, no correction.
+  @captions_only {200, "OK",
+                  body: [
+                    %{
+                      contenttype: @captioning,
+                      data:
+                        ~s(<?xml version="1.0" encoding="UTF-8"?>\n) <>
+                          ~s(<captioning><inbound><stt comp="false"/></inbound></captioning>\n)
+                    }
+                  ]}
 
   @media {:mediaserver,
           inbound: [
@@ -164,10 +184,19 @@ defmodule Kelix.CallCaptioning do
     end
   end
 
+  # Re-entered after every captioning INFO, hence `resume: true` from the start:
+  # the relay keeps what it holds, and on the first entry there is nothing to keep.
   state connected do
-    bridge(args: %{media: @media})
+    bridge(args: %{media: @media, intercept: [{:caller, :INFO, @captioning}]}, resume: true)
 
     on_events do
+      {:bridge, :request, %{leg: leg, req: req}} ->
+        {code, reason, fields} =
+          Kelix.ModuleRegistry.facade("captioning", :answer, [req, @realm], @captions_only)
+
+        b2bua_reply_on(leg, req, code, reason, fields)
+        goto(connected, "captioning INFO answered #{code}")
+
       {:bridge, :caller_hung_up, _} ->
         goto(releasing, "call ended: caller hung up")
 
@@ -191,11 +220,13 @@ defmodule Kelix.CallCaptioning do
   end
 
   state releasing do
+    Kelix.ModuleRegistry.facade("captioning", :release, [last_uas_req()], :ok)
     media_cleanup_ressources()
     scenario_success("call released")
   end
 
   on_shutdown do
+    Kelix.ModuleRegistry.facade("captioning", :release, [last_uas_req()], :ok)
     media_cleanup_ressources()
     scenario_aborted("B2BUA stopped gracefully")
   end
