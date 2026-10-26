@@ -9,7 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.8.1
+Version:        1.8.2
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
@@ -46,6 +46,12 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sat Oct 24 2026 Emmanuel BUU <latribuu@proton.me> - 1.8.2-1
+- Released together with kelixip 1.8.2-1.
+- SIP.Msg.Ops.header_uri/2: the From or the To of a message as a URI,
+  whether the parser left it as a string or not.
+- User-Agent is now Elixipp-1.8.2.
+
 * Sat Oct 24 2026 Emmanuel BUU <latribuu@proton.me> - 1.8.1-1
 - Released together with kelixip 1.8.1-1.
 - certifi 2.18.0 (root CA bundle) and req 0.7.5.

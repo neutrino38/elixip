@@ -271,6 +271,10 @@ defmodule Kelix.Mod.SipServersRoutingTest do
       assert newreq.ruri.domain == "partner.net"
       assert newreq.to.domain == "partner.net"
       assert newreq.from == req.from
+
+      raw = %{req | to: "<sip:bob@#{@domain}>"}
+      assert {newreq, %Peer{}} = SipServers.forward(@domain, raw, "pbx")
+      assert newreq.to.domain == "partner.net"
     end
 
     test "a trunk: R-URI and To at the trunk, From is the account" do
@@ -287,6 +291,23 @@ defmodule Kelix.Mod.SipServersRoutingTest do
       assert newreq.from.domain == "sbc1.operator.net"
       assert newreq.from.displayname == nil
       assert newreq.from.hparams["tag"] == "f1"
+    end
+
+    test "a trunk rewrites From and To left as raw strings by the parser" do
+      :ok = trunk("op", %{"ext_domain" => "operator.net"})
+      resolved!("op")
+
+      req = %{
+        request(uri("0624765453", @domain))
+        | from: "\"Manu\" <sip:manu@#{@domain}>;tag=f1",
+          to: "sip:0624765453@#{@domain}"
+      }
+
+      assert {newreq, %Peer{}} = SipServers.forward(@domain, req, "op")
+      assert {newreq.to.userpart, newreq.to.domain} == {"0624765453", "operator.net"}
+      assert {newreq.from.userpart, newreq.from.domain} == {"0123456789", "operator.net"}
+      assert newreq.from.displayname == nil
+      assert SIP.Uri.get_header_param(newreq.from, "tag") == {:ok, "f1"}
     end
 
     test "a trunk with ext_domain is sent where its URIs resolved, primary then backup" do

@@ -1374,6 +1374,18 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  @doc """
+  The `From` or the `To` of a message as a `%SIP.Uri{}`, or `nil` when the header
+  is absent or unparsable.
+
+  `SIPMsg` leaves both as the raw header string while a hand-built message
+  carries a `%SIP.Uri{}`; code that rewrites one of them reads it through here, or
+  a rewrite tested on hand-built messages does nothing on real traffic.
+  """
+  @spec header_uri(map(), :from | :to) :: %SIP.Uri{} | nil
+  def header_uri(msg, header) when is_map(msg) and header in [:from, :to],
+    do: to_uri(Map.get(msg, header))
+
   defp to_uri(%SIP.Uri{} = uri), do: uri
 
   defp to_uri(value) when is_binary(value) do
