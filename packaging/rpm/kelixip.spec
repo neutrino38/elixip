@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.8.2
+Version:        1.9.0
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
@@ -411,6 +411,18 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Captioning*.beam
 
 %changelog
+* Mon Oct 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-1
+- New subpackage kelixip-mod-captioning: the correction service of a
+  captioned call. It answers the client's captioning INFO and, for the
+  domains that have the service, hands it the URL of a correction stream on
+  the speech-server, with a token minted on its control API. Renewals are
+  bounded per call; the token is masked in every log and trace.
+- call-captioning.exs answers the captioning INFO itself (captions alone on a
+  node without the module) instead of relaying it to the trunk.
+- bridge/1 intercept: hands back the in-dialog requests a script answers
+  itself; b2bua_reply_on/5 answers on a named leg.
+- User-Agent is now Kelixip/1.9.0.
+
 * Sat Oct 24 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.8.2-1
 - sip_servers: a call forwarded to a sip-trunk goes out with the trunk
   account in the From and the trunk's domain (ext_domain, else the trunk
