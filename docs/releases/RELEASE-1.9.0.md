@@ -112,3 +112,25 @@ Documentation: [captioning.md](../kelixip/modules/captioning.md).
   node, the 1.9.0 script lands next to it as `call-captioning.exs.rpmnew`, and
   the edited one still relays the INFO to the trunk: merge the two.
 - User-Agent: `Kelixip/1.9.0`, `Elixipp-1.9.0`.
+
+## Package 1.9.0-2: `domains.toml` moves to `/var/lib/kelixip`
+
+The node reads its domains from `/var/lib/kelixip/domains.toml`, owned by the
+`kelixip` user. The code is the code of 1.9.0-1. Only the package changes.
+
+- **On upgrade**, the package copies `/etc/kelixip/domains.toml` to
+  `/var/lib/kelixip/domains.toml`, comments included. It never overwrites a
+  file already there.
+- **The old file goes away.** If you had edited it, the RPM keeps it as
+  `/etc/kelixip/domains.toml.rpmsave`, the deb as
+  `/etc/kelixip/domains.toml.dpkg-bak`. Edit the copy in `/var/lib/kelixip`.
+- **`KELIXIP_DOMAINS`** in `/etc/sysconfig/kelixip` (`/etc/default/kelixip`)
+  follows when it named `/etc/kelixip/domains.toml`. Another path is kept.
+- **A fresh install** starts with a file that holds no domain. The commented
+  example is `/usr/share/doc/kelixip/domains.toml.example`.
+- **Backups**: whatever saves `/etc/kelixip` must now also save
+  `/var/lib/kelixip/domains.toml`.
+- On the deb, `apt purge` removes `/var/lib/kelixip`, and the domains with it.
+
+`dnf upgrade kelixip` from 1.9.0-1 installs 1.9.0-2: the `Release` differs, so
+it is a new package, not a reinstall.

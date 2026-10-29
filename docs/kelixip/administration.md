@@ -382,7 +382,8 @@ modules:       auth_db unchanged, mcu unchanged, registrar unchanged
 ```
 
 `kelictl reload-all` is what `systemctl reload kelixip` runs. In one step it applies
-`domains.toml` (domains, dial-plan, the registrar's block), re-reads the **scenario
+`domains.toml` (`/var/lib/kelixip/domains.toml` on a packaged node: domains,
+dial-plan, the registrar's block), re-reads the **scenario
 scripts** whose file changed on disk, and applies the module blocks that can be
 changed without interrupting anything.
 

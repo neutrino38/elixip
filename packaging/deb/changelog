@@ -1,3 +1,15 @@
+kelixip (1.9.0-2) stable; urgency=low
+
+  * domains.toml moves to /var/lib/kelixip/domains.toml, owned by the
+    kelixip user. On upgrade, postinst copies /etc/kelixip/domains.toml
+    there, comments included, unless the new file already exists; a fresh
+    install starts with an empty file. The old conffile is removed (kept as
+    domains.toml.dpkg-bak if it was edited). KELIXIP_DOMAINS in
+    /etc/default/kelixip follows when it named the old path. The commented
+    example is now /usr/share/doc/kelixip/domains.toml.example.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Thu, 29 Oct 2026 12:00:00 +0000
+
 kelixip (1.9.0-1) stable; urgency=low
 
   * New package kelixip-mod-captioning: the correction service of a

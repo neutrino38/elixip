@@ -174,7 +174,7 @@ Point it at its configuration (design §2.1, §12.1):
 
 ```bash
 KELIXIP_CONFIG=/etc/kelixip/config.toml \
-KELIXIP_DOMAINS=/etc/kelixip/domains.toml $REL daemon
+KELIXIP_DOMAINS=/var/lib/kelixip/domains.toml $REL daemon
 ```
 
 Both default to those FHS paths; an unreadable or invalid file aborts the boot and
@@ -407,8 +407,9 @@ kelictl status                            # listeners bound, modules loaded
 curl -s http://127.0.0.1:9095/health
 ```
 
-`config.toml` / `domains.toml` are `%config(noreplace)`: on upgrade your files stay
-and the packaged versions land as `*.rpmnew`. What the packages install where, and
+`config.toml` is `%config(noreplace)`: on upgrade your file stays and the packaged
+version lands as `config.toml.rpmnew`. `/var/lib/kelixip/domains.toml` is not part
+of the payload: the package creates it once and never overwrites it. What the packages install where, and
 how to configure the service, is the operator's guide:
 [docs/kelixip/installation.md](docs/kelixip/installation.md). What lives in
 `packaging/` and why: [packaging/README.md](packaging/README.md).
@@ -558,11 +559,11 @@ cannot read your home directory — harmless; copy the files to `/tmp` to silenc
 > The shipped `config.toml` is a template that binds 5060 and serves no domain, so
 > starting it before an admin has been through it would be a surprise, not a service.
 
-`/etc/kelixip/config.toml`, `/etc/kelixip/domains.toml` and `/etc/default/kelixip`
-are **conffiles**: on upgrade dpkg keeps your version, and (non-interactively) leaves
-the packaged one next to it as `*.dpkg-dist` — the deb equivalent of `*.rpmnew`, and
-worth diffing, since new keys show up there first. `apt purge` removes the state and
-log directories; the `kelixip` system user is deliberately left behind.
+`/etc/kelixip/config.toml` and `/etc/default/kelixip` are **conffiles**: on upgrade
+dpkg keeps your version, and (non-interactively) leaves the packaged one next to it
+as `*.dpkg-dist` — the deb equivalent of `*.rpmnew`, and worth diffing, since new
+keys show up there first. `apt purge` removes the state and log directories,
+`domains.toml` included; the `kelixip` system user is deliberately left behind.
 
 ## Continuous integration
 

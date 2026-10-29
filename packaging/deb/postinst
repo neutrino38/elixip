@@ -9,6 +9,7 @@ set -e
 
 KELIXDIR=/usr/lib/kelixip
 COOKIE="$KELIXDIR/releases/COOKIE"
+DOMAINS=/var/lib/kelixip/domains.toml
 
 case "$1" in
   configure|reconfigure)
@@ -23,15 +24,39 @@ case "$1" in
 
     # 2) 0640 root:kelixip on the configuration: config.toml holds the database
     #    password and the API token, so the service reads it and nobody else does.
-    chown root:kelixip /etc/kelixip /etc/kelixip/tls \
-                       /etc/kelixip/config.toml /etc/kelixip/domains.toml
+    chown root:kelixip /etc/kelixip /etc/kelixip/tls /etc/kelixip/config.toml
     chmod 0750 /etc/kelixip /etc/kelixip/tls
-    chmod 0640 /etc/kelixip/config.toml /etc/kelixip/domains.toml
+    chmod 0640 /etc/kelixip/config.toml
 
     # Mutable state and the log directory (used when stdout is redirected). The
     # unit declares them too, so a tmpfs-only deployment still gets them.
     chown kelixip:kelixip /var/lib/kelixip /var/log/kelixip
     chmod 0750 /var/lib/kelixip /var/log/kelixip
+
+    # domains.toml lives in /var/lib/kelixip, writable by the service, and is never
+    # overwritten. On an upgrade from a package that shipped it as a conffile, the
+    # preinst's rm_conffile has already set the old file aside under one of two
+    # names; the dpkg-maintscript-helper call below deletes or keeps it, after this.
+    if [ ! -e "$DOMAINS" ]; then
+      for old in /etc/kelixip/domains.toml /etc/kelixip/domains.toml.dpkg-backup \
+                 /etc/kelixip/domains.toml.dpkg-remove; do
+        [ -f "$old" ] || continue
+        install -m 0640 -o kelixip -g kelixip "$old" "$DOMAINS"
+        break
+      done
+    fi
+    if [ ! -e "$DOMAINS" ]; then
+      ( umask 027
+        printf '%s\n' \
+          '# domains.toml — the served domains and their dial-plan.' \
+          '#' \
+          '# Hot-reloadable: `kelictl domain reload-all`. A commented example of every' \
+          '# block is in /usr/share/doc/kelixip/domains.toml.example.' > "$DOMAINS" )
+      chown kelixip:kelixip "$DOMAINS"
+    fi
+    # An environment file kept as edited still names the old path, which is gone.
+    sed -i "s,^KELIXIP_DOMAINS=/etc/kelixip/domains\.toml\$,KELIXIP_DOMAINS=$DOMAINS," \
+      /etc/default/kelixip || true
 
     # $KELIXDIR/modules stays root-owned and not writable by the service: loading
     # a .beam is executing code, so the service must not be able to plant one.
@@ -55,6 +80,8 @@ case "$1" in
     exit 1
     ;;
 esac
+
+dpkg-maintscript-helper rm_conffile /etc/kelixip/domains.toml 1.9.0-2~ kelixip -- "$@"
 
 # systemd, hand-written because this package is not built with debhelper.
 # Deliberately: enable the unit, do NOT start it. The shipped config.toml is a

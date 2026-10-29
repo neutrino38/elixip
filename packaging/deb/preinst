@@ -1,0 +1,8 @@
+#!/bin/sh
+# kelixip preinst — the conffile /etc/kelixip/domains.toml stops being shipped
+# (it moves to /var/lib/kelixip, see postinst).
+set -e
+
+dpkg-maintscript-helper rm_conffile /etc/kelixip/domains.toml 1.9.0-2~ kelixip -- "$@"
+
+exit 0

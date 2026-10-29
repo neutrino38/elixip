@@ -32,7 +32,7 @@ Version:        1.9.0
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -237,7 +237,6 @@ done
 install -d -m 0750 %{buildroot}%{_sysconfdir}/%{name}
 install -d -m 0750 %{buildroot}%{_sysconfdir}/%{name}/tls
 install -m 0640 config/config.toml  %{buildroot}%{_sysconfdir}/%{name}/config.toml
-install -m 0640 config/domains.toml %{buildroot}%{_sysconfdir}/%{name}/domains.toml
 install -d -m 0755 %{buildroot}%{_sysconfdir}/sysconfig
 install -m 0644 sysconfig/kelixip %{buildroot}%{_sysconfdir}/sysconfig/%{name}
 
@@ -298,6 +297,27 @@ if [ ! -s %{kelixdir}/releases/COOKIE ]; then
     chown root:kelixip %{kelixdir}/releases/COOKIE
     chmod 0640 %{kelixdir}/releases/COOKIE
 fi
+
+# domains.toml lives in %{_sharedstatedir}/%{name}, writable by the service. It is
+# never overwritten. On an upgrade from a package that shipped it in /etc, this
+# %post runs before rpm removes the old file, so the operator's copy is still there.
+_domains=%{_sharedstatedir}/%{name}/domains.toml
+if [ ! -e "$_domains" ]; then
+    if [ -f %{_sysconfdir}/%{name}/domains.toml ]; then
+        install -m 0640 -o kelixip -g kelixip %{_sysconfdir}/%{name}/domains.toml "$_domains"
+    else
+        ( umask 027
+          printf '%%s\n' \
+              '# domains.toml — the served domains and their dial-plan.' \
+              '#' \
+              '# Hot-reloadable: `kelictl domain reload-all`. A commented example of every' \
+              '# block is in %{_docdir}/%{name}/domains.toml.example.' > "$_domains" )
+        chown kelixip:kelixip "$_domains"
+    fi
+fi
+# An environment file kept as edited still names the old path, which rpm removes.
+sed -i 's,^KELIXIP_DOMAINS=%{_sysconfdir}/%{name}/domains\.toml$,KELIXIP_DOMAINS='"$_domains"',' \
+    %{_sysconfdir}/sysconfig/%{name} || :
 %systemd_post %{name}.service
 
 %preun
@@ -313,11 +333,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %files
-%doc doc/*.md
+%doc doc/*.md config/domains.toml.example
 %dir %attr(0750,root,kelixip) %{_sysconfdir}/%{name}
 %dir %attr(0750,root,kelixip) %{_sysconfdir}/%{name}/tls
 %config(noreplace) %attr(0640,root,kelixip) %{_sysconfdir}/%{name}/config.toml
-%config(noreplace) %attr(0640,root,kelixip) %{_sysconfdir}/%{name}/domains.toml
 %config(noreplace) %attr(0644,root,root) %{_sysconfdir}/sysconfig/%{name}
 %config(noreplace) %attr(0644,root,root) %{_sysconfdir}/logrotate.d/%{name}
 %{_unitdir}/%{name}.service
@@ -411,6 +430,14 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Captioning*.beam
 
 %changelog
+* Thu Oct 29 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-2
+- domains.toml moves to /var/lib/kelixip/domains.toml, owned by the kelixip
+  user. On upgrade, %post copies /etc/kelixip/domains.toml there, comments
+  included, unless the new file already exists; a fresh install starts with
+  an empty file. KELIXIP_DOMAINS in /etc/sysconfig/kelixip follows when it
+  named the old path. The commented example is now
+  /usr/share/doc/kelixip/domains.toml.example.
+
 * Mon Oct 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-1
 - New subpackage kelixip-mod-captioning: the correction service of a
   captioned call. It answers the client's captioning INFO and, for the
