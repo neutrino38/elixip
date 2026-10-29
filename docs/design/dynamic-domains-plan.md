@@ -1,6 +1,6 @@
 # dynamic-domains-plan.md — defining domains at run time
 
-**Status: lots M and D0 implemented 2026-10-29; D1 to D6 not started. Decisions taken 2026-10-29 (§3).**
+**Status: lots M, D0 and D1 implemented 2026-10-29; D2 to D6 not started. Decisions taken 2026-10-29 (§3).**
 
 ## 1. Scope
 
