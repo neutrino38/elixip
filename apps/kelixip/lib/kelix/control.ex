@@ -686,11 +686,18 @@ defmodule Kelix.Control do
              | {:rejected, integer, String.t()}}
   def run_script(script, domain, args \\ %{})
       when is_binary(script) and is_binary(domain) and is_map(args) do
+    snapshot = current_domains()
+
     with :ok <- script_name(script),
-         %Kelix.Domain{} = d <-
-           Kelix.Domains.lookup(current_domains(), domain) || {:error, :not_found},
+         %Kelix.Domain{} = d <- Kelix.Domains.lookup(snapshot, domain) || {:error, :not_found},
          {:ok, _module} <- loadable(script) do
-      route = %{domain: d.name, function: :run, script: script, max_calls: d.max_calls}
+      route = %{
+        domain: d.name,
+        function: :run,
+        script: script,
+        max_calls: d.max_calls,
+        version: snapshot.version
+      }
 
       overrides =
         case Kelix.Router.media_override() do
@@ -843,11 +850,161 @@ defmodule Kelix.Control do
         {:error, :no_domains_path}
 
       path ->
+        before = domain_names()
+
         with :ok <- Kelix.Domains.reload(path, check_scripts: true) do
+          # A domain the file no longer has ends as `delete_domain/2` ends it.
+          version = current_domains().version
+
+          for name <- before -- domain_names() do
+            ended = end_domain(name, nil, version)
+            log_domain_write("reload removed", name, nil, version, ended)
+          end
+
           # a freshly enabled domain may need a module nobody installed (§8.3)
           Kelix.ModuleSupervisor.warn_missing_function_modules()
         end
     end
+  end
+
+  @doc """
+  Create or replace one domain (`kelictl domain apply`, `PUT /domains/:name`) and
+  write it to `domains.toml` (`docs/design/dynamic-domains-plan.md`).
+
+  `doc` is one `[[domain]]` table in the file's own vocabulary — string keys, the
+  same nesting — as `export_domain/1` returns it. It replaces the domain of that
+  name, or is added at the end. A new name starts empty: the registrations and
+  published states a domain of that name may have left are purged first.
+
+  `opts`: `:actor`, who asked (logged), and `:version`, the snapshot version the
+  document was read from — a write from an older one answers `:conflict`.
+
+  `{:ok, %{name, version, created}}`, or `{:error, reason}` with nothing applied:
+  `{:invalid, message}`, `{:scripts, message}`, `:conflict`, `:file_changed` (the
+  file was edited by hand and not reloaded), `{:read_only, info}` (path, reason,
+  user), `{:write_failed, info}`, `:no_domains_path`.
+  """
+  @spec put_domain(map, keyword) :: {:ok, map} | {:error, term}
+  def put_domain(doc, opts \\ []) when is_map(doc) do
+    with {:ok, path} <- domains_path() do
+      name = Map.get(doc, "name")
+      created? = is_binary(name) and not Enum.any?(domain_names(), &same_name?(&1, name))
+
+      if created?, do: purge_domain(name)
+
+      case Kelix.Domains.put_domain(doc, write_opts(path, opts)) do
+        {:ok, snapshot} ->
+          log_domain_write(
+            if(created?, do: "create", else: "replace"),
+            name,
+            opts[:actor],
+            snapshot.version,
+            nil
+          )
+
+          Kelix.ModuleSupervisor.warn_missing_function_modules()
+          {:ok, %{name: name, version: snapshot.version, created: created?}}
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  @doc """
+  Delete one domain (`kelictl domain delete`, `DELETE /domains/:name`), by its
+  canonical name, and write `domains.toml` without it.
+
+  Never refused because the domain is in use. Once the snapshot without it is
+  swapped in, every scenario of the domain is asked to stop, as `kelictl stop`
+  asks, and the registrations and published states of the domain are purged. It
+  does not wait for the scenarios to end.
+
+  Same `opts` and refusals as `put_domain/2`, plus `{:error, :not_found}`.
+  `{:ok, %{name, version, stopped, purged}}`: `stopped` counts the scenarios asked
+  to stop, `purged` says per module what its purge did — `{:ok, count}`,
+  `:not_loaded`, or `{:error, reason}` for a module that failed; the domain is
+  deleted either way.
+  """
+  @spec delete_domain(String.t(), keyword) :: {:ok, map} | {:error, term}
+  def delete_domain(name, opts \\ []) when is_binary(name) do
+    with {:ok, path} <- domains_path(),
+         canonical when is_binary(canonical) <-
+           Enum.find(domain_names(), &same_name?(&1, name)) || {:error, :not_found},
+         {:ok, snapshot} <-
+           Kelix.Domains.delete_domain(canonical, write_opts(path, opts, check_scripts: false)) do
+      ended = end_domain(canonical, opts[:actor], snapshot.version)
+      log_domain_write("delete", canonical, opts[:actor], snapshot.version, ended)
+      Kelix.ModuleSupervisor.warn_missing_function_modules()
+      {:ok, Map.merge(%{name: canonical, version: snapshot.version}, ended)}
+    end
+  end
+
+  @doc """
+  One domain as `domains.toml` holds it (`kelictl domain export`,
+  `GET /domains/:name/document`): the `[[domain]]` table, string keys, which
+  `put_domain/2` accepts back. `name` is matched as inbound traffic is, aliases
+  included. `{:error, :not_found}` if no domain serves it.
+  """
+  @spec export_domain(String.t()) :: {:ok, map} | {:error, :not_found}
+  def export_domain(name) when is_binary(name) do
+    snapshot = current_domains()
+
+    with {:ok, canonical} <- resolve_domain(name) do
+      snapshot.source
+      |> Map.get("domain", [])
+      |> Enum.find(&same_name?(Map.get(&1, "name", ""), canonical))
+      |> case do
+        nil -> {:error, :not_found}
+        doc -> {:ok, doc}
+      end
+    end
+  end
+
+  defp domains_path() do
+    case Application.get_env(:kelixip, :domains_path) do
+      nil -> {:error, :no_domains_path}
+      path -> {:ok, path}
+    end
+  end
+
+  defp write_opts(path, opts, extra \\ []),
+    do: [path: path, version: opts[:version]] ++ extra
+
+  defp same_name?(a, b), do: String.downcase(a) == String.downcase(b)
+
+  # Steps 2 and 3 of a delete, once the snapshot without `name` is in place.
+  defp end_domain(name, actor, version) do
+    stopped =
+      safe(
+        fn -> Kelix.InstancePool.shutdown_domain(name, {:domain_deleted, actor}, version) end,
+        0
+      )
+
+    %{stopped: stopped, purged: purge_domain(name)}
+  end
+
+  defp purge_domain(name) do
+    Map.new(["registrar", "presence"], fn module ->
+      {module, Kelix.ModuleRegistry.facade(module, :purge_domain, [name], :not_loaded)}
+    end)
+  end
+
+  defp log_domain_write(what, name, actor, version, ended) do
+    tail =
+      case ended do
+        nil ->
+          ""
+
+        %{stopped: n, purged: purged} ->
+          ", #{n} scenario(s) asked to stop, purge " <>
+            Enum.map_join(purged, " ", fn {m, r} -> "#{m}=#{inspect(r)}" end)
+      end
+
+    Logger.info(
+      module: __MODULE__,
+      message: "domain #{what} #{name} by admin=#{actor || "unknown"}: v#{version}#{tail}"
+    )
   end
 
   @doc """
