@@ -1,6 +1,6 @@
 # dynamic-domains-plan.md — defining domains at run time
 
-**Status: lot M implemented 2026-10-29; D0 to D6 not started. Decisions taken 2026-10-29 (§3).**
+**Status: lots M and D0 implemented 2026-10-29; D1 to D6 not started. Decisions taken 2026-10-29 (§3).**
 
 ## 1. Scope
 
@@ -119,15 +119,32 @@ Both take the **canonical name** and never resolve it through the snapshot: at s
 is not loaded holds nothing, so its purge is a no-op.
 
 A purge can fail: the module is down or times out. The domain is deleted anyway,
-and the answer names the module that failed. The leftovers cannot reach a caller,
-since nothing routes to the domain any more. They are purged again when a domain
-of that name is created: `put_domain/2` runs both purges **before** the swap that
+and the answer names the module that failed. Nothing routes to the domain any
+more, but a script of another domain can still look up its AORs (below). The
+leftovers are purged again when a domain of that name is created: `put_domain/2` runs both purges **before** the swap that
 creates a new name, so a recreated domain always starts empty.
 
-Lot D0 still records what a `domains.toml` reload that removes a domain does today
-to its instances, registrations and presence state. A domain removed by a hand
-edit and a domain removed by `delete` should end in the same state. If they do
-not, D0 says so and the plan gets a lot for it.
+**A domain removed by a reload (lot D0).** `Kelix.Domains` swaps the snapshot and
+does nothing else: no process is told. Measured with a domain `gone.example`,
+alias `alias.example`, one binding and one published state, then a reload of a
+file without the domain:
+
+- the running instances of the domain run to their own end. `InstancePool` does
+  not read the snapshot after `launch`;
+- the binding and the published state stay, under the canonical name, until the
+  expiry sweep of each module removes them;
+- `Registrar.lookup` of `bob@gone.example` still answers the old contact. A script
+  of another served domain that looks up this AOR reaches it. Through the alias it
+  answers `:notfound`, because folding an alias to its canonical name needs the
+  snapshot.
+
+A domain removed by a hand edit and a domain removed by `delete` therefore do not
+end in the same state.
+
+**Decided: a reload ends a removed domain as `delete` does.** `reload_domains/0`
+runs steps 2 and 3 of `delete` for every name present in the old snapshot and
+absent from the new one, with actor `nil`. Both removals share one path after the
+swap. A `reload-all` that removes a domain therefore stops its calls in progress.
 
 ### Decision 4 — a file the node cannot write: the node starts, and writes fail explicitly
 
@@ -229,7 +246,7 @@ Each lot builds and passes its tests before the next one starts. M ships in the
 | M | **1.9.0 package:** the move of §5 — `env.sh.eex` default, RPM spec and deb `postinst` / `conffiles` / maintscript, the example in the doc directory, `Release` bumped to 2 in both packages and a `deb/changelog` entry. Docs: `installation.md`, `administration.md`, the `config.toml` comments that name the file's location, the 1.9.0 release notes. | RPM and deb builds; an **upgrade** from 1.8.2 and from 1.9.0-1 on each, with an edited `/etc/kelixip/domains.toml`, ends with the same domains served from `/var/lib/kelixip`; a fresh install starts with the empty generated file |
 | D0 | Record what a reload removing a domain does today to its instances, registrations and presence state (decision 3). Keep `source` and `source_hash` in the snapshot. | the existing `domains` tests pass unchanged; the D0 findings written into this plan |
 | D1 | The TOML encoder (decision 1). | round-trip tests: the shipped example, every block type, strings needing escapes, nested arrays of tables, `[module.registrar]` kept as is |
-| D2 | `put_domain` / `delete_domain` / `export_domain` in `Kelix.Domains` and `Kelix.Control`; version, hash and writability checks; `InstancePool.shutdown_domain/2` and the domain check in `launch`; `purge_domain/1` in the registrar and presence modules (`apps/kelix_modules`), called on delete and before creating a name; actor in the log. | tests: a delete leaves no binding and no published state of the domain, a recreated domain starts empty even after a purge that failed, a purge with the module not loaded is a no-op; a domain created then routed (a REGISTER reaches its script); an invalid doc changes nothing on disk; a missing script is refused; `conflict` on a stale version; `file_changed` after a hand edit, lifted by a successful reload and kept by a failed one; `read_only` with path, reason and user in the message; a delete stops a running call and a launch racing it gets 404; the file read back after a restart of `Kelix.Domains` gives the same snapshot |
+| D2 | `put_domain` / `delete_domain` / `export_domain` in `Kelix.Domains` and `Kelix.Control`; version, hash and writability checks; `InstancePool.shutdown_domain/2` and the domain check in `launch`; `purge_domain/1` in the registrar and presence modules (`apps/kelix_modules`), called on delete, on a reload that removes a domain, and before creating a name; actor in the log. | tests: a delete leaves no binding and no published state of the domain, a recreated domain starts empty even after a purge that failed, a purge with the module not loaded is a no-op; a domain created then routed (a REGISTER reaches its script); an invalid doc changes nothing on disk; a missing script is refused; `conflict` on a stale version; `file_changed` after a hand edit, lifted by a successful reload and kept by a failed one; `read_only` with path, reason and user in the message; a delete stops a running call and a launch racing it gets 404; a reload removing a domain stops its call and purges its state; the file read back after a restart of `Kelix.Domains` gives the same snapshot |
 | D3 | kelictl: `domain apply <file.json>` (and `-` for stdin), `domain export <name>`, `domain delete <name>` (prints the number of scenarios stopped), help and completion. `domains_writable` in `kelictl status`. | CLI parse and render tests; one run against a node started from the release |
 | D4 | REST: `PUT /domains/:name`, `DELETE /domains/:name`, `GET /domains/:name/document`, `domains_writable` in `GET /status`. Status codes: 400 invalid, 404 unknown, 409 `conflict` / `file_changed`, 503 `read_only`. `docs/kelixip/rest-api.md`. | Plug tests, token auth included |
 | D5 | Docs of the frontals: `administration.md` (apply, export, delete, the `file_changed` and `read_only` errors), the generated header of the file, the release notes. | a node installed from the package creates, routes and deletes a domain through kelictl and through the API |

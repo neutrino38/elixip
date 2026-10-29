@@ -16,6 +16,8 @@ defmodule Kelix.Domains do
     * `index`    — `name` + each literal alias (lower-cased) → `%Kelix.Domain{}` for O(1) lookup
     * `suffixes` — each wildcard alias (`*.gw.out`) as `{".gw.out", domain}`, longest first
     * `modules`  — raw `[module.*]` blocks (carried for the module system, P5)
+    * `source`   — the decoded map of the whole file, what a write edits
+    * `source_hash` — SHA-256 of the text the snapshot was parsed from
   """
   use GenServer
   require Logger
@@ -27,10 +29,18 @@ defmodule Kelix.Domains do
           domains: [Domain.t()],
           index: %{optional(String.t()) => Domain.t()},
           suffixes: [{String.t(), Domain.t()}],
-          modules: %{optional(String.t()) => map}
+          modules: %{optional(String.t()) => map},
+          source: map,
+          source_hash: binary | nil
         }
 
-  defstruct version: 0, domains: [], index: %{}, suffixes: [], modules: %{}
+  defstruct version: 0,
+            domains: [],
+            index: %{},
+            suffixes: [],
+            modules: %{},
+            source: %{},
+            source_hash: nil
 
   @allowed_top_keys ~w(domain module)
   @registrar_keys %{
@@ -310,7 +320,9 @@ defmodule Kelix.Domains do
          domains: domains,
          index: index,
          suffixes: suffixes,
-         modules: Map.get(map, "module", %{})
+         modules: Map.get(map, "module", %{}),
+         source: map,
+         source_hash: :crypto.hash(:sha256, content)
        }}
     end
   end
