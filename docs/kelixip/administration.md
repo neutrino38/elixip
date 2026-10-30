@@ -465,14 +465,16 @@ declaration (the `errors:` map of its `describe_control/0` entry) — the same
 declaration the REST frontal turns into `404`/`409`/`503`, so both frontals
 classify a failure identically. A reason a module declares nothing for falls back
 to `404` → `3` for `not_found`, `503` → `5` for a module that is absent or wedged,
-and `400` → `2` otherwise. Core commands use `0`/`1`/`2`.
+and `400` → `2` otherwise.
 
-**Caveat:** because the overlay dispatches through `kelixip rpc`, the numeric exit
-code is **not currently propagated to the shell** (it always returns `0`); scripts
-should match on the printed output, not `$?`. This propagation is a roadmap
-refinement — the classification above is what it will carry once it lands.
-`systemctl reload` is not affected: a refused reload makes the unit's reload command
-fail, so systemd and the journal report the failure.
+Core commands use the same classes. A domain, registration, media server, scenario,
+journal or module block that does not exist is `3`. A refused write to
+`domains.toml` is `4` (`conflict`, `file_changed`) or `5` (the node cannot write the
+file). A module name nothing loads stays `1`, as above: it is more often a mistyped
+command than a missing object.
+
+The code is the shell's `$?`, so a script can test it. A refused `systemctl reload`
+also makes the unit's reload command fail, so systemd and the journal report it.
 
 > `reload-script --notify` is **accepted but not yet active** — notifying
 > in-progress instances of a reload is a roadmap refinement; today the flag is a

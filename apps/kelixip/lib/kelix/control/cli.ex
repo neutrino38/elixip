@@ -64,10 +64,16 @@ defmodule Kelix.Control.CLI do
   `muted='{"audio":true}'` loses its inner quotes. That is what the list form fixes,
   and why the two clauses are not equivalent.
   """
+  #
+  # A non-zero code leaves as `exit({:shutdown, code})`: the `rpc` and `eval`
+  # commands of the release re-raise it in the operator's VM, which then halts with
+  # that status, prints nothing more, and leaves the node running.
   @spec rpc_main([String.t()] | String.t()) :: :ok
   def rpc_main(argv) when is_list(argv) do
-    {_code, output} = run(argv, node())
+    {code, output} = run(argv, node())
     IO.puts(output)
+    if code != 0, do: exit({:shutdown, code})
+    :ok
   end
 
   def rpc_main(arg_string) when is_binary(arg_string),
@@ -192,14 +198,17 @@ defmodule Kelix.Control.CLI do
   defp parse(["mediaserver", "show", name]), do: {:ok, :mediaserver, :mediaserver, [name]}
 
   defp parse(["mediaserver", onoff, name]) when onoff in ["enable", "disable"],
-    do: {:ok, :ok, :mediaserver_toggle, [name, onoff == "enable"]}
+    do: {:ok, :mediaserver_toggle, :mediaserver_toggle, [name, onoff == "enable"]}
 
   # `mediaserver` is a core noun too — and the pool entry it names is not the `mcu`
   # module, which owns its own command namespace (`kelictl mcu conference.list`).
   defp parse(["mediaserver" | _]), do: {:error, usage_mediaserver()}
 
   defp parse(["module", "list"]), do: {:ok, :module_list, :module_commands, []}
-  defp parse(["module", "reload", name]), do: {:ok, :ok, :module_reload, [name]}
+
+  defp parse(["module", "reload", name]),
+    do: {:ok, {:module_reload, name}, :module_reload, [name]}
+
   # `module` is a core noun, like `domain` above: a mistyped sub-command gets this
   # usage instead of being taken for a module named "module".
   defp parse(["module" | _]), do: {:error, usage_module()}
@@ -211,7 +220,7 @@ defmodule Kelix.Control.CLI do
 
   defp parse(["stop", id]) do
     case Integer.parse(id) do
-      {n, ""} -> {:ok, :ok, :shutdown_scenario, [n]}
+      {n, ""} -> {:ok, {:stop, n}, :shutdown_scenario, [n]}
       _ -> {:error, "stop: <id> must be an integer"}
     end
   end
@@ -542,10 +551,19 @@ defmodule Kelix.Control.CLI do
   defp render(:run, {:error, {:rejected, code, reason}}),
     do: {@exit_unavailable, "run: refused, #{code} #{reason}"}
 
-  defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
-  defp render(:reg_domain, {:error, :not_found}), do: {1, "no such domain"}
-  defp render(:registration, {:error, :not_found}), do: {1, "no such registration"}
-  defp render(:mediaserver, {:error, :not_found}), do: {1, "no such media server"}
+  defp render(:domain, {:error, :not_found}), do: {@exit_not_found, "no such domain"}
+  defp render(:reg_domain, {:error, :not_found}), do: {@exit_not_found, "no such domain"}
+  defp render(:registration, {:error, :not_found}), do: {@exit_not_found, "no such registration"}
+  defp render(:mediaserver, {:error, :not_found}), do: {@exit_not_found, "no such media server"}
+
+  defp render({:stop, id}, {:error, :not_found}),
+    do: {@exit_not_found, "no scenario #{id} in progress (kelictl monitor)"}
+
+  defp render(:mediaserver_toggle, {:error, :unknown}),
+    do: {@exit_not_found, "no such media server"}
+
+  defp render({:module_reload, name}, {:error, :not_configured}),
+    do: {@exit_not_found, "no [module.#{name}] block is configured"}
 
   # A command that already phrased its own failure (the TOML/script reasons of
   # `reload_domains`, multi-line and meant to be read) is printed as written:
@@ -761,7 +779,8 @@ defmodule Kelix.Control.CLI do
     {if(Kelix.Control.reload_ok?(report), do: 0, else: 1), Enum.join(lines, "\n")}
   end
 
-  defp render(:ok, :ok), do: {0, "ok"}
+  defp render(tag, :ok) when tag == :ok or tag == :mediaserver_toggle, do: {0, "ok"}
+  defp render({tag, _}, :ok) when tag in [:stop, :module_reload], do: {0, "ok"}
 
   defp render(:run, {:ok, %{id: id}}),
     do: {0, "instance #{id} started (kelictl monitor; kelictl stop #{id})"}
@@ -816,7 +835,7 @@ defmodule Kelix.Control.CLI do
   defp render({:trace, :ladder, full?}, {:ok, trace}),
     do: {0, Kelix.Control.Ladder.render(trace.events, trace.meta, full: full?)}
 
-  defp render(:ok, :notfound), do: {1, "not found"}
+  defp render(:ok, :notfound), do: {@exit_not_found, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
 
   # ── monitor continuous (live push display) ────────────────────────────────────
