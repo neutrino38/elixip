@@ -143,7 +143,8 @@ defmodule Kelix.Domains do
   """
   @spec writable(Path.t()) :: :ok | {:error, {:read_only, map}}
   def writable(path) do
-    tmp = path <> ".tmp"
+    # its own name: `kelictl status` probes while a write may hold `path.tmp`
+    tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
 
     with :ok <- check_write(path, if(File.exists?(path), do: :ok, else: {:error, :enoent})),
          :ok <- check_write(path, File.open(path, [:read, :write])),
@@ -267,6 +268,7 @@ defmodule Kelix.Domains do
         # tree (`Kelix.ScriptPreflight`), which aborts the boot on a bad script.
         case load(path, false) do
           {:ok, snapshot} ->
+            warn_unwritable(path)
             {:ok, %{snapshot | version: 1}}
 
           {:error, reason} ->
@@ -275,6 +277,19 @@ defmodule Kelix.Domains do
             IO.puts(:stderr, "kelixip: invalid domains in #{path}: #{reason}")
             {:stop, {:invalid_domains, reason}}
         end
+    end
+  end
+
+  # The node serves the file either way; only the writes through the frontals
+  # need it, and each of them answers `read_only` on its own.
+  defp warn_unwritable(path) do
+    with {:error, {:read_only, %{reason: reason, user: user}}} <- writable(path) do
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "#{path} is not writable by #{user} (#{reason}): domain apply/delete will be " <>
+            "refused until the file and its directory belong to #{user}"
+      )
     end
   end
 

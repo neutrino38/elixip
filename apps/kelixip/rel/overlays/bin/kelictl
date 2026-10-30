@@ -33,6 +33,15 @@ if [ -z "${RELEASE_COOKIE-}" ] && [ -e "$COOKIE_FILE" ] && [ ! -r "$COOKIE_FILE"
   exit 1
 fi
 
+# A write to the domains is logged with who asked: the operator's user name, unless
+# --admin says otherwise. The node cannot know it, the command runs there.
+if [ "${1:-}" = domain ] && [ "${2:-}" = delete ]; then
+  case " $* " in
+    *" --admin"*) ;;
+    *) set -- "$@" --admin "$(id -un 2>/dev/null || echo unknown)" ;;
+  esac
+fi
+
 # Forward argv as an Elixir **list**, one element per argument, quoted and escaped.
 #
 # It used to be joined into one string ("$*") for the CLI to re-split, and that lost

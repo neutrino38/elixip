@@ -41,6 +41,29 @@ defmodule Kelix.Control do
       module_status: module_status(),
       domains_version: safe(fn -> Kelix.Domains.current().version end, 0)
     }
+    |> Map.merge(domains_file())
+  end
+
+  # Whether a domain written through kelictl, the API or kelescope can reach the
+  # disk — checked now, so a permission fixed or lost shows without a restart.
+  defp domains_file() do
+    case Application.get_env(:kelixip, :domains_path) do
+      nil ->
+        %{domains_path: nil, domains_writable: nil, domains_write_error: nil}
+
+      path ->
+        case Kelix.Domains.writable(path) do
+          :ok ->
+            %{domains_path: path, domains_writable: true, domains_write_error: nil}
+
+          {:error, {:read_only, %{reason: reason, user: user}}} ->
+            %{
+              domains_path: path,
+              domains_writable: false,
+              domains_write_error: %{reason: to_string(reason), user: user}
+            }
+        end
+    end
   end
 
   defp module_status() do
