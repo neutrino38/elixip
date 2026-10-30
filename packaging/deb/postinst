@@ -64,9 +64,14 @@ case "$1" in
     # 3) Per-host distribution cookie: the credential kelictl authenticates with.
     #    Shipping one in the package would make it the same secret on every
     #    installation. Kept across upgrades; root and the service only.
+    #    Alphanumeric only: erlexec reads a leading `+` as an emulator flag, so a
+    #    cookie starting with one never let the node start, and is replaced.
+    case "$(head -c 1 "$COOKIE" 2>/dev/null)" in
+      +|-) rm -f "$COOKIE" ;;
+    esac
     if [ ! -s "$COOKIE" ]; then
       ( umask 077
-        head -c 32 /dev/urandom | base64 > "$COOKIE" )
+        head -c 48 /dev/urandom | base64 | tr -d '+/=\n' > "$COOKIE" )
       chown root:kelixip "$COOKIE"
       chmod 0640 "$COOKIE"
     fi

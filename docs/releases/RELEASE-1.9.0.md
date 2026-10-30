@@ -187,5 +187,11 @@ rule 1 added (v4)
 for a name that exists, a stale `--version` or a hand edit, `5` for a file the node
 cannot write.
 
+**The distribution cookie.** The package generates the cookie kelictl
+authenticates with at installation. It is now made of letters and digits only. A
+cookie starting with `+`, about one installation in 64, was read by the Erlang
+launcher as an option: the node never started, and kelictl could not reach it. The
+upgrade replaces such a cookie and keeps any other.
+
 `dnf upgrade kelixip kelixip-mod-*` from 1.9.0-1 or 1.9.0-2 installs 1.9.0-3. Modules
 come from the same build: upgrade them together.

@@ -290,10 +290,15 @@ done
 restorecon -R %{kelixdir}/bin %{kelixdir}/erts-*/bin || :
 
 # Per-host distribution cookie: the credential kelictl authenticates with. Kept
-# across upgrades; readable by the service and by root only.
+# across upgrades; readable by the service and by root only. Alphanumeric only:
+# erlexec reads a leading `+` as an emulator flag, so a cookie starting with one
+# never let the node start, and such a cookie is replaced.
+case "$(head -c 1 %{kelixdir}/releases/COOKIE 2>/dev/null)" in
+    +|-) rm -f %{kelixdir}/releases/COOKIE ;;
+esac
 if [ ! -s %{kelixdir}/releases/COOKIE ]; then
     ( umask 077
-      head -c 32 /dev/urandom | base64 > %{kelixdir}/releases/COOKIE )
+      head -c 48 /dev/urandom | base64 | tr -d '+/=\n' > %{kelixdir}/releases/COOKIE )
     chown root:kelixip %{kelixdir}/releases/COOKIE
     chmod 0640 %{kelixdir}/releases/COOKIE
 fi
@@ -440,6 +445,10 @@ fi
   domains changed since. A hand edit not reloaded blocks the writes until
   kelictl domain reload-all. Deleting a domain stops its calls and purges its
   registrations and presence states; so does a reload that removes it.
+- The distribution cookie %post generates is alphanumeric. A cookie starting
+  with `+` (about one installation in 64) was read by erlexec as an emulator
+  flag: the node never started and kelictl could not reach it. %post replaces
+  such a cookie.
 
 * Thu Oct 29 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-2
 - domains.toml moves to /var/lib/kelixip/domains.toml, owned by the kelixip
