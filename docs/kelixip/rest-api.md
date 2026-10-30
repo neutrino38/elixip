@@ -66,6 +66,7 @@ cert) with a JSON body `{"error": "…"}`.
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
 | `POST /scripts/<name>/run` (body `{"domain": …, "args": {…}}`) | W | `kelictl run` — start a script now; `202 {"result": {"id": n}}`, see [below](#running-a-script-on-demand) |
 | `POST /domains/reload` | W | `kelictl domain reload-all` |
+| `POST`, `PATCH`, `PUT`, `DELETE /domains/…` | W | `kelictl domain create\|delete\|<domain> …` — see [below](#editing-domains) |
 | `POST /reload-all` | W | `kelictl reload-all` (what `systemctl reload` runs) |
 | `POST /modules/<name>/reload` | W | `kelictl module reload` |
 | `POST /mediaservers/<name>` | W | `kelictl mediaserver enable\|disable` |
@@ -222,6 +223,103 @@ curl -s -X POST   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: applicatio
 curl -s -X PUT    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"level":"debug"}' $BASE/log/level
 curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/graceful-shutdown
+```
+
+## Editing domains
+
+One route per `kelictl domain` command: a domain is created, then edited one element
+at a time, and every write is written to `domains.toml`. `kelictl domain help`
+lists the same commands; the design is `docs/design/dynamic-domains-plan.md`.
+
+| Route | Body | `kelictl domain …` |
+|---|---|---|
+| `POST /domains` | `{"name", "aliases", "max_calls"}` | `create <d>` |
+| `DELETE /domains/<d>` | | `delete <d>` |
+| `PATCH /domains/<d>` | `{"max_calls"}` | `<d> set` |
+| `POST /domains/<d>/aliases` | `{"host"}` | `<d> alias add` |
+| `DELETE /domains/<d>/aliases/<host>` | | `<d> alias remove` |
+| `PATCH /domains/<d>/registrar` | `{"script", "default_expires", "min_expires", "keepalive_period"}` | `<d> registrar set` |
+| `DELETE /domains/<d>/registrar` | | `<d> registrar remove` |
+| `POST /domains/<d>/presence` | `{"package", "subscribe", "publish"}` | `<d> presence add` |
+| `PATCH /domains/<d>/presence/<package>` | `{"subscribe", "publish"}` | `<d> presence set` |
+| `DELETE /domains/<d>/presence/<package>` | | `<d> presence remove` |
+| `POST /domains/<d>/<list>` | `{"pattern", "script", "idle_timeout", "at"}` | `<d> <list> add` |
+| `PATCH /domains/<d>/<list>/<n>` | `{"pattern", "script", "idle_timeout"}` | `<d> <list> update <n>` |
+| `POST /domains/<d>/<list>/<n>/move` | `{"to"}` | `<d> <list> move <n>` |
+| `DELETE /domains/<d>/<list>/<n>` | | `<d> <list> remove <n>` |
+| `PUT /domains/<d>/options/keepalive` | `{"script"}` | `<d> options keepalive set` |
+| `DELETE /domains/<d>/options/keepalive` | | `<d> options keepalive remove` |
+
+- `<d>` is the domain's name, never an alias.
+- `<list>` is `calls`, `chat`, `options` or `presence/<package>/subscribe`.
+  `idle_timeout` exists for `chat` only.
+- `<n>` is a rule number, 1-based, in the order `GET /domains/<d>` lists the rules.
+  The `options` rules are numbered without the keepalive.
+- `pattern` is a dial pattern, or `"default"` for the catch-all. A rule added without
+  `at` goes just before the catch-all.
+- `"none"` (or `null`) removes an optional key: `{"max_calls": "none"}`.
+- Integers are accepted as numbers or as strings.
+
+**The version.** `GET /domains/<d>` returns `version`, the version of the domains it
+was read from. Send it back as `version`, in the body or in the query string
+(`?version=12`). If the domains changed since, the write answers `409 conflict` and
+nothing is applied. A rule number read before another write may name another rule
+after it: send the version with every command that names a rule. Without `version`,
+the command applies to the domains as they are when it runs.
+
+**Who asked.** The `X-Kelix-Admin` header names the person behind the request. The
+node logs it with every write (`by admin=alice`), or `unknown` without the header.
+
+**The answer.** A success returns the new version:
+
+```json
+{"result": {"name": "example.com", "version": 13}}
+```
+
+A creation (`POST /domains`, an alias, a package, a rule) answers `201` with a
+`Location` header. A new rule also returns `at`, the number it took:
+`{"result": {"name": "example.com", "version": 14, "at": 2}}` and
+`Location: /domains/example.com/calls/2`.
+
+`DELETE /domains/<d>` stops every scenario of the domain and purges its registrations
+and its presence states. It does not ask for confirmation. The answer counts the
+scenarios asked to stop, and says what each purge did:
+
+```json
+{"result": {"name": "example.com", "version": 15, "stopped": 3,
+            "purged": {"registrar": {"purged": 12}, "presence": "not_loaded"}}}
+```
+
+A purge that failed shows as `{"error": "…"}`. The domain is deleted anyway.
+
+**The refusals.** Nothing is applied. The body is
+`{"error": "<reason>", "message": "…"}`: test `error`, show `message`.
+
+| Status | `error` | When |
+|---|---|---|
+| `400` | `invalid` | a bad argument, or a result the parser refuses (`message` is the parser's) |
+| `400` | `scripts` | a script the domain names cannot be served |
+| `404` | `not_found` | no such domain, alias, block, package or rule number |
+| `409` | `exists` | the name, alias or package already exists |
+| `409` | `conflict` | the domains changed since `version` |
+| `409` | `file_changed` | `domains.toml` was edited by hand and not reloaded: `POST /domains/reload` first |
+| `500` | `write_failed` | the file could not be written |
+| `503` | `read_only` | the node cannot write the file; the body also carries `path`, `reason` and `user` |
+| `503` | `no_domains_path` | the node reads no `domains.toml` |
+
+`GET /status` says whether a write can succeed: `domains_path`, `domains_writable`
+and, when it is `false`, `domains_write_error`.
+
+```bash
+H=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'X-Kelix-Admin: alice')
+
+curl -s -X POST  "${H[@]}" -d '{"name":"example.com","aliases":["example.fr"]}' $BASE/domains
+curl -s -X PATCH "${H[@]}" -d '{"script":"registrar.exs"}' $BASE/domains/example.com/registrar
+curl -s -X POST  "${H[@]}" -d '{"pattern":"default","script":"catchall.exs"}' \
+     $BASE/domains/example.com/calls
+curl -s -X POST  "${H[@]}" -d '{"to":1,"version":14}' $BASE/domains/example.com/calls/2/move
+curl -s -X DELETE "${H[@]}" "$BASE/domains/example.com/calls/2?version=15"
+curl -s -X DELETE "${H[@]}" $BASE/domains/example.com
 ```
 
 ## Running a script on demand
