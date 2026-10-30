@@ -14,7 +14,7 @@ defmodule Kelix.Domains.Toml do
   @header """
   # domains.toml — the served domains and their dial-plan.
   #
-  # Written by kelixip. A domain created, replaced or deleted through kelictl, the
+  # Written by kelixip. A domain created, edited or deleted through kelictl, the
   # REST API or kelescope rewrites this file, and comments do not survive that.
   # A hand edit is applied with `kelictl domain reload-all`; until then, the node
   # refuses to write over it. A commented example of every block is in

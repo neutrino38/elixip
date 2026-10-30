@@ -32,7 +32,7 @@ Version:        1.9.0
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -430,6 +430,17 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Captioning*.beam
 
 %changelog
+* Fri Oct 30 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-3
+- Domains are created, edited and deleted on a running node, one element per
+  command: kelictl domain create|delete and kelictl domain <d> set, alias,
+  registrar, presence, call, chat, options. The REST control API has one
+  route per command. Every write is validated as the file is at boot, then
+  written to /var/lib/kelixip/domains.toml, without its comments. Rules are
+  addressed by number; --version (REST: version) refuses an edit when the
+  domains changed since. A hand edit not reloaded blocks the writes until
+  kelictl domain reload-all. Deleting a domain stops its calls and purges its
+  registrations and presence states; so does a reload that removes it.
+
 * Thu Oct 29 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-2
 - domains.toml moves to /var/lib/kelixip/domains.toml, owned by the kelixip
   user. On upgrade, %post copies /etc/kelixip/domains.toml there, comments

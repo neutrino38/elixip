@@ -287,7 +287,7 @@ defmodule Kelix.Domains do
       Logger.warning(
         module: __MODULE__,
         message:
-          "#{path} is not writable by #{user} (#{reason}): domain apply/delete will be " <>
+          "#{path} is not writable by #{user} (#{reason}): domain edits will be " <>
             "refused until the file and its directory belong to #{user}"
       )
     end

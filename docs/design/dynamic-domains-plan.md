@@ -1,7 +1,7 @@
 # dynamic-domains-plan.md — defining domains at run time
 
-**Status: lots M, D0 to D2 implemented (2026-10-29), D3 to D5 (2026-10-30); D6 and
-D7 not started.
+**Status: lots M, D0 to D2 implemented (2026-10-29), D3 to D6 (2026-10-30), in
+package 1.9.0-3; D7 not started.
 Decisions taken 2026-10-29 (§3), command grammar decided 2026-10-30 (§4).**
 
 ## 1. Scope
@@ -35,9 +35,10 @@ Out of scope:
 
 ## 2. What exists
 
-Lots M to D5 are in the tree. `kelictl` speaks the grammar of §4, and `domain show`
+Lots M to D6 are in the tree, and package 1.9.0-3 ships them. `kelictl` speaks the grammar of §4, and `domain show`
 prints the version and numbers every list, `options` and the SUBSCRIBE rules
-included. `Kelix.ControlAPI` serves the routes of §5.
+included. `Kelix.ControlAPI` serves the routes of §5. `administration.md`,
+`rest-api.md` and the 1.9.0 release notes document the frontals.
 
 - The packages install the node's file as `/var/lib/kelixip/domains.toml`,
   `kelixip:kelixip 0640`, and never overwrite it. An upgrade from a package that
@@ -350,7 +351,7 @@ Each lot builds and passes its tests before the next one starts.
 | D3 ✓ | `Kelix.Control`: one function per command family of §4, each a transformation of the domain's table handed to `put_domain/2`; `domain create` purges first and refuses an existing name or alias. The JSON document entry points (`put_domain/2` as a public command, `export_domain/1`) leave `Kelix.Control`. | per command: the table it writes; `not_found` for an unknown domain, package or number; `add` before the catch-all and `at=N`; `move`; a `default` moved off the end refused; `none` removes a key; `--version` conflict after a rule was inserted before the one addressed; the file read back gives the same snapshot |
 | D4 ✓ | kelictl: the grammar of §4, `domain show` with the version and numbered lists, help and completion. `domain delete` and the `domains file` line of `kelictl status` stay. | CLI parse and render tests; one run against a node started from the release |
 | D5 ✓ | REST: the routes of §5, `docs/kelixip/rest-api.md`. | Plug tests, token auth included |
-| D6 | Docs of the frontals: `administration.md` (the commands, the rule numbers and `--version`, the `file_changed` and `read_only` errors), the release notes. | a node installed from the package creates a domain, adds a rule, routes a call to it and deletes the domain through kelictl and through the API |
+| D6 ✓ | Docs of the frontals: `administration.md` (the commands, the rule numbers and `--version`, the `file_changed` and `read_only` errors), the release notes. | a node installed from the package creates a domain, adds a rule, routes a call to it and deletes the domain through kelictl and through the API |
 | D7 | **kelescope** (separate repository, its own SPEC in French): forms per element over the same commands, the version sent on every write, delete with a confirmation that shows the active calls and registrations about to end and asks for the admin name. Role rule: a domain admin edits only their domains. kelescope enforces it, because its RPC access to the node is total (ADR-001, *Conséquences*). | kelescope tests; end to end against a dev node |
 
 ## 9. Risks

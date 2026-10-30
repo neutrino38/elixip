@@ -51,6 +51,8 @@ do about it — the release's own script would only say `cat: Permission denied`
 | `kelictl domain list` | R | Served domains, their functions and live counters |
 | `kelictl domain show <domain>` | R | One domain in detail (name **or** alias) |
 | `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic, scripts checked) |
+| `kelictl domain create <domain> …` / `domain delete <domain>` | W | Create or delete a domain on the running node — [below](#editing-a-domain) |
+| `kelictl domain <domain> set\|alias\|registrar\|presence\|call\|chat\|options …` | W | Edit one element of a domain — *idem* |
 | `kelictl reload-all` | W | Reload everything that can be applied live: `domains.toml`, the scenario scripts, the module configs. What `systemctl reload` runs |
 | `kelictl mediaserver list` | R | The media-server pool: adapter, URL, switch, health |
 | `kelictl mediaserver show <name>` | R | One media server in detail, including what it says about itself |
@@ -371,6 +373,181 @@ apply, all set in [installation.md](installation.md):
 Only messages that go through a transaction of the scenario's dialogs are
 recorded. A stateless reply of the dialog layer, or an OPTIONS outside any
 dialog, is not.
+
+### Editing a domain
+
+A domain is created, edited and deleted on the running node, one element per
+command. Each command is a complete write: the node checks the result as it checks
+`domains.toml` at boot, writes the file, and serves the new domain at once. No
+reload, no restart.
+
+```console
+$ kelictl domain create example.com aliases=example.fr
+domain example.com created (v2)
+
+$ kelictl domain example.com call add default script=direct-call.exs
+rule 1 added (v3)
+
+$ kelictl domain example.com call add 0XXXXXXXXX script=direct-call.exs
+rule 1 added (v4)
+
+$ kelictl domain show example.com
+domain:        example.com
+aliases:       example.fr
+max calls:     unlimited
+active calls:  0
+registrations: 0
+version:       4
+registrar:     (disabled)
+presence:      (disabled)
+dial-plan:
+  1. 0XXXXXXXXX -> direct-call.exs  [Kelix.DirectCall.V1]
+  2. (default)  -> direct-call.exs  [Kelix.DirectCall.V1]
+chat:          (disabled)
+options:       (core answer)
+```
+
+A script the node cannot serve is refused before anything is written, with the reason:
+
+```console
+$ kelictl domain example.com registrar set script=registrar.exs
+1 script(s) rejected:
+  - domain example.com [domain.registrar]: /usr/share/kelixip/registrar.exs declares uses_modules ["auth_db"], which is not loaded (no [module.<name>] block, or no .beam in module_dir); loaded: ["registrar"]
+```
+
+The commands:
+
+```
+domain create <d> [aliases=a,b] [max_calls=N]
+domain delete <d>
+domain <d> set max_calls=N|none
+domain <d> alias add|remove <host>
+domain <d> registrar set script=X [default_expires=N|none] [min_expires=N|none]
+                                  [keepalive_period=N|none]
+domain <d> registrar remove
+domain <d> presence add <package> subscribe=X [publish=Y]
+domain <d> presence set <package> [subscribe=X] [publish=Y|none]
+domain <d> presence remove <package>
+domain <d> call|chat|options add <rule> script=X [at=N]
+domain <d> call|chat|options update <n> [pattern=P|default] [script=X]
+domain <d> call|chat|options move <n> to=<m>
+domain <d> call|chat|options remove <n>
+domain <d> presence <package> subscribe add|update|move|remove …
+domain <d> options keepalive set script=X
+domain <d> options keepalive remove
+```
+
+- `<d>` is the domain's name, not an alias.
+- `<rule>` is a dial pattern, or `default` for the catch-all.
+- A chat rule also takes `idle_timeout=N`.
+- `set` changes only the values it is given. `none` removes an optional value.
+- `presence set <package> subscribe=X` replaces the SUBSCRIBE rules with the single
+  script `X`. The `subscribe` commands edit them one by one.
+- `kelictl domain help` prints the same list on the box.
+
+The REST API has one route per command: see
+[rest-api.md](rest-api.md#editing-domains).
+
+#### Rules are addressed by number
+
+`domain show` numbers every rule list in the order the router tries the rules.
+`update`, `move` and `remove` take that number. A rule number changes when a rule is
+added, moved or removed before it.
+
+- `add` puts the new rule just before the catch-all, which stays last. `at=N` gives
+  another place. The answer gives the number the rule took.
+- In `options`, the keepalive is not a rule and has no number.
+- A command that would leave the catch-all anywhere but last is refused.
+
+**Use `--version`.** `domain show` prints the version of the domains. Pass it to the
+next command:
+
+```console
+$ kelictl domain example.com call remove 2 --version 4
+ok (v5)
+
+$ kelictl domain example.com call remove 1 --version 4
+the domains changed since the version given with --version, or while the command ran: read them again (kelictl domain show) and run the command again. Nothing was applied.
+```
+
+Without `--version`, the command applies to the domains as they are when it runs. If
+another operator added a rule in between, `call remove 2` removes another rule than
+the one you read.
+
+#### Who asked
+
+The node logs every write with the name of who asked:
+
+```
+domain call add 0XXXXXXXXX example.com by admin=alice: v4
+domain delete example.com by admin=alice: v8, 3 scenario(s) asked to stop, purge presence=:not_loaded registrar={:ok, 12}
+```
+
+`kelictl` passes your Unix user name. `--admin NAME` gives another name.
+
+#### Deleting a domain
+
+`domain delete` is never refused because the domain is in use, and it asks for no
+confirmation:
+
+```console
+$ kelictl domain delete example.com
+domain example.com deleted (v8): 3 scenario(s) asked to stop
+  presence: not loaded, nothing held
+  registrar: 12 purged
+```
+
+- New requests for the domain are answered `404` at once.
+- Its scenarios are asked to stop, as `kelictl stop` asks. A call in progress ends
+  with its BYE. The command does not wait for them.
+- Its registrations and its presence states are purged. A purge that fails is shown
+  as `purge FAILED`; the domain is deleted anyway, and the leftovers are purged when
+  a domain of that name is created again.
+- `domain create` starts from nothing: whatever an older domain of that name left is
+  purged first.
+- A `domain reload-all` whose file no longer has a domain ends it in the same way.
+
+#### The file
+
+The node writes the domains to `domains.toml` (`/var/lib/kelixip/domains.toml` on a
+packaged node). `kelictl status` says whether it can:
+
+```console
+domains file:    /var/lib/kelixip/domains.toml, writable
+```
+
+- **Comments do not survive a write.** The node writes the file from its data, with a
+  generated header. The commented example is
+  `/usr/share/doc/kelixip/domains.toml.example`.
+- **`[module.registrar]`** is kept as it is. No command edits it.
+- **A hand edit blocks the writes until it is reloaded.** The file can still be edited
+  by hand. Until `kelictl domain reload-all` applies the edit, every write is
+  refused, so that it does not erase the edit:
+
+  ```console
+  $ kelictl domain example.com set max_calls=100
+  domains.toml was edited by hand and not reloaded, and a write would erase that edit: run `kelictl domain reload-all` first. Nothing was applied.
+  ```
+
+  A `reload-all` that fails keeps the block: fix the file and reload again.
+- **A file the node cannot write.** The node still starts and serves the file, and
+  logs a warning. Every write is refused with the path, the system reason and the
+  user the node runs as:
+
+  ```console
+  $ kelictl domain example.com set max_calls=100
+  the node cannot write /srv/domains.toml (permission denied, eacces, running as kelixip): give the file and its directory to kelixip, or point KELIXIP_DOMAINS to /var/lib/kelixip/domains.toml. Nothing was applied.
+  ```
+
+  The node checks again before every write: a fixed permission works without a
+  restart.
+- **Backups**: whatever saves `/etc/kelixip` must also save
+  `/var/lib/kelixip/domains.toml`.
+- **One file per node.** A domain created on one node does not exist on the others.
+
+The exit codes are those of [below](#exit-codes): `3` for an unknown domain, alias,
+package or rule number, `4` for a name that already exists, a conflict or a hand edit, `5` for a file the node
+cannot write.
 
 ### Reloading a running node
 

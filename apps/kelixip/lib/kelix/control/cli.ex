@@ -1938,7 +1938,8 @@ defmodule Kelix.Control.CLI do
 
     Editing a domain, one element per command. <rule> is a dial pattern, or
     `default` for the catch-all; <n> and <m> are rule numbers as `show` prints them.
-    Every edit takes --version N and --admin NAME too.
+    Every edit takes --version N and --admin NAME too. The REST API has one route
+    per command (docs/kelixip/rest-api.md, "Editing domains").
 
       domain create <domain> [aliases=a,b] [max_calls=N]
       domain <domain> set max_calls=N|none
@@ -2216,7 +2217,7 @@ defmodule Kelix.Control.CLI do
   defp format_domains_file(%{domains_path: path, domains_writable: true}), do: "#{path}, writable"
 
   defp format_domains_file(%{domains_path: path, domains_write_error: %{reason: r, user: u}}),
-    do: "#{path}, NOT writable (#{r}, node runs as #{u}): domain apply/delete will fail"
+    do: "#{path}, NOT writable (#{r}, node runs as #{u}): domain edits will fail"
 
   defp format_domains_file(_status), do: "unknown"
 
