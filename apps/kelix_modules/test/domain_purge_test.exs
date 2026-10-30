@@ -112,7 +112,7 @@ defmodule Kelix.DomainPurgeTest do
     Kelix.Test.Fixtures.with_module("registrar", Registrar)
 
     capture_log(fn ->
-      assert {:ok, %{created: true}} = Control.put_domain(%{"name" => "gone.example"})
+      assert {:ok, _} = Control.create_domain("gone.example")
     end)
 
     refute held?("gone.example")
@@ -126,10 +126,10 @@ defmodule Kelix.DomainPurgeTest do
     assert held?("kept.example")
   end
 
-  test "replacing a domain keeps its state" do
+  test "editing a domain keeps its state" do
     capture_log(fn ->
-      assert {:ok, %{created: false}} =
-               Control.put_domain(%{"name" => "gone.example", "max_calls" => 2})
+      assert {:ok, _} = Control.set_domain("gone.example", %{"max_calls" => 2})
+      assert {:ok, _} = Control.add_alias("gone.example", "other.example")
     end)
 
     assert held?("gone.example")

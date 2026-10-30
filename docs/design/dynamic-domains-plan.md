@@ -1,6 +1,7 @@
 # dynamic-domains-plan.md — defining domains at run time
 
-**Status: lots M, D0, D1 and D2 implemented (2026-10-29); D3 to D7 not started.
+**Status: lots M, D0 to D2 implemented (2026-10-29), D3 (2026-10-30); D4 to D7 not
+started.
 Decisions taken 2026-10-29 (§3), command grammar decided 2026-10-30 (§4).**
 
 ## 1. Scope
@@ -34,7 +35,7 @@ Out of scope:
 
 ## 2. What exists
 
-Lots M to D2 are in the tree.
+Lots M to D3 are in the tree.
 
 - The packages install the node's file as `/var/lib/kelixip/domains.toml`,
   `kelixip:kelixip 0640`, and never overwrite it. An upgrade from a package that
@@ -48,10 +49,16 @@ Lots M to D2 are in the tree.
 - `Kelix.Domains.put_domain/2` and `delete_domain/2` are the write path of §3 and
   §7: one `[[domain]]` table replaced, appended or removed, then encoded, parsed,
   checked and written.
-- `Kelix.Control.put_domain/2` and `delete_domain/2` sit on top. A new name is
-  purged before it is created. A delete, and a reload that removes a domain, stop
-  the domain's scenarios and purge its state (decision 3). Every write is logged
-  with its actor.
+- `Kelix.Domains.Edit` holds the commands of §4 as pure transformations of one
+  domain's table (`change/2`, `new/2`, `rules/2`).
+- `Kelix.Control` has one function per command family — `create_domain/3`,
+  `set_domain/3`, `add_alias/3`, `remove_alias/3`, `set_registrar/3`,
+  `remove_registrar/2`, `add_presence/4`, `set_presence/4`, `remove_presence/3`,
+  `add_rule/5`, `update_rule/5`, `move_rule/5`, `remove_rule/4`, `set_keepalive/3`,
+  `remove_keepalive/2` — and `delete_domain/2`. A new name is purged before it is
+  created. A delete, and a reload that removes a domain, stop the domain's
+  scenarios and purge its state (decision 3). Every write is logged with its
+  actor and the command.
 - `Kelix.InstancePool.shutdown_domain/3` stops the instances of one domain, and
   answers 404 to a route resolved from a snapshot older than the deletion.
 - `Kelix.Mod.Registrar.purge_domain/1` and `Kelix.Mod.Presence.purge_domain/1`
@@ -334,7 +341,7 @@ Each lot builds and passes its tests before the next one starts.
 | D0 ✓ | What a reload removing a domain did (decision 3). `source` and `source_hash` in the snapshot. | findings in decision 3 |
 | D1 ✓ | The TOML encoder (decision 1). | round-trip tests |
 | D2 ✓ | The write path of §7 below `Kelix.Control`; `shutdown_domain/3` and the version check in the pool; `purge_domain/1` in registrar and presence; the end of a removed domain on delete and on reload. | write, refusal, race and purge tests |
-| D3 | `Kelix.Control`: one function per command family of §4, each a transformation of the domain's table handed to `put_domain/2`; `domain create` purges first and refuses an existing name or alias. The JSON document entry points (`put_domain/2` as a public command, `export_domain/1`) leave `Kelix.Control`. | per command: the table it writes; `not_found` for an unknown domain, package or number; `add` before the catch-all and `at=N`; `move`; a `default` moved off the end refused; `none` removes a key; `--version` conflict after a rule was inserted before the one addressed; the file read back gives the same snapshot |
+| D3 ✓ | `Kelix.Control`: one function per command family of §4, each a transformation of the domain's table handed to `put_domain/2`; `domain create` purges first and refuses an existing name or alias. The JSON document entry points (`put_domain/2` as a public command, `export_domain/1`) leave `Kelix.Control`. | per command: the table it writes; `not_found` for an unknown domain, package or number; `add` before the catch-all and `at=N`; `move`; a `default` moved off the end refused; `none` removes a key; `--version` conflict after a rule was inserted before the one addressed; the file read back gives the same snapshot |
 | D4 | kelictl: the grammar of §4, `domain show` with the version and numbered lists, help and completion. `domain delete` and the `domains file` line of `kelictl status` stay. | CLI parse and render tests; one run against a node started from the release |
 | D5 | REST: the routes of §5, `docs/kelixip/rest-api.md`. | Plug tests, token auth included |
 | D6 | Docs of the frontals: `administration.md` (the commands, the rule numbers and `--version`, the `file_changed` and `read_only` errors), the release notes. | a node installed from the package creates a domain, adds a rule, routes a call to it and deletes the domain through kelictl and through the API |

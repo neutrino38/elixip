@@ -42,8 +42,13 @@ defmodule Kelix.DomainsWriteTest do
     %{dir: dir, path: path}
   end
 
-  defp doc(name, extra \\ %{}),
-    do: Map.merge(%{"name" => name, "registrar" => %{"script" => "domain_waiter.exs"}}, extra)
+  # A domain created, then given the registrar function: two writes, as an operator
+  # makes them.
+  defp create(name, opts \\ []) do
+    with {:ok, _} <- Control.create_domain(name, %{}, opts) do
+      Control.set_registrar(name, %{"script" => "domain_waiter.exs"}, opts)
+    end
+  end
 
   defp names(), do: Enum.map(Domains.current().domains, & &1.name)
 
@@ -55,14 +60,20 @@ defmodule Kelix.DomainsWriteTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
   end
 
-  describe "put_domain/2" do
+  describe "create_domain/3 and the write path" do
     test "creates a domain at the end, which then routes to its script", %{path: path} do
-      capture_log(fn ->
-        assert {:ok, %{name: "new.example", created: true, version: v}} =
-                 Control.put_domain(doc("new.example"), actor: "alice")
+      log =
+        capture_log(fn ->
+          assert {:ok, %{name: "new.example", version: v}} =
+                   Control.create_domain("new.example", %{}, actor: "alice")
 
-        assert Domains.current().version == v
-      end)
+          assert Domains.current().version == v
+
+          assert {:ok, _} =
+                   Control.set_registrar("new.example", %{"script" => "domain_waiter.exs"})
+        end)
+
+      assert log =~ "domain create new.example by admin=alice"
 
       assert names() == ["first.example", "second.example", "new.example"]
       assert File.read!(path) =~ ~s(name = "new.example")
@@ -75,44 +86,50 @@ defmodule Kelix.DomainsWriteTest do
       end)
     end
 
-    test "replaces a domain in its place, keeping the rest of the file" do
+    test "an edit keeps the domain in its place and the rest of the file" do
       capture_log(fn ->
-        assert {:ok, %{created: false}} =
-                 Control.put_domain(doc("FIRST.example", %{"max_calls" => 3}))
+        assert {:ok, %{name: "first.example"}} =
+                 Control.set_domain("FIRST.example", %{"max_calls" => "3"})
       end)
 
-      assert names() == ["FIRST.example", "second.example"]
+      assert names() == ["first.example", "second.example"]
       assert hd(Domains.current().domains).max_calls == 3
       assert Domains.current().modules == %{"registrar" => %{"default_expires" => 3600}}
     end
 
     test "the file read back gives the same snapshot", %{path: path} do
-      capture_log(fn -> {:ok, _} = Control.put_domain(doc("new.example")) end)
+      capture_log(fn -> {:ok, _} = create("new.example") end)
 
       {:ok, read_back} = Domains.parse(File.read!(path))
       assert read_back.source == Domains.current().source
       assert read_back.source_hash == Domains.current().source_hash
     end
 
-    test "an invalid document or a missing script changes nothing", %{path: path} do
+    test "an invalid command, a taken name or a missing script changes nothing",
+         %{path: path} do
       before = File.read!(path)
       version = Domains.current().version
 
-      assert {:error, {:invalid, msg}} =
-               Control.put_domain(%{"name" => "x.example", "bogus" => 1})
-
+      assert {:error, {:invalid, msg}} = Control.create_domain("x.example", %{"bogus" => 1})
       assert msg =~ "bogus"
-      assert {:error, {:invalid, _}} = Control.put_domain(%{"aliases" => ["x"]})
+      assert {:error, {:invalid, _}} = Control.create_domain("x.example", %{"max_calls" => "x"})
+
+      # a name or an alias already served, whatever its case
+      assert Control.create_domain("Second.Example") == {:error, :exists}
+      assert Control.create_domain("alias.example") == {:error, :exists}
 
       assert {:error, {:invalid, _}} =
-               Control.put_domain(%{"name" => "x.example", "aliases" => ["second.example"]})
+               Control.create_domain("x.example", %{"aliases" => "second.example"})
 
       capture_log(fn ->
         assert {:error, {:scripts, msg}} =
-                 Control.put_domain(doc("x.example", %{"registrar" => %{"script" => "nope.exs"}}))
+                 Control.set_registrar("first.example", %{"script" => "nope.exs"})
 
         assert msg =~ "nope.exs"
       end)
+
+      assert Control.set_domain("nowhere.example", %{"max_calls" => 1}) == {:error, :not_found}
+      assert Control.set_domain("alias.example", %{"max_calls" => 1}) == {:error, :not_found}
 
       assert File.read!(path) == before
       assert Domains.current().version == version
@@ -120,23 +137,26 @@ defmodule Kelix.DomainsWriteTest do
 
     test "a stale version is a conflict" do
       v = Domains.current().version
-      assert Control.put_domain(doc("new.example"), version: v - 1) == {:error, :conflict}
-      capture_log(fn -> assert {:ok, _} = Control.put_domain(doc("new.example"), version: v) end)
+      assert Control.create_domain("new.example", %{}, version: v - 1) == {:error, :conflict}
+
+      capture_log(fn ->
+        assert {:ok, _} = Control.create_domain("new.example", %{}, version: v)
+      end)
     end
 
     test "a hand edit not reloaded blocks writes until a reload succeeds", %{path: path} do
       File.write!(path, File.read!(path) <> "\n# edited by hand\n")
-      assert Control.put_domain(doc("new.example")) == {:error, :file_changed}
+      assert Control.create_domain("new.example") == {:error, :file_changed}
 
       # a failed reload keeps the old snapshot, and the block with it
       good = File.read!(path)
       File.write!(path, "not toml [[[")
       capture_log(fn -> assert {:error, _} = Control.reload_domains() end)
-      assert Control.put_domain(doc("new.example")) == {:error, :file_changed}
+      assert Control.create_domain("new.example") == {:error, :file_changed}
 
       File.write!(path, good)
       capture_log(fn -> assert :ok = Control.reload_domains() end)
-      capture_log(fn -> assert {:ok, _} = Control.put_domain(doc("new.example")) end)
+      capture_log(fn -> assert {:ok, _} = Control.create_domain("new.example") end)
       refute File.read!(path) =~ "edited by hand"
     end
 
@@ -146,7 +166,7 @@ defmodule Kelix.DomainsWriteTest do
       File.chmod!(dir, 0o555)
 
       assert {:error, {:read_only, %{path: ^path, reason: :eacces, user: user}}} =
-               Control.put_domain(doc("new.example"))
+               Control.create_domain("new.example")
 
       assert is_binary(user) and user != ""
 
@@ -158,7 +178,7 @@ defmodule Kelix.DomainsWriteTest do
       File.chmod!(path, 0o644)
       assert File.read!(path) == before
       assert Domains.writable(path) == :ok
-      capture_log(fn -> assert {:ok, _} = Control.put_domain(doc("new.example")) end)
+      capture_log(fn -> assert {:ok, _} = Control.create_domain("new.example") end)
     end
   end
 
@@ -183,7 +203,7 @@ defmodule Kelix.DomainsWriteTest do
     end
 
     test "stops the running scenarios; a route resolved before is answered 404" do
-      capture_log(fn -> {:ok, _} = Control.put_domain(doc("call.example")) end)
+      capture_log(fn -> {:ok, _} = create("call.example") end)
       stale = Domains.current()
 
       {:accept, pid} = Router.dispatch(nil, register("call.example"))
@@ -198,14 +218,14 @@ defmodule Kelix.DomainsWriteTest do
       assert Router.dispatch(nil, register("call.example"), stale) == {:reject, 404, "Not Found"}
 
       # the same name created again runs
-      capture_log(fn -> {:ok, _} = Control.put_domain(doc("call.example")) end)
+      capture_log(fn -> {:ok, _} = create("call.example") end)
       assert {:accept, _pid} = Router.dispatch(nil, register("call.example"))
     end
   end
 
   describe "a reload that removes a domain" do
     test "stops its scenarios, as a delete does", %{path: path} do
-      capture_log(fn -> {:ok, _} = Control.put_domain(doc("call.example")) end)
+      capture_log(fn -> {:ok, _} = create("call.example") end)
       {:accept, pid} = Router.dispatch(nil, register("call.example"))
 
       text = File.read!(path)
@@ -217,16 +237,6 @@ defmodule Kelix.DomainsWriteTest do
       capture_log(fn -> assert :ok = Control.reload_domains() end)
       await_down(pid)
       refute "call.example" in names()
-    end
-  end
-
-  describe "export_domain/1" do
-    test "gives back the document put_domain accepts, by name or alias" do
-      assert {:ok, %{"name" => "second.example", "aliases" => ["alias.example"]} = d} =
-               Control.export_domain("alias.example")
-
-      capture_log(fn -> assert {:ok, %{created: false}} = Control.put_domain(d) end)
-      assert Control.export_domain("nowhere.example") == {:error, :not_found}
     end
   end
 
