@@ -457,9 +457,18 @@ defmodule Kelix.Control do
   """
   @spec domain(String.t()) :: {:ok, map} | {:error, :not_found}
   def domain(name) when is_binary(name) do
-    case Kelix.Domains.lookup(current_domains(), name) do
-      nil -> {:error, :not_found}
-      d -> {:ok, describe_domain(d, active_calls(), loaded_scripts())}
+    snapshot = current_domains()
+
+    case Kelix.Domains.lookup(snapshot, name) do
+      nil ->
+        {:error, :not_found}
+
+      d ->
+        # the version an edit passes as `--version` to fail if the domains move first
+        {:ok,
+         d
+         |> describe_domain(active_calls(), loaded_scripts())
+         |> Map.put(:version, snapshot.version)}
     end
   end
 
@@ -484,6 +493,9 @@ defmodule Kelix.Control do
       presence: Enum.map(d.presence, &render_presence_block(&1, loaded)),
       dial_plan: Enum.map(d.dial_plan, &render_rule(&1, loaded)),
       chat: Enum.map(d.chat, &render_rule(&1, loaded)),
+      options: Enum.map(d.options, &render_rule(&1, loaded)),
+      options_keepalive:
+        d.options_keepalive && with_module(%{script: d.options_keepalive}, loaded),
       active_calls: Map.get(active, d.name, 0),
       registrations: map_size(registrations_for(d.name))
     }

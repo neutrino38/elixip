@@ -231,10 +231,10 @@ defmodule Kelix.Control.CLITest do
       {0, out} = run(["domain", "show", "presence.example.com"])
 
       assert out =~
-               ~r/presence SUBSCRIBE rls\s+-> presence-rls.exs\s+\[not loaded\]\n\s+presence SUBSCRIBE \(default\) -> presence-subscribe.exs/
+               ~r/presence SUBSCRIBE 1\. rls\s+-> presence-rls.exs\s+\[not loaded\]\n\s+presence SUBSCRIBE 2\. \(default\) -> presence-subscribe.exs/
 
       assert out =~ ~r/presence PUBLISH\s+-> presence-publish.exs/
-      assert out =~ ~r/dialog\s+SUBSCRIBE \(default\) -> dialog-subscribe.exs/
+      assert out =~ ~r/dialog\s+SUBSCRIBE 1\. \(default\) -> dialog-subscribe.exs/
       assert out =~ ~r/dialog\s+PUBLISH\s+-> \(not served\)/
     end
   end
@@ -1435,8 +1435,9 @@ defmodule Kelix.Control.CLITest do
       assert words(["registration", "show", "cli.other.example.net", ""]) == []
     end
 
+    # Not `domain`: the word after it may be the name of the domain to edit.
     test "a mistyped core noun completes nothing, and is never taken for a module" do
-      assert words(["domain", "shwo", ""]) == []
+      assert words(["mediaserver", "shwo", ""]) == []
     end
 
     # Membership, not equality: the registry keeps what earlier tests loaded, and a

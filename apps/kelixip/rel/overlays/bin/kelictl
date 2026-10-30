@@ -34,8 +34,9 @@ if [ -z "${RELEASE_COOKIE-}" ] && [ -e "$COOKIE_FILE" ] && [ ! -r "$COOKIE_FILE"
 fi
 
 # A write to the domains is logged with who asked: the operator's user name, unless
-# --admin says otherwise. The node cannot know it, the command runs there.
-if [ "${1:-}" = domain ] && [ "${2:-}" = delete ]; then
+# --admin says otherwise. The node cannot know it, the command runs there. Every
+# `domain` form of three words or more writes, except `show`.
+if [ "${1:-}" = domain ] && [ $# -ge 3 ] && [ "${2:-}" != show ]; then
   case " $* " in
     *" --admin"*) ;;
     *) set -- "$@" --admin "$(id -un 2>/dev/null || echo unknown)" ;;

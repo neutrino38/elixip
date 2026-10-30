@@ -13,6 +13,7 @@ defmodule Kelix.Control.CLIDomainsTest do
 
   setup do
     %{dir: dir, path: path} = Kelix.Test.Fixtures.serve_domains(@initial)
+    Kelix.Test.Fixtures.with_script_dir(Path.join(__DIR__, "support/scripts"))
 
     prev = Application.get_env(:kelixip, :domains_path)
     Application.put_env(:kelixip, :domains_path, path)
@@ -80,6 +81,123 @@ defmodule Kelix.Control.CLIDomainsTest do
     end
   end
 
+  @s "script=domain_waiter.exs"
+
+  # Each write is its own command, as an operator types them; the log is not the
+  # subject here.
+  defp edit(argv), do: elem(with_log(fn -> run(argv) end), 0)
+
+  defp show(), do: elem(run(["domain", "show", "new.example"]), 1)
+
+  describe "editing a domain one element at a time" do
+    test "create, then functions and rules, read back by domain show" do
+      assert {0, "domain new.example created (v" <> _} =
+               edit(["domain", "create", "new.example", "aliases=n2.example", "max_calls=5"])
+
+      assert {0, "ok (v" <> _} = edit(["domain", "new.example", "registrar", "set", @s])
+
+      assert {0, "rule 1 added" <> _} =
+               edit(["domain", "new.example", "call", "add", "default", @s])
+
+      assert {0, "rule 1 added" <> _} = edit(["domain", "new.example", "call", "add", "1XXX", @s])
+      assert {0, "rule 2 added" <> _} = edit(["domain", "new.example", "call", "add", "2XXX", @s])
+
+      assert {0, _} =
+               edit(["domain", "new.example", "chat", "add", "default", @s, "idle_timeout=60"])
+
+      assert {0, _} = edit(["domain", "new.example", "options", "keepalive", "set", @s])
+      assert {0, _} = edit(["domain", "new.example", "options", "add", "conf-.", @s])
+
+      assert {0, _} =
+               edit([
+                 "domain",
+                 "new.example",
+                 "presence",
+                 "add",
+                 "presence",
+                 "subscribe=domain_waiter.exs"
+               ])
+
+      assert {0, "rule 1 added" <> _} =
+               edit([
+                 "domain",
+                 "new.example",
+                 "presence",
+                 "presence",
+                 "subscribe",
+                 "add",
+                 "rls",
+                 @s
+               ])
+
+      out = show()
+      assert out =~ "aliases:       n2.example"
+      assert out =~ "max calls:     5"
+      assert out =~ "version:       #{Kelix.Domains.current().version}"
+      assert out =~ ~r/  1\. 1XXX\s+-> domain_waiter.exs/
+      assert out =~ ~r/  3\. \(default\) -> domain_waiter.exs/
+      assert out =~ "idle 60s"
+      assert out =~ ~r/options:\n  keepalive -> domain_waiter.exs.*\n  1\. conf-\./
+      assert out =~ "presence SUBSCRIBE 1. rls"
+      assert out =~ "presence SUBSCRIBE 2. (default)"
+    end
+
+    test "update, move, remove a rule; set and alias" do
+      edit(["domain", "create", "new.example"])
+      edit(["domain", "new.example", "call", "add", "1XXX", @s])
+      edit(["domain", "new.example", "call", "add", "2XXX", @s])
+
+      assert {0, _} = edit(["domain", "new.example", "call", "update", "2", "pattern=3XXX"])
+      assert {0, _} = edit(["domain", "new.example", "call", "move", "2", "to=1"])
+      assert show() =~ ~r/1\. 3XXX.*\n  2\. 1XXX/
+      assert {0, _} = edit(["domain", "new.example", "call", "remove", "1"])
+      refute show() =~ "3XXX"
+
+      assert {0, _} = edit(["domain", "new.example", "set", "max_calls=9"])
+      assert show() =~ "max calls:     9"
+      assert {0, _} = edit(["domain", "new.example", "set", "max_calls=none"])
+      assert show() =~ "max calls:     unlimited"
+
+      assert {0, _} = edit(["domain", "new.example", "alias", "add", "n3.example"])
+      assert {0, _} = edit(["domain", "new.example", "alias", "remove", "n3.example"])
+    end
+
+    test "--admin and the command reach the node's log" do
+      edit(["domain", "create", "new.example"])
+
+      log =
+        capture_log(fn ->
+          run(["domain", "new.example", "call", "add", "1XXX", @s, "--admin", "alice"])
+        end)
+
+      assert log =~ "domain call add 1XXX new.example by admin=alice"
+    end
+
+    test "refusals: not found 3, exists and conflict 4, invalid 1, usage 2" do
+      assert {3, _} = edit(["domain", "nowhere.example", "set", "max_calls=1"])
+      assert {3, _} = edit(["domain", "first.example", "call", "remove", "1"])
+      assert {4, "it already exists"} = edit(["domain", "create", "alias.example"])
+
+      v = Kelix.Domains.current().version
+      edit(["domain", "first.example", "call", "add", "1XXX", @s])
+
+      assert {4, _} =
+               edit(["domain", "first.example", "call", "remove", "1", "--version", "#{v}"])
+
+      assert {1, "invalid domain: unknown argument(s): bogus"} =
+               edit(["domain", "first.example", "set", "bogus=1"])
+
+      assert {2, "domain: \"1XXX\" is not name=value"} =
+               edit(["domain", "first.example", "call", "update", "1", "1XXX"])
+
+      assert {2, "usage: kelictl domain" <> _} =
+               edit(["domain", "first.example", "call", "move", "1"])
+
+      assert {2, "usage: kelictl domain" <> _} =
+               edit(["domain", "first.example", "alias", "add", "x.example", "a=b"])
+    end
+  end
+
   describe "status" do
     test "says whether the node can write its domains.toml", %{dir: dir, path: path} do
       assert {0, out} = run(["status"])
@@ -92,7 +210,7 @@ defmodule Kelix.Control.CLIDomainsTest do
     end
   end
 
-  test "help and completion know `domain delete`" do
+  test "help and completion know the domain commands" do
     assert {0, help} = run(["domain", "help"])
     assert help =~ "[DELETE /domains/<domain>]"
 
@@ -101,5 +219,17 @@ defmodule Kelix.Control.CLIDomainsTest do
 
     assert {0, words} = run(["complete", "domain", "delete", ""])
     assert "first.example" in String.split(words, "\n")
+
+    assert {0, words} = run(["complete", "domain", ""])
+    assert ["create", "first.example"] -- String.split(words, "\n") == []
+
+    assert {0, words} = run(["complete", "domain", "first.example", ""])
+    assert String.split(words, "\n") == ~w(alias call chat options presence registrar set)
+
+    assert {0, "add\nmove\nremove\nupdate"} =
+             run(["complete", "domain", "first.example", "call", ""])
+
+    assert {0, help} = run(["domain", "help"])
+    assert help =~ "domain <domain> call|chat|options move <n> to=<m>"
   end
 end
