@@ -45,13 +45,21 @@ defmodule Kelix.Control do
   end
 
   # Whether a domain written through kelictl, the API or kelescope can reach the
-  # disk — checked now, so a permission fixed or lost shows without a restart.
+  # disk, and whether a hand edit not reloaded blocks it — checked now, so a
+  # permission fixed or a reload done shows without a restart.
   defp domains_file() do
     case Application.get_env(:kelixip, :domains_path) do
       nil ->
-        %{domains_path: nil, domains_writable: nil, domains_write_error: nil}
+        %{
+          domains_path: nil,
+          domains_writable: nil,
+          domains_write_error: nil,
+          domains_file_changed: nil
+        }
 
       path ->
+        changed = safe(fn -> Kelix.Domains.file_changed?(Kelix.Domains.current(), path) end, nil)
+
         case Kelix.Domains.writable(path) do
           :ok ->
             %{domains_path: path, domains_writable: true, domains_write_error: nil}
@@ -63,6 +71,7 @@ defmodule Kelix.Control do
               domains_write_error: %{reason: to_string(reason), user: user}
             }
         end
+        |> Map.put(:domains_file_changed, changed)
     end
   end
 

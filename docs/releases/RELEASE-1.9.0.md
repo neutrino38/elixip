@@ -177,7 +177,8 @@ rule 1 added (v4)
 - **Comments disappear at the first write.** The node writes the file from its data,
   with a generated header. `[module.registrar]` is kept as it is.
 - **A hand edit not yet reloaded blocks the writes**, so that a write does not erase
-  it. `kelictl domain reload-all` lifts the block.
+  it. `kelictl status` says so (`EDITED BY HAND`), as does `GET /status`
+  (`domains_file_changed`). `kelictl domain reload-all` lifts the block.
 - **A file the node cannot write** does not stop the node. It logs a warning at boot,
   `kelictl status` shows `domains file: …, NOT writable`, and every write is refused
   with the path, the reason and the fix.

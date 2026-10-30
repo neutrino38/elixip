@@ -94,6 +94,10 @@ The file stays a text file. An operator can still edit it and run
 - **A hand edit not yet reloaded is never overwritten.** Before a write, kelixip
   compares the hash of the file on disk with `source_hash`. If they differ, the
   write answers `file_changed` and nothing is applied.
+- **The block shows before a write.** `kelictl status` and `GET /status`
+  (`domains_file_changed`) compare the hash of the file on disk with
+  `source_hash` at the time of the request, with the same function as the write.
+  kelescope reads it to disable its forms.
 - **A successful `reload-all` lifts the block.** It builds a new snapshot from the
   file on disk, so the two hashes agree again. A failed `reload-all` keeps the old
   snapshot and its old hash: the block stays, and the error says the file must be
@@ -284,8 +288,8 @@ name in the `X-Kelix-Admin` header.
 (the parser's message), 404 unknown domain, alias, package or rule number, 409
 `exists`, `conflict` or `file_changed`, 500 `write_failed`, 503 `read_only` or
 `no_domains_path`. `GET /status` carries
-`domains_path`, `domains_writable` and, when the file is not writable,
-`domains_write_error`.
+`domains_path`, `domains_writable`, `domains_file_changed` and, when the file is not
+writable, `domains_write_error`.
 
 ## 6. Migration of existing nodes
 

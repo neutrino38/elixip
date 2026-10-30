@@ -208,6 +208,19 @@ defmodule Kelix.Control.CLIDomainsTest do
       assert {0, out} = run(["status"])
       assert out =~ "domains file:    #{path}, NOT writable (eacces, node runs as "
     end
+
+    test "says when the file was edited by hand, until it is reloaded", %{path: path} do
+      File.write!(path, File.read!(path) <> "# by hand\n")
+      assert {0, out} = run(["status"])
+
+      assert out =~
+               "domains file:    #{path}, writable; EDITED BY HAND and not reloaded: " <>
+                 "domain edits are refused until `kelictl domain reload-all`"
+
+      assert {0, "ok"} = elem(with_log(fn -> run(["domain", "reload-all"]) end), 0)
+      assert {0, out} = run(["status"])
+      assert out =~ ~r/domains file:    #{path}, writable\n/
+    end
   end
 
   test "help and completion know the domain commands" do

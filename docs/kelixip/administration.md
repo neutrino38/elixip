@@ -529,6 +529,12 @@ domains file:    /var/lib/kelixip/domains.toml, writable
   domains.toml was edited by hand and not reloaded, and a write would erase that edit: run `kelictl domain reload-all` first. Nothing was applied.
   ```
 
+  `kelictl status` shows the block before any write is tried:
+
+  ```console
+  domains file:    /var/lib/kelixip/domains.toml, writable; EDITED BY HAND and not reloaded: domain edits are refused until `kelictl domain reload-all`
+  ```
+
   A `reload-all` that fails keeps the block: fix the file and reload again.
 - **A file the node cannot write.** The node still starts and serves the file, and
   logs a warning. Every write is refused with the path, the system reason and the

@@ -154,6 +154,19 @@ defmodule Kelix.Domains do
     end
   end
 
+  @doc """
+  Whether the file at `path` is no longer the text `snapshot` was read from: it was
+  edited by hand and not reloaded, or it is gone. A write is then refused with
+  `:file_changed`, so that it does not erase the edit.
+  """
+  @spec file_changed?(t, Path.t()) :: boolean
+  def file_changed?(%__MODULE__{source_hash: hash}, path) do
+    case File.read(path) do
+      {:ok, text} -> :crypto.hash(:sha256, text) != hash
+      {:error, _} -> true
+    end
+  end
+
   defp check_write(_path, {:ok, io}) when is_pid(io), do: File.close(io)
   defp check_write(_path, :ok), do: :ok
 
@@ -333,17 +346,8 @@ defmodule Kelix.Domains do
   defp same_version(_state, _expected), do: {:error, :conflict}
 
   # A hand edit not reloaded yet is the operator's, and a write would erase it.
-  defp same_file(state, path) do
-    case File.read(path) do
-      {:ok, text} ->
-        if :crypto.hash(:sha256, text) == state.source_hash,
-          do: :ok,
-          else: {:error, :file_changed}
-
-      {:error, _} ->
-        {:error, :file_changed}
-    end
-  end
+  defp same_file(state, path),
+    do: if(file_changed?(state, path), do: {:error, :file_changed}, else: :ok)
 
   defp write_file(path, text) do
     tmp = path <> ".tmp"

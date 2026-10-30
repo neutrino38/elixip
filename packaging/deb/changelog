@@ -7,7 +7,8 @@ kelixip (1.9.0-3) stable; urgency=low
     boot, then written to /var/lib/kelixip/domains.toml, without its
     comments. Rules are addressed by number; --version (REST: version)
     refuses an edit when the domains changed since. A hand edit not
-    reloaded blocks the writes until kelictl domain reload-all. Deleting a
+    reloaded blocks the writes until kelictl domain reload-all; kelictl
+    status and GET /status say so. Deleting a
     domain stops its calls and purges its registrations and presence
     states; so does a reload that removes it.
   * The distribution cookie postinst generates is alphanumeric. A cookie

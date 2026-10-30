@@ -2214,12 +2214,24 @@ defmodule Kelix.Control.CLI do
   defp purge_line(other), do: inspect(other)
 
   defp format_domains_file(%{domains_path: nil}), do: "none"
-  defp format_domains_file(%{domains_path: path, domains_writable: true}), do: "#{path}, writable"
 
-  defp format_domains_file(%{domains_path: path, domains_write_error: %{reason: r, user: u}}),
-    do: "#{path}, NOT writable (#{r}, node runs as #{u}): domain edits will fail"
+  defp format_domains_file(%{domains_path: path} = s),
+    do: "#{path}, " <> writable_text(s) <> changed_text(Map.get(s, :domains_file_changed))
 
   defp format_domains_file(_status), do: "unknown"
+
+  defp writable_text(%{domains_writable: true}), do: "writable"
+
+  defp writable_text(%{domains_write_error: %{reason: r, user: u}}),
+    do: "NOT writable (#{r}, node runs as #{u}): domain edits will fail"
+
+  defp writable_text(_status), do: "unknown"
+
+  defp changed_text(true),
+    do:
+      "; EDITED BY HAND and not reloaded: domain edits are refused until `kelictl domain reload-all`"
+
+  defp changed_text(_), do: ""
 
   defp usage_mediaserver() do
     "usage: kelictl mediaserver list | mediaserver show <name> | " <>

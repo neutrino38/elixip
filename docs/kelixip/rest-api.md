@@ -307,8 +307,12 @@ A purge that failed shows as `{"error": "…"}`. The domain is deleted anyway.
 | `503` | `read_only` | the node cannot write the file; the body also carries `path`, `reason` and `user` |
 | `503` | `no_domains_path` | the node reads no `domains.toml` |
 
-`GET /status` says whether a write can succeed: `domains_path`, `domains_writable`
-and, when it is `false`, `domains_write_error`.
+`GET /status` says whether a write can succeed, checked at the time of the request:
+
+- `domains_path`;
+- `domains_writable` and, when it is `false`, `domains_write_error`;
+- `domains_file_changed`: `true` when the file was edited by hand and not
+  reloaded. Every write then answers `409 file_changed`.
 
 ```bash
 H=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'X-Kelix-Admin: alice')

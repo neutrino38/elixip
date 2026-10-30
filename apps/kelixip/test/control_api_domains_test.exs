@@ -329,6 +329,19 @@ defmodule Kelix.ControlAPIDomainsTest do
     end
   end
 
+  describe "GET /status" do
+    test "says whether the file was edited by hand and not reloaded", %{path: path} do
+      assert {200, %{"domains_file_changed" => false, "domains_writable" => true}} =
+               req(:get, "/status")
+
+      File.write!(path, File.read!(path) <> "# by hand\n")
+      assert {200, %{"domains_file_changed" => true}} = req(:get, "/status")
+
+      assert {200, _} = req(:post, "/domains/reload")
+      assert {200, %{"domains_file_changed" => false}} = req(:get, "/status")
+    end
+  end
+
   describe "token auth" do
     setup do
       Application.put_env(:kelixip, :control_api, %{auth: "token", token: "s3cret"})
