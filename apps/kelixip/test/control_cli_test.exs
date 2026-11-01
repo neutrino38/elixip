@@ -82,7 +82,7 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "bob"
       refute out =~ "cli.empty.example.net"
 
-      assert {1, "no such domain"} = run(["registration", "list", "ghost.example.org"])
+      assert {3, "no such domain"} = run(["registration", "list", "ghost.example.org"])
     end
 
     test "registration show details each binding" do
@@ -104,11 +104,11 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "cseq:       118060286"
     end
 
-    test "registration show on an unregistered AOR → exit 1" do
-      assert {1, "no such registration"} =
+    test "registration show on an unregistered AOR → exit 3" do
+      assert {3, "no such registration"} =
                run(["registration", "show", "cli.reg.example.com", "x"])
 
-      assert {1, "no such registration"} =
+      assert {3, "no such registration"} =
                run(["registration", "show", "ghost.example.org", "bob"])
     end
 
@@ -124,8 +124,8 @@ defmodule Kelix.Control.CLITest do
                  "sip:bob@10.0.0.9:5062"
                ])
 
-      assert {1, "not found"} = run(["registration", "remove", "cli.reg.example.com", "ghost"])
-      assert {1, "not found"} = run(["registration", "remove", "ghost.example.org", "bob"])
+      assert {3, "not found"} = run(["registration", "remove", "cli.reg.example.com", "ghost"])
+      assert {3, "not found"} = run(["registration", "remove", "ghost.example.org", "bob"])
     end
 
     test "a mistyped registration sub-command gets the registration usage" do
@@ -189,8 +189,8 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "domain:        cli.example.com"
     end
 
-    test "domain show on an unknown domain → exit 1" do
-      assert {1, "no such domain"} = run(["domain", "show", "ghost.example.org"])
+    test "domain show on an unknown domain → exit 3" do
+      assert {3, "no such domain"} = run(["domain", "show", "ghost.example.org"])
     end
 
     test "a mistyped domain sub-command gets the domain usage, not `unknown module`" do
@@ -231,10 +231,10 @@ defmodule Kelix.Control.CLITest do
       {0, out} = run(["domain", "show", "presence.example.com"])
 
       assert out =~
-               ~r/presence SUBSCRIBE rls\s+-> presence-rls.exs\s+\[not loaded\]\n\s+presence SUBSCRIBE \(default\) -> presence-subscribe.exs/
+               ~r/presence SUBSCRIBE 1\. rls\s+-> presence-rls.exs\s+\[not loaded\]\n\s+presence SUBSCRIBE 2\. \(default\) -> presence-subscribe.exs/
 
       assert out =~ ~r/presence PUBLISH\s+-> presence-publish.exs/
-      assert out =~ ~r/dialog\s+SUBSCRIBE \(default\) -> dialog-subscribe.exs/
+      assert out =~ ~r/dialog\s+SUBSCRIBE 1\. \(default\) -> dialog-subscribe.exs/
       assert out =~ ~r/dialog\s+PUBLISH\s+-> \(not served\)/
     end
   end
@@ -467,10 +467,9 @@ defmodule Kelix.Control.CLITest do
       :ok = Kelix.MediaPool.check_health()
     end
 
-    test "mediaserver show / disable on an unknown server → exit 1" do
-      assert {1, "no such media server"} = run(["mediaserver", "show", "ghost"])
-      assert {1, out} = run(["mediaserver", "disable", "ghost"])
-      assert out =~ "error:"
+    test "mediaserver show / disable on an unknown server → exit 3" do
+      assert {3, "no such media server"} = run(["mediaserver", "show", "ghost"])
+      assert {3, "no such media server"} = run(["mediaserver", "disable", "ghost"])
     end
 
     test "a mistyped mediaserver sub-command gets the mediaserver usage" do
@@ -679,9 +678,12 @@ defmodule Kelix.Control.CLITest do
     assert out =~ "must be an integer"
   end
 
-  test "stop with an unknown id → error, exit 1" do
-    {1, out} = run(["stop", "999999"])
-    assert out =~ "error:"
+  test "stop with an unknown id → exit 3" do
+    assert run(["stop", "999999"]) == {3, "no scenario 999999 in progress (kelictl monitor)"}
+  end
+
+  test "module reload of a module with no block configured → exit 3" do
+    assert run(["module", "reload", "ghost"]) == {3, "no [module.ghost] block is configured"}
   end
 
   # `mcu` is a module name, not a core noun: the enable/disable of a pool entry
@@ -934,6 +936,19 @@ defmodule Kelix.Control.CLITest do
         end)
 
       assert out =~ "example.com"
+    end
+
+    # `kelixip rpc` and `kelixip eval` halt the operator's VM with the status of an
+    # `exit({:shutdown, code})`, which is how the shell gets the code back.
+    test "rpc_main/1 prints the text, then leaves with the command's exit code" do
+      out =
+        ExUnit.CaptureIO.capture_io(fn ->
+          assert catch_exit(CLI.rpc_main(["frobnicate", "x", "y", "z"])) == {:shutdown, 1}
+          assert catch_exit(CLI.rpc_main(["module", "frobnicate"])) == {:shutdown, 2}
+          assert CLI.rpc_main(["help"]) == :ok
+        end)
+
+      assert out =~ "usage: kelictl module list"
     end
   end
 
@@ -1420,8 +1435,9 @@ defmodule Kelix.Control.CLITest do
       assert words(["registration", "show", "cli.other.example.net", ""]) == []
     end
 
+    # Not `domain`: the word after it may be the name of the domain to edit.
     test "a mistyped core noun completes nothing, and is never taken for a module" do
-      assert words(["domain", "shwo", ""]) == []
+      assert words(["mediaserver", "shwo", ""]) == []
     end
 
     # Membership, not equality: the registry keeps what earlier tests loaded, and a

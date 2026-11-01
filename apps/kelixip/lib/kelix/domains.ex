@@ -16,6 +16,8 @@ defmodule Kelix.Domains do
     * `index`    — `name` + each literal alias (lower-cased) → `%Kelix.Domain{}` for O(1) lookup
     * `suffixes` — each wildcard alias (`*.gw.out`) as `{".gw.out", domain}`, longest first
     * `modules`  — raw `[module.*]` blocks (carried for the module system, P5)
+    * `source`   — the decoded map of the whole file, what a write edits
+    * `source_hash` — SHA-256 of the text the snapshot was parsed from
   """
   use GenServer
   require Logger
@@ -27,10 +29,18 @@ defmodule Kelix.Domains do
           domains: [Domain.t()],
           index: %{optional(String.t()) => Domain.t()},
           suffixes: [{String.t(), Domain.t()}],
-          modules: %{optional(String.t()) => map}
+          modules: %{optional(String.t()) => map},
+          source: map,
+          source_hash: binary | nil
         }
 
-  defstruct version: 0, domains: [], index: %{}, suffixes: [], modules: %{}
+  defstruct version: 0,
+            domains: [],
+            index: %{},
+            suffixes: [],
+            modules: %{},
+            source: %{},
+            source_hash: nil
 
   @allowed_top_keys ~w(domain module)
   @registrar_keys %{
@@ -80,6 +90,126 @@ defmodule Kelix.Domains do
         err
     end
   end
+
+  @doc """
+  Create or replace one domain, and write the result to `domains.toml`
+  (`docs/design/dynamic-domains-plan.md`, §4).
+
+  `doc` is one `[[domain]]` table as the file holds it — string keys, the same
+  nesting. It replaces the domain of the same name, case-insensitively, in its
+  place; a new name goes at the end. Nothing else in the file changes.
+
+  The new file is encoded, parsed back and, unless `check_scripts: false`, its
+  scripts checked, all in the caller's process. Then, in one GenServer call: the
+  snapshot must still be at `:version` when one is given (`:conflict`), the file
+  on disk must still be the text the snapshot was read from (`:file_changed`),
+  and the node must be able to write it (`{:read_only, info}`). Only then is it
+  written, through a sibling `.tmp` and a rename, and the snapshot swapped.
+
+  Options: `:path` (required), `:version`, `:check_scripts` (default `true`).
+  Returns the new snapshot, or `{:error, reason}` with nothing applied.
+  """
+  @spec put_domain(map, keyword) :: {:ok, t} | {:error, term}
+  def put_domain(doc, opts) when is_map(doc) do
+    with {:ok, name} <- doc_name(doc) do
+      write(opts, fn domains ->
+        case Enum.find_index(domains, &same_name?(&1, name)) do
+          nil -> {:ok, domains ++ [doc]}
+          i -> {:ok, List.replace_at(domains, i, doc)}
+        end
+      end)
+    end
+  end
+
+  @doc """
+  Remove the domain called `name` (its canonical name, case-insensitively, never an
+  alias) and write the result to `domains.toml`. Same checks and options as
+  `put_domain/2`; `{:error, :not_found}` when the file has no such domain.
+  """
+  @spec delete_domain(String.t(), keyword) :: {:ok, t} | {:error, term}
+  def delete_domain(name, opts) when is_binary(name) do
+    write(opts, fn domains ->
+      case Enum.split_with(domains, &same_name?(&1, name)) do
+        {[], _} -> {:error, :not_found}
+        {_gone, kept} -> {:ok, kept}
+      end
+    end)
+  end
+
+  @doc """
+  Whether the node can write `path` the way a write does: the file itself, and a
+  `.tmp` created next to it. `:ok`, or `{:error, {:read_only, info}}` where `info`
+  names the path, the system reason and the user the node runs as.
+  """
+  @spec writable(Path.t()) :: :ok | {:error, {:read_only, map}}
+  def writable(path) do
+    # its own name: `kelictl status` probes while a write may hold `path.tmp`
+    tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
+
+    with :ok <- check_write(path, if(File.exists?(path), do: :ok, else: {:error, :enoent})),
+         :ok <- check_write(path, File.open(path, [:read, :write])),
+         :ok <- check_write(tmp, File.write(tmp, "")) do
+      File.rm(tmp)
+      :ok
+    end
+  end
+
+  @doc """
+  Whether the file at `path` is no longer the text `snapshot` was read from: it was
+  edited by hand and not reloaded, or it is gone. A write is then refused with
+  `:file_changed`, so that it does not erase the edit.
+  """
+  @spec file_changed?(t, Path.t()) :: boolean
+  def file_changed?(%__MODULE__{source_hash: hash}, path) do
+    case File.read(path) do
+      {:ok, text} -> :crypto.hash(:sha256, text) != hash
+      {:error, _} -> true
+    end
+  end
+
+  defp check_write(_path, {:ok, io}) when is_pid(io), do: File.close(io)
+  defp check_write(_path, :ok), do: :ok
+
+  defp check_write(path, {:error, reason}),
+    do: {:error, {:read_only, %{path: path, reason: reason, user: os_user()}}}
+
+  defp os_user() do
+    case System.cmd("id", ["-un"], stderr_to_stdout: true) do
+      {user, 0} -> String.trim(user)
+      _ -> System.get_env("USER", "unknown")
+    end
+  rescue
+    _ -> System.get_env("USER", "unknown")
+  end
+
+  defp doc_name(%{"name" => name}) when is_binary(name) and name != "", do: {:ok, name}
+  defp doc_name(_), do: {:error, {:invalid, "the domain needs a non-empty `name`"}}
+
+  defp same_name?(%{"name" => n}, name) when is_binary(n),
+    do: String.downcase(n) == String.downcase(name)
+
+  defp same_name?(_entry, _name), do: false
+
+  defp write(opts, edit) do
+    path = Keyword.fetch!(opts, :path)
+    current = current()
+    domains = Map.get(current.source, "domain", [])
+
+    with {:ok, domains} <- edit.(domains),
+         source = Map.put(current.source, "domain", domains),
+         {:ok, text} <- tag(Kelix.Domains.Toml.encode(source), :invalid),
+         {:ok, snapshot} <- tag(parse(text), :invalid),
+         :ok <-
+           if(Keyword.get(opts, :check_scripts, true),
+             do: tag(check_scripts(snapshot), :scripts),
+             else: :ok
+           ) do
+      GenServer.call(__MODULE__, {:write, snapshot, text, path, Keyword.get(opts, :version)})
+    end
+  end
+
+  defp tag({:error, message}, tag) when is_binary(message), do: {:error, {tag, message}}
+  defp tag(ok, _tag), do: ok
 
   @doc """
   The event packages a domain serves, in declaration order — what a notifier
@@ -151,6 +281,7 @@ defmodule Kelix.Domains do
         # tree (`Kelix.ScriptPreflight`), which aborts the boot on a bad script.
         case load(path, false) do
           {:ok, snapshot} ->
+            warn_unwritable(path)
             {:ok, %{snapshot | version: 1}}
 
           {:error, reason} ->
@@ -159,6 +290,19 @@ defmodule Kelix.Domains do
             IO.puts(:stderr, "kelixip: invalid domains in #{path}: #{reason}")
             {:stop, {:invalid_domains, reason}}
         end
+    end
+  end
+
+  # The node serves the file either way; only the writes through the frontals
+  # need it, and each of them answers `read_only` on its own.
+  defp warn_unwritable(path) do
+    with {:error, {:read_only, %{reason: reason, user: user}}} <- writable(path) do
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "#{path} is not writable by #{user} (#{reason}): domain edits will be " <>
+            "refused until the file and its directory belong to #{user}"
+      )
     end
   end
 
@@ -176,6 +320,48 @@ defmodule Kelix.Domains do
     )
 
     {:reply, :ok, snapshot}
+  end
+
+  def handle_call({:write, snapshot, text, path, expected}, _from, state) do
+    with :ok <- same_version(state, expected),
+         :ok <- same_file(state, path),
+         :ok <- writable(path),
+         :ok <- write_file(path, text) do
+      snapshot = %{snapshot | version: state.version + 1}
+
+      Logger.info(
+        module: __MODULE__,
+        message:
+          "domains.toml written (v#{snapshot.version}, #{length(snapshot.domains)} domains)"
+      )
+
+      {:reply, {:ok, snapshot}, snapshot}
+    else
+      err -> {:reply, err, state}
+    end
+  end
+
+  defp same_version(_state, nil), do: :ok
+  defp same_version(%{version: v}, v), do: :ok
+  defp same_version(_state, _expected), do: {:error, :conflict}
+
+  # A hand edit not reloaded yet is the operator's, and a write would erase it.
+  defp same_file(state, path),
+    do: if(file_changed?(state, path), do: {:error, :file_changed}, else: :ok)
+
+  defp write_file(path, text) do
+    tmp = path <> ".tmp"
+    mode = with {:ok, %File.Stat{mode: m}} <- File.stat(path), do: Bitwise.band(m, 0o777)
+
+    with :ok <- File.write(tmp, text),
+         :ok <- if(is_integer(mode), do: File.chmod(tmp, mode), else: :ok),
+         :ok <- File.rename(tmp, path) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(tmp)
+        {:error, {:write_failed, %{path: path, reason: reason}}}
+    end
   end
 
   defp load(path, check_scripts?) do
@@ -310,7 +496,9 @@ defmodule Kelix.Domains do
          domains: domains,
          index: index,
          suffixes: suffixes,
-         modules: Map.get(map, "module", %{})
+         modules: Map.get(map, "module", %{}),
+         source: map,
+         source_hash: :crypto.hash(:sha256, content)
        }}
     end
   end

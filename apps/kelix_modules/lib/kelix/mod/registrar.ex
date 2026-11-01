@@ -466,6 +466,17 @@ defmodule Kelix.Mod.Registrar do
   def remove(domain, aor, contact \\ :all),
     do: Kelix.Module.safe_call(__MODULE__, {:remove, domain, downcase(aor), contact})
 
+  @doc """
+  Drop every binding of every AOR of `domain` — a domain deleted, or created again
+  under a name that held one. `domain` is the canonical name, used as is: the
+  domain is no longer in `Kelix.Domains` when this runs, so nothing may be folded
+  through it. Subscribers are told of each AOR, as `remove/3` tells them.
+  `{:ok, aors_removed}`, or a facade error.
+  """
+  @spec purge_domain(String.t()) :: {:ok, non_neg_integer} | {:error, term}
+  def purge_domain(domain) when is_binary(domain),
+    do: Kelix.Module.safe_call(__MODULE__, {:purge_domain, domain})
+
   # ── GenServer ────────────────────────────────────────────────────────────────
 
   @impl true
@@ -581,6 +592,21 @@ defmodule Kelix.Mod.Registrar do
   def handle_call({:remove, domain, aor, which}, _from, state) do
     {reply, state2} = do_remove(state, domain, aor, which)
     {:reply, reply, state2}
+  end
+
+  def handle_call({:purge_domain, domain}, _from, state) do
+    tid = Map.get(state.tables, domain)
+    aors = if tid, do: for({aor, _contacts} <- :ets.tab2list(tid), do: aor), else: []
+
+    state =
+      Enum.reduce(aors, state, fn aor, st ->
+        :ets.delete(tid, aor)
+        st = demonitor_aor(st, domain, aor)
+        notify(st, domain, aor, :unregistered)
+        st
+      end)
+
+    {:reply, {:ok, length(aors)}, state}
   end
 
   # ── save ─────────────────────────────────────────────────────────────────────

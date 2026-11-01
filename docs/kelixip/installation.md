@@ -59,7 +59,8 @@ and [§ Building the deb packages](../../BUILD.md#building-the-deb-packages-ubun
 | Path | Contents |
 |---|---|
 | `/etc/kelixip/config.toml` | Infrastructure config (kept on upgrade, 0640 `root:kelixip`) |
-| `/etc/kelixip/domains.toml` | Domains + dial-plan + registrar block (kept on upgrade) |
+| `/var/lib/kelixip/domains.toml` | Domains + dial-plan + registrar block (0640 `kelixip:kelixip`). Created by the package, never overwritten |
+| `/usr/share/doc/kelixip/domains.toml.example` | The commented example of every `domains.toml` block |
 | `/etc/kelixip/tls/` | Listener certificates (0750 `root:kelixip`) |
 | `/etc/sysconfig/kelixip` (RPM)<br>`/etc/default/kelixip` (deb) | Node name, cookie and the two TOML paths (kept on upgrade) |
 | `/usr/share/kelixip/` | Scenario scripts (`script_dir`). The core ships the ones it can run on its own; `mcu.exs` and `mcu_adhoc.exs` come with `kelixip-mod-mcu`, since every conference verb they call is that module's |
@@ -148,10 +149,25 @@ labelling is applied anyway, and costs nothing.
 
 ### Upgrades
 
-`config.toml`, `domains.toml` and the environment file are **kept**: your version
+`config.toml` and the environment file are **kept**: your version
 survives the upgrade and the packaged one lands next to it — as `*.rpmnew` on the RPM
 (`%config(noreplace)`), as `*.dpkg-dist` on the deb (a `conffile`; an interactive
 `dpkg` may ask instead). Worth diffing either way, since new keys show up there first.
+
+`/var/lib/kelixip/domains.toml` is not part of the payload. The package creates it
+when it does not exist, and never touches it afterwards:
+
+- on an upgrade from a package that installed `/etc/kelixip/domains.toml`, it is a
+  copy of that file, comments included. The package manager then removes the old
+  file. If you had edited it, it stays as `domains.toml.rpmsave` (RPM) or
+  `domains.toml.dpkg-bak` (deb). Edit the copy in `/var/lib/kelixip` from now on;
+- on a fresh install, it holds a header and no domain.
+
+An environment file that still says `KELIXIP_DOMAINS=/etc/kelixip/domains.toml` is
+updated to the new path. Any other value is left as it is.
+
+The domains live under `/var/lib`. A backup that covers `/etc/kelixip` must also
+cover `/var/lib/kelixip/domains.toml`.
 
 On the RPM, the scenario scripts of `/usr/share/kelixip/` are kept the same way: a
 script you edited stays as you left it, and the packaged version lands next to it as
@@ -166,7 +182,7 @@ an install that silently kept an older payload, shows the older version here.
 
 Removing the package stops the service and drops the generated cookie. On the deb, a
 plain `apt remove` keeps `/var/lib/kelixip` and `/var/log/kelixip`; `apt purge` removes
-them, along with the configuration. The `kelixip` system user is left in place on
+them, `domains.toml` included, along with the configuration. The `kelixip` system user is left in place on
 purpose — files elsewhere may still belong to it.
 
 ## Configuration
@@ -583,6 +599,9 @@ wrong path.
 
 ### domains.toml
 
+The node reads `/var/lib/kelixip/domains.toml`. Every block below is in the
+commented example `/usr/share/doc/kelixip/domains.toml.example`.
+
 #### `[[domain]]` — one entry per served domain
 
 | Key | Type | Required | Meaning |
@@ -810,7 +829,7 @@ Who may watch whom is **not** decided here — the subscribe script decides it. 
 #### A complete example
 
 ```toml
-# /etc/kelixip/domains.toml
+# /var/lib/kelixip/domains.toml
 [[domain]]
 name    = "example.com"
 aliases = ["sip.example.com", "203.0.113.10"]

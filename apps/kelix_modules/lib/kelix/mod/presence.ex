@@ -730,6 +730,17 @@ defmodule Kelix.Mod.Presence do
     do: Kelix.Module.safe_call(__MODULE__, {:remove, served_domain(domain), downcase(aor)})
 
   @doc """
+  Drop every published state of `domain` — a domain deleted, or created again
+  under a name that held some. `domain` is the canonical name, used as is: the
+  domain is no longer in `Kelix.Domains` when this runs, so it is never folded.
+  Watchers are told, as `remove/2` tells them. `{:ok, resources_removed}`, or a
+  facade error.
+  """
+  @spec purge_domain(String.t()) :: {:ok, non_neg_integer} | {:error, :down | :timeout}
+  def purge_domain(domain) when is_binary(domain),
+    do: Kelix.Module.safe_call(__MODULE__, {:purge_domain, domain})
+
+  @doc """
   Subscribe `pid` to `domain`'s presentities as they change — the module half of
   `Kelix.Control.subscribe_presence/2`.
 
@@ -849,6 +860,23 @@ defmodule Kelix.Mod.Presence do
   def handle_call({:remove, domain, aor}, _from, state) do
     {reply, state} = do_remove(state, domain, aor)
     {:reply, reply, state}
+  end
+
+  def handle_call({:purge_domain, domain}, _from, state) do
+    resources =
+      case Map.get(state.states, domain) do
+        nil -> []
+        tid -> for {resource, _pubs} <- :ets.tab2list(tid), do: resource
+      end
+
+    state =
+      Enum.reduce(resources, state, fn resource, st ->
+        before = known_state(st, resource)
+        :ets.delete(Map.fetch!(st.states, domain), resource)
+        fan_out(st, resource, :removed, before)
+      end)
+
+    {:reply, {:ok, length(resources)}, state}
   end
 
   def handle_call({:subscribe_panel, domain, pid}, _from, state) do

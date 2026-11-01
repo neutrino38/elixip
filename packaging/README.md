@@ -89,12 +89,13 @@ BEAM bytecode, no embedded ERTS) into `packaging/build/elixipp-<version>/` and
 |---|---|
 | `rpm/kelixip.spec` | the spec: `%files` on the FHS layout, `%pre` user creation, `%post` cookie, subpackages |
 | `deb/control*.in` | one control template per package (`@VERSION@`, `@ARCH@`, `@DEPENDS@`, `@INSTALLED_SIZE@`) |
-| `deb/postinst`, `deb/prerm`, `deb/postrm` | the maintainer scripts: user creation, ownership, cookie, systemd |
+| `deb/preinst`, `deb/postinst`, `deb/prerm`, `deb/postrm` | the maintainer scripts: user creation, ownership, cookie, `domains.toml`, systemd |
 | `deb/conffiles` | what dpkg must keep on upgrade — the deb's `%config(noreplace)` |
 | `deb/changelog`, `deb/copyright` | the deb version (single source for its revision) and the licence |
 | `systemd/kelixip.service` | the unit — unprivileged, `ExecStop` drains, hardened |
 | `sysconfig/kelixip` | the environment file: node name, cookie, TOML paths |
-| `config/config.toml`, `config/domains.toml` | the shipped defaults, kept on upgrade |
+| `config/config.toml` | the shipped default, kept on upgrade |
+| `config/domains.toml.example` | the commented example, installed as `/usr/share/doc/kelixip/domains.toml.example`. The node reads `/var/lib/kelixip/domains.toml`, which the package creates and never overwrites |
 | `completion/kelictl` | the CLI's bash completion, installed under `/usr/share/bash-completion/completions/` by both packages |
 | `fail2ban/filter.d/*.conf`, `fail2ban/jail.d/kelixip.conf` | the fail2ban filters and the jail example, installed under `/usr/share/kelixip/fail2ban/` by both packages; `apps/kelixip/test/fail2ban_filter_test.exs` holds them to the lines the node writes |
 | `logrotate/kelixip` | the rotation of `[security] log_file`, installed as `/etc/logrotate.d/kelixip` and kept on upgrade |

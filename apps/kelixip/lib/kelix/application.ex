@@ -21,6 +21,12 @@ defmodule Kelix.Application do
   def start(_type, _args) do
     Logger.info(module: __MODULE__, message: "kelixip starting")
 
+    # kelictl and kelescope run their commands in processes `rpc` spawns, whose
+    # group leader is on the caller's node, and OTP's default handler drops every
+    # event from such a process: the audit lines of Kelix.Control never reached the
+    # journal. What this node does is logged here, whoever asked for it.
+    _ = :logger.remove_handler_filter(:default, :remote_gl)
+
     config_path = Application.get_env(:kelixip, :config_path)
     domains_path = Application.get_env(:kelixip, :domains_path)
 

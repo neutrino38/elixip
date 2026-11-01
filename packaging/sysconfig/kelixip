@@ -10,7 +10,7 @@ RELEASE_NODE=kelixip@127.0.0.1
 # Where the two TOML files live. Both are read at every boot; an unreadable or
 # invalid file aborts the start with the reason on stderr (journald records it).
 KELIXIP_CONFIG=/etc/kelixip/config.toml
-KELIXIP_DOMAINS=/etc/kelixip/domains.toml
+KELIXIP_DOMAINS=/var/lib/kelixip/domains.toml
 
 # The Erlang distribution cookie is the credential kelictl authenticates with. It
 # is NOT set here: %post generated a random one per installation into

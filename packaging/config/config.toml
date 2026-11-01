@@ -1,8 +1,8 @@
 # /etc/kelixip/config.toml — infrastructure configuration (restart-only).
 #
 # Every key is documented in /usr/share/doc/kelixip/installation.md. The served
-# domains and the dial-plan are NOT here: they live in domains.toml, which is
-# hot-reloadable (`kelictl domain reload-all` / `systemctl reload kelixip`).
+# domains and the dial-plan are NOT here: they live in
+# /var/lib/kelixip/domains.toml, which is hot-reloadable (`kelictl domain reload-all` / `systemctl reload kelixip`).
 #
 # This file is validated at every boot. Any error — a bad value, an unknown key,
 # a port that cannot be bound — aborts the start with the reason on stderr, rather

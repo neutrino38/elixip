@@ -2,6 +2,8 @@
 # kelixip postrm — the deb counterpart of the .spec's %postun.
 set -e
 
+dpkg-maintscript-helper rm_conffile /etc/kelixip/domains.toml 1.9.0-2~ kelixip -- "$@"
+
 KELIXDIR=/usr/lib/kelixip
 COOKIE="$KELIXDIR/releases/COOKIE"
 

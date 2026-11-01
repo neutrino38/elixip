@@ -13,7 +13,7 @@ The release reads two environment variables at every boot:
 | Variable | Default |
 |---|---|
 | `KELIXIP_CONFIG` | `/etc/kelixip/config.toml` |
-| `KELIXIP_DOMAINS` | `/etc/kelixip/domains.toml` |
+| `KELIXIP_DOMAINS` | `/var/lib/kelixip/domains.toml` |
 
 On a packaged install they come from the **environment file**
 (`/etc/sysconfig/kelixip` on Alma Linux, `/etc/default/kelixip` on Ubuntu/Debian),
