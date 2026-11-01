@@ -196,3 +196,20 @@ upgrade replaces such a cookie and keeps any other.
 
 `dnf upgrade kelixip kelixip-mod-*` from 1.9.0-1 or 1.9.0-2 installs 1.9.0-3. Modules
 come from the same build: upgrade them together.
+
+## Package 1.9.0-4: bandit security update
+
+`mix hex.audit` reported twelve advisories on `bandit` 1.13.1, ten high and two
+medium. bandit serves the REST control API and the metrics endpoint.
+
+| Package | Before | After | Advisories |
+|---|---|---|---|
+| `bandit` | 1.13.1 | 1.14.1 | CVE-2026-108525, CVE-2026-108529, CVE-2026-109584, CVE-2026-110499, CVE-2026-111101, CVE-2026-111103, CVE-2026-113436, CVE-2026-114213, CVE-2026-115269, CVE-2026-116078 (high); CVE-2026-110314, CVE-2026-114216 (medium) |
+
+They cover HTTP/1.1 chunked bodies, HTTP/2 flow control and HPACK, and WebSocket
+fragmentation. No other package changes. The code is the code of 1.9.0-3.
+
+elixipp does not carry bandit: its package stays 1.9.0-1.
+
+`dnf upgrade kelixip kelixip-mod-*` from an earlier 1.9.0 installs 1.9.0-4. Modules
+come from the same build: upgrade them together.

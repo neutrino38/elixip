@@ -32,7 +32,7 @@ Version:        1.9.0
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -435,6 +435,11 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Captioning*.beam
 
 %changelog
+* Sun Nov 01 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-4
+- bandit 1.14.1, the HTTP server of the REST control API and of the metrics
+  endpoint. 1.13.1 carried ten high and two medium advisories (HTTP/1.1
+  chunked bodies, HTTP/2 flow control and HPACK, WebSocket fragmentation).
+
 * Fri Oct 30 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-3
 - Domains are created, edited and deleted on a running node, one element per
   command: kelictl domain create|delete and kelictl domain <d> set, alias,

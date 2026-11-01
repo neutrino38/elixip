@@ -1,3 +1,12 @@
+kelixip (1.9.0-4) stable; urgency=high
+
+  * bandit 1.14.1, the HTTP server of the REST control API and of the
+    metrics endpoint. 1.13.1 carried ten high and two medium advisories
+    (HTTP/1.1 chunked bodies, HTTP/2 flow control and HPACK, WebSocket
+    fragmentation).
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sun, 01 Nov 2026 12:00:00 +0000
+
 kelixip (1.9.0-3) stable; urgency=low
 
   * Domains are created, edited and deleted on a running node, one element
