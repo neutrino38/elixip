@@ -1,7 +1,7 @@
 # Release 1.9.0
 
-2026-10-26 — since 1.8.2 (2026-10-24). Theme: the correction of the text typed
-during a captioned call.
+2026-11-01 — since 1.8.2 (2026-10-24). Theme: the correction of the text typed
+during a captioned call, and domains edited on a running node.
 
 The correction is served by the speech-server's `comp` function. Its control
 API (`POST /control/token`) is that of speech-server **1.18.0** and later
