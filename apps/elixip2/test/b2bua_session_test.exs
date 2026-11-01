@@ -24,6 +24,7 @@ defmodule SIP.Test.B2bua.Session do
 
   setup do
     B2bua.forget_event()
+    Process.put(:peer_instance, "b2bua_session_#{System.unique_integer([:positive])}")
     {:ok, stub} = SIP.Test.B2bua.InboundDialogStub.start_link(self())
     on_exit(fn -> if Process.alive?(stub), do: GenServer.stop(stub) end)
     %{ctx: %SIP.Context{dialogpid: stub}, stub: stub}
@@ -42,11 +43,13 @@ defmodule SIP.Test.B2bua.Session do
     struct(%Peer{uris: [peer_target()]}, opts)
   end
 
-  # The one target every peer in this suite points at — a mockup instance of this
-  # suite's own, so no other suite's traffic reaches it (or ours theirs).
+  # The target every peer of a test points at — a mockup instance of that test's
+  # own. A previous test's dialog keeps retransmitting its INVITE on timer A, and
+  # on a shared instance that INVITE overwrites the request `{:simulate, 200, …}`
+  # answers.
   defp peer_target do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
-    |> SIP.Uri.set_uri_param("unittest", "b2bua_session")
+    |> SIP.Uri.set_uri_param("unittest", Process.get(:peer_instance))
   end
 
   # Be the mockup's "test app" before anything goes out: it then tells us when it
