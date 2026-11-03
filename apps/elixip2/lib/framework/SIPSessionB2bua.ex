@@ -412,6 +412,32 @@ defmodule SIP.Session.B2bua do
       end
 
       @doc """
+      Answer `req` locally on a leg named explicitly — `:caller` (the inbound
+      leg) or `:callee` (the outbound one) — rather than on the leg of the
+      current event.
+
+      For a request handed back by a block, `bridge/1`'s `{:bridge, :request,
+      %{leg: leg, req: req}}`: the event the script matched is then the block's
+      return, which came from no leg at all, so `b2bua_reply/4` would answer on
+      the caller's whichever side the request arrived on.
+      """
+      defmacro b2bua_reply_on(leg, req, code, reason \\ nil, upd_fields \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "b2bua_reply #{unquote(code)}")
+
+          var!(sip_ctx) =
+            SIP.Session.B2bua.do_local_reply_on(
+              var!(sip_ctx),
+              unquote(leg),
+              unquote(req),
+              unquote(code),
+              unquote(reason),
+              unquote(upd_fields)
+            )
+        end
+      end
+
+      @doc """
       Challenge `req` on the leg the current event came from, with the digest
       `params` the application built — a **407 Proxy Authentication Required** by
       default, a 401 when `code` says so.
@@ -3558,9 +3584,30 @@ defmodule SIP.Session.B2bua do
           %SIP.Context{}
   def do_local_reply(sip_ctx = %SIP.Context{}, req, code, reason, upd_fields)
       when is_integer(code) do
-    case leg_pid(sip_ctx, current_leg()) do
+    reply_on_leg(sip_ctx, current_leg(), req, code, reason, upd_fields)
+  end
+
+  @doc false
+  # The leg named the way `bridge/1` names it — caller and callee — or the way
+  # this module does.
+  @spec do_local_reply_on(%SIP.Context{}, atom(), map(), integer(), term(), list()) ::
+          %SIP.Context{}
+  def do_local_reply_on(sip_ctx = %SIP.Context{}, leg, req, code, reason, upd_fields)
+      when is_integer(code) do
+    tag =
+      case leg do
+        :caller -> :inbound
+        :callee -> :outbound
+        tag when is_atom(tag) -> tag
+      end
+
+    reply_on_leg(sip_ctx, tag, req, code, reason, upd_fields)
+  end
+
+  defp reply_on_leg(sip_ctx, leg, req, code, reason, upd_fields) do
+    case leg_pid(sip_ctx, leg) do
       nil ->
-        fail(sip_ctx, {:b2bua, :no_leg_to_reply_on, current_leg()})
+        fail(sip_ctx, {:b2bua, :no_leg_to_reply_on, leg})
 
       dialog_pid ->
         rc =
@@ -3569,7 +3616,7 @@ defmodule SIP.Session.B2bua do
           end)
 
         case rc do
-          :leg_dead -> fail(sip_ctx, {:b2bua, :leg_dead, current_leg()})
+          :leg_dead -> fail(sip_ctx, {:b2bua, :leg_dead, leg})
           _ -> SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
         end
     end

@@ -136,6 +136,82 @@ defmodule SIP.Test.SbbBridge do
     end
   end
 
+  # A relay that answers some in-dialog requests itself: the captioning INFO from
+  # the caller, any MESSAGE from the callee. It answers with a body, on the leg
+  # the request came from, then resumes — as often as it is asked.
+  defmodule Intercepting do
+    use SIP.Scenario
+    use SBB.Call
+
+    uas(:invite)
+
+    config(peer: "sip:callee@example.com:5060;unittest=sbb_bridge_icpt")
+
+    @intercept [{:caller, :INFO, "Application/Captioning+XML"}, {:callee, :MESSAGE, :any}]
+
+    state initial_state do
+      on_events do
+        {:INVITE, req, _trans, _dlg} ->
+          b2bua_reply(req, 100, "Trying")
+          goto(place_call, "INVITE received")
+      after
+        5_000 -> scenario_failure("no INVITE")
+      end
+    end
+
+    state place_call do
+      call(args: %{peer: ctx_get(:peer)})
+
+      on_events do
+        {:call, :connected, _} -> goto(bridging, "call established")
+        {:call, outcome, _} -> scenario_failure("not established: #{outcome}")
+      end
+    end
+
+    state bridging do
+      bridge(args: %{intercept: @intercept})
+
+      on_events do
+        {:bridge, :request, data} ->
+          appdata_set(:intercepted, data)
+          goto(answering, "#{data.method} intercepted")
+
+        {:bridge, :caller_hung_up, _} ->
+          scenario_success("caller hung up")
+
+        {:bridge, outcome, _} ->
+          scenario_failure("unexpected: #{outcome}")
+      end
+    end
+
+    state answering do
+      %{leg: leg, method: method, req: req} = appdata_get(:intercepted)
+      send(appdata_get(:test_pid), {:intercepted, leg, method})
+
+      b2bua_reply_on(leg, req, 200, "OK",
+        body: [%{contenttype: "application/captioning+xml", data: "<captioning/>"}]
+      )
+
+      goto(resumed, "answered")
+    end
+
+    state resumed do
+      bridge(resume: true)
+
+      on_events do
+        {:bridge, :request, data} ->
+          appdata_set(:intercepted, data)
+          goto(answering, "#{data.method} intercepted")
+
+        {:bridge, :caller_hung_up, _} ->
+          scenario_success("caller hung up after the resume")
+
+        {:bridge, outcome, _} ->
+          scenario_failure("unexpected after resume: #{outcome}")
+      end
+    end
+  end
+
   setup_all do
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
@@ -177,6 +253,11 @@ defmodule SIP.Test.SbbBridge do
 
   defp in_dialog(method, invite) do
     %{invite | method: method, body: [], contentlength: 0, cseq: [2, method]}
+  end
+
+  defp with_body(req, contenttype, data) do
+    %{req | body: [%{contenttype: contenttype, data: data}], contentlength: byte_size(data)}
+    |> Map.put(:contenttype, contenttype)
   end
 
   defp start_instance(stub, invite, module, tag) do
@@ -388,6 +469,104 @@ defmodule SIP.Test.SbbBridge do
     assert_receive {:sip_mockup, {:request_sent, :INVITE, _reinvite}}, 5_000
 
     send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  # ── Requests the script answers itself (`:intercept`) ──────────────────────
+
+  @captioning ~s(<captioning><inbound><stt comp="true"/></inbound></captioning>)
+
+  test "an intercepted INFO is answered by the script and not relayed", %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite} =
+      establish(stub, Intercepting, "sbb_bridge_icpt")
+
+    info =
+      in_dialog(:INFO, invite)
+      |> with_body("application/captioning+xml; charset=UTF-8", @captioning)
+
+    send(instance, {:INFO, info, self(), stub})
+
+    assert_receive {:intercepted, :caller, :INFO}, 5_000
+    assert_receive {:replied, 200, "OK", %{method: :INFO}, fields}, 5_000
+    assert [%{contenttype: "application/captioning+xml"}] = fields[:body]
+    refute_receive {:sip_mockup, {:request_sent, :INFO, _}}, 300
+
+    # Resumed: the relay still works, and a second one is intercepted too.
+    send(instance, {:INFO, %{info | cseq: [3, :INFO]}, self(), stub})
+    assert_receive {:intercepted, :caller, :INFO}, 5_000
+    assert_receive {:replied, 200, "OK", %{method: :INFO}, _fields}, 5_000
+
+    send(instance, {:BYE, %{in_dialog(:BYE, invite) | cseq: [4, :BYE]}, self(), stub})
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  test "an INFO of another type still crosses", %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite} =
+      establish(stub, Intercepting, "sbb_bridge_icpt_dtmf")
+
+    info = in_dialog(:INFO, invite) |> with_body("application/dtmf-relay", "Signal=5\r\n")
+    send(instance, {:INFO, info, self(), stub})
+
+    assert_receive {:sip_mockup, {:request_sent, :INFO, relayed}}, 5_000
+    assert SIP.Msg.Ops.body_content_type(relayed) == "application/dtmf-relay"
+    refute_receive {:intercepted, _, _}, 300
+
+    send(instance, {:BYE, %{in_dialog(:BYE, invite) | cseq: [3, :BYE]}, self(), stub})
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  test "the intercepted type from the other leg still crosses", %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite, tp: tp} =
+      establish(stub, Intercepting, "sbb_bridge_icpt_callee")
+
+    Manual.send_request(tp, :INFO,
+      body: [%{contenttype: "application/captioning+xml", data: @captioning}],
+      contenttype: "application/captioning+xml",
+      contentlength: byte_size(@captioning)
+    )
+
+    assert_receive {:sent_on_inbound, %{method: :INFO}}, 5_000
+    refute_receive {:intercepted, _, _}, 300
+
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  test "a request intercepted on the callee's leg is answered on that leg", %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite, tp: tp} =
+      establish(stub, Intercepting, "sbb_bridge_icpt_msg")
+
+    Manual.send_request(tp, :MESSAGE,
+      body: [%{contenttype: "text/plain", data: "hello"}],
+      contenttype: "text/plain",
+      contentlength: 5
+    )
+
+    assert_receive {:intercepted, :callee, :MESSAGE}, 5_000
+    assert_receive {:sip_mockup, {:response_sent, 200, %{cseq: [_, :MESSAGE]}}}, 5_000
+    refute_receive {:sent_on_inbound, %{method: :MESSAGE}}, 300
+    refute_receive {:replied, _, _, %{method: :MESSAGE}, _}, 100
+
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  test "without :intercept the same INFO crosses as before", %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite} =
+      establish(stub, Interruptible, "sbb_bridge_no_icpt")
+
+    info = in_dialog(:INFO, invite) |> with_body("application/captioning+xml", @captioning)
+    send(instance, {:INFO, info, self(), stub})
+
+    assert_receive {:sip_mockup, {:request_sent, :INFO, _}}, 5_000
+
+    send(instance, {:BYE, %{in_dialog(:BYE, invite) | cseq: [3, :BYE]}, self(), stub})
     assert_receive {:instance_done, :ok}, 10_000
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end

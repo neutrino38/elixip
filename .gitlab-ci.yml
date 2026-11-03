@@ -19,6 +19,12 @@ stages:
   - package
   - publish
 
+# One MIX_HOME per build directory: `test` and `audit` run side by side on the same
+# runner account, and two `mix local.hex --force` sharing ~/.mix delete each
+# other's archive mid-install (File.rm_rf! fails with :eexist).
+variables:
+  MIX_HOME: "$CI_PROJECT_DIR/.mix"
+
 default:
   tags: [al9, rpm]
   before_script:

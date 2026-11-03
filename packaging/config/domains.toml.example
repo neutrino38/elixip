@@ -1,13 +1,16 @@
-# /etc/kelixip/domains.toml — the served domains and their dial-plan.
+# domains.toml — the served domains and their dial-plan. A commented example.
+#
+# The node reads /var/lib/kelixip/domains.toml (KELIXIP_DOMAINS), owned by the
+# kelixip user. Copy the blocks you need there.
 #
 # Hot-reloadable: `kelictl domain reload-all` (or `systemctl reload kelixip`) applies
 # it atomically — one bad value and the whole reload is rejected, the running
 # config untouched. Every key is documented in
 # /usr/share/doc/kelixip/installation.md.
 #
-# Shipped EMPTY on purpose: a fresh install serves no domain, so it answers 404
-# to everything until you declare what it is responsible for. Nothing here is a
-# default you inherit by accident.
+# A fresh install starts with no domain, so it answers 404 to everything until you
+# declare what it is responsible for. Nothing here is a default you inherit by
+# accident.
 #
 # A request is routed by its R-URI host (falling back to the To host); no match is
 # a 404. The method then selects the function — REGISTER -> registrar,

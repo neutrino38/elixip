@@ -102,6 +102,15 @@ defmodule Kelix.DomainsTest do
       assert DialRule.matches?(r2, "0612345678")
       assert DialRule.matches?(r3, "anything")
     end
+
+    test "keeps the decoded file and the hash of its text", %{snap: snap} do
+      assert snap.source == Toml.decode!(@valid)
+      assert snap.source_hash == :crypto.hash(:sha256, @valid)
+
+      {:ok, other} = Domains.parse(@valid <> "\n# a comment changes the text\n")
+      assert other.source == snap.source
+      refute other.source_hash == snap.source_hash
+    end
   end
 
   describe "parse/1 — wildcard aliases" do

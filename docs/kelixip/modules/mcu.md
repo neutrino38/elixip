@@ -74,7 +74,7 @@ If there is none, install and configure a mediaserver, then declare it here.
 
 The package comes with a sample script,
 [`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs), installed in `script_dir`. Copy
-it and adapt it; then point a dial rule at it, in `/etc/kelixip/domains.toml`:
+it and adapt it; then point a dial rule at it, in `/var/lib/kelixip/domains.toml`:
 
 ```toml
 # domains.toml

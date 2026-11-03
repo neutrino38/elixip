@@ -59,6 +59,7 @@ defmodule Kelix.InstancePool do
           required(:function) => atom,
           required(:script) => String.t(),
           required(:max_calls) => pos_integer | nil,
+          optional(:version) => non_neg_integer,
           optional(:conversation) =>
             %{
               key: Kelix.Conversations.key(),
@@ -79,6 +80,7 @@ defmodule Kelix.InstancePool do
   # monitor_mons: monitor_ref => subscriber pid, so a dead/disconnected subscriber
   #               is dropped without an explicit `unsubscribe_monitor/1`
   # counter_subs / counter_mons: same bookkeeping, for `subscribe_domain_counters/1`
+  # removed:      domain => the `Kelix.Domains` version that no longer has it
   defstruct instances: %{},
             conversations: %{},
             connections: %{},
@@ -89,7 +91,8 @@ defmodule Kelix.InstancePool do
             monitor_subs: MapSet.new(),
             monitor_mons: %{},
             counter_subs: MapSet.new(),
-            counter_mons: %{}
+            counter_mons: %{},
+            removed: %{}
 
   # The three call-shape columns default to a value, not to a blank — same
   # defaults and rationale as `FSL.Monitor`'s own, for the row it
@@ -149,6 +152,19 @@ defmodule Kelix.InstancePool do
   @doc "Cooperatively shut down every running instance."
   def shutdown_all(reason \\ :node_shutdown),
     do: GenServer.cast(__MODULE__, {:shutdown_all, reason})
+
+  @doc """
+  Cooperatively shut down every instance of `domain`, which the `Kelix.Domains`
+  snapshot `version` no longer has. Returns how many were asked to stop.
+
+  A route resolved from an older snapshot can still reach `accept/4` or
+  `launch/3` after this call; it is answered 404, as the new snapshot would have
+  answered it. A route resolved from `version` or later is a domain created again
+  under that name, and runs.
+  """
+  @spec shutdown_domain(String.t(), term, non_neg_integer) :: non_neg_integer
+  def shutdown_domain(domain, reason, version),
+    do: GenServer.call(__MODULE__, {:shutdown_domain, domain, reason, version})
 
   @doc "Running instances, one row per instance (for `Kelix.Control` / status / CLI)."
   @spec list() :: [
@@ -294,6 +310,15 @@ defmodule Kelix.InstancePool do
         send(inst.pid, {:scenario_ctl, :shutdown, reason})
         {:reply, :ok, state}
     end
+  end
+
+  def handle_call({:shutdown_domain, domain, reason, version}, _from, state) do
+    stopped =
+      for {_ref, %{domain: ^domain, pid: pid}} <- state.instances do
+        send(pid, {:scenario_ctl, :shutdown, reason})
+      end
+
+    {:reply, length(stopped), %{state | removed: Map.put(state.removed, domain, version)}}
   end
 
   def handle_call({:journal, id, op}, _from, state) do
@@ -481,6 +506,9 @@ defmodule Kelix.InstancePool do
     server_max = server_max_calls()
 
     cond do
+      removed?(state, route) ->
+        {:reply, {:reject, 404, "Not Found"}, state}
+
       is_integer(server_max) and state.total_active >= server_max ->
         Logger.warning(module: __MODULE__, message: "server max_calls #{server_max} reached; 503")
         {:reply, {:reject, 503, "Service Unavailable"}, bump(state, :rejected_quota)}
@@ -817,6 +845,13 @@ defmodule Kelix.InstancePool do
     Enum.each(state.instances, fn {_ref, %{pid: pid}} ->
       send(pid, {:scenario_ctl, :shutdown, reason})
     end)
+  end
+
+  defp removed?(state, %{domain: domain} = route) do
+    case {Map.get(route, :version), Map.get(state.removed, domain)} do
+      {resolved, removed} when is_integer(resolved) and is_integer(removed) -> resolved < removed
+      _ -> false
+    end
   end
 
   defp server_max_calls() do

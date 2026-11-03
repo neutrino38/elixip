@@ -164,16 +164,16 @@ done
 # Their comments also name the EL package manager and the RPM's module package
 # name; an admin reading the file must find a command that works on this host.
 install -d -m 0750 "$root/etc/kelixip" "$root/etc/kelixip/tls"
-for toml in config domains; do
+for toml in config.toml domains.toml.example; do
   sed -e 's,/etc/sysconfig/kelixip,/etc/default/kelixip,g' \
       -e 's,dnf install,apt install,g' \
       -e 's,kelixip-mod-auth_db,kelixip-mod-auth-db,g' \
       -e 's,kelixip-mod-mcu_presence,kelixip-mod-mcu-presence,g' \
       -e 's,kelixip-mod-dialog_state,kelixip-mod-dialog-state,g' \
       -e 's,kelixip-mod-sip_servers,kelixip-mod-sip-servers,g' \
-      "$stage/config/$toml.toml" > "$root/etc/kelixip/$toml.toml"
-  chmod 0640 "$root/etc/kelixip/$toml.toml"
+      "$stage/config/$toml" > "$WORK/$toml"
 done
+install -m 0640 "$WORK/config.toml" "$root/etc/kelixip/config.toml"
 
 install -d -m 0755 "$root/etc/default"
 sed -e 's,/etc/sysconfig/kelixip,/etc/default/kelixip,g' \
@@ -204,14 +204,14 @@ install -D -m 0644 "$stage/logrotate/kelixip" "$root/etc/logrotate.d/kelixip"
 install -d -m 0750 "$root/var/lib/kelixip" "$root/var/log/kelixip"
 
 install_doc "$root" kelixip
-install -m 0644 "$stage"/doc/*.md "$root/usr/share/doc/kelixip/"
+install -m 0644 "$stage"/doc/*.md "$WORK/domains.toml.example" "$root/usr/share/doc/kelixip/"
 
 # Without debhelper nothing marks a file under /etc as a conffile — DEBIAN/conffiles
 # is what makes dpkg keep the admin's config.toml on upgrade (the .spec's
 # %config(noreplace)).
 install -d -m 0755 "$root/DEBIAN"
 install -m 0644 "$DEBDIR/conffiles" "$root/DEBIAN/conffiles"
-for script in postinst prerm postrm; do
+for script in preinst postinst prerm postrm; do
   install -m 0755 "$DEBDIR/$script" "$root/DEBIAN/$script"
 done
 
@@ -281,6 +281,8 @@ build_module kelixip-mod-conversation 'Elixir.Kelix.Mod.Conversation*.beam' \
   "$DEBDIR/control-mod-conversation.in" 'conversation.md' '' conversation
 build_module kelixip-mod-sip-servers 'Elixir.Kelix.Mod.SipServers*.beam' \
   "$DEBDIR/control-mod-sip-servers.in" 'sip_servers.md'
+build_module kelixip-mod-captioning 'Elixir.Kelix.Mod.Captioning*.beam' \
+  "$DEBDIR/control-mod-captioning.in" 'captioning.md'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

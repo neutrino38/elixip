@@ -28,6 +28,7 @@ defmodule Kelix.ControlAPI do
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
   | `run_script/3` | `POST /scripts/:name/run` (body `{"domain": …, "args": {…}}`) → `202` |
   | `reload_domains/0` | `POST /domains/reload` |
+  | `create_domain/3` … `delete_domain/2` | `POST` / `PATCH` / `PUT` / `DELETE /domains/…` (`docs/kelixip/rest-api.md`) |
   | `reload_all/0` | `POST /reload-all` |
   | `module_reload/1` | `POST /modules/:name/reload` |
   | `mediaserver_toggle/2` | `POST /mediaservers/:name` (body `{"enabled": bool}`) |
@@ -286,6 +287,113 @@ defmodule Kelix.ControlAPI do
     json(conn, 200, %{result: "in_service"})
   end
 
+  # ── domain edits (docs/design/dynamic-domains-plan.md §5) ─────────────────────
+  #
+  # One route per `kelictl domain …` command. Every one runs through `domain_edit/3`,
+  # which reads `version` and `X-Kelix-Admin` and maps the answer.
+
+  post "/domains" do
+    domain_edit(conn, fn result, _body -> "/domains/#{result.name}" end, fn body, opts ->
+      with {:ok, name, attrs} <- take_arg(body, "name"),
+           do: Control.create_domain(name, attrs, opts)
+    end)
+  end
+
+  delete "/domains/:d" do
+    domain_edit(conn, fn _body, opts ->
+      with {:ok, result} <- Control.delete_domain(d, opts),
+           do: {:ok, Map.update!(result, :purged, &purge_json/1)}
+    end)
+  end
+
+  patch "/domains/:d" do
+    domain_edit(conn, fn body, opts -> Control.set_domain(d, body, opts) end)
+  end
+
+  post "/domains/:d/aliases" do
+    location = fn _result, body -> "/domains/#{d}/aliases/#{body["host"]}" end
+
+    domain_edit(conn, location, fn body, opts ->
+      with {:ok, host} <- only_arg(body, "host"), do: Control.add_alias(d, host, opts)
+    end)
+  end
+
+  delete "/domains/:d/aliases/:host" do
+    domain_edit(conn, fn _body, opts -> Control.remove_alias(d, host, opts) end)
+  end
+
+  patch "/domains/:d/registrar" do
+    domain_edit(conn, fn body, opts -> Control.set_registrar(d, body, opts) end)
+  end
+
+  delete "/domains/:d/registrar" do
+    domain_edit(conn, fn _body, opts -> Control.remove_registrar(d, opts) end)
+  end
+
+  post "/domains/:d/presence" do
+    location = fn _result, body -> "/domains/#{d}/presence/#{body["package"]}" end
+
+    domain_edit(conn, location, fn body, opts ->
+      with {:ok, package, attrs} <- take_arg(body, "package"),
+           do: Control.add_presence(d, package, attrs, opts)
+    end)
+  end
+
+  patch "/domains/:d/presence/:package" do
+    domain_edit(conn, fn body, opts -> Control.set_presence(d, package, body, opts) end)
+  end
+
+  delete "/domains/:d/presence/:package" do
+    domain_edit(conn, fn _body, opts -> Control.remove_presence(d, package, opts) end)
+  end
+
+  # Declared before the rule routes, whose `:n` would take `keepalive` for a number.
+  put "/domains/:d/options/keepalive" do
+    domain_edit(conn, fn body, opts ->
+      with {:ok, script} <- only_arg(body, "script"), do: Control.set_keepalive(d, script, opts)
+    end)
+  end
+
+  delete "/domains/:d/options/keepalive" do
+    domain_edit(conn, fn _body, opts -> Control.remove_keepalive(d, opts) end)
+  end
+
+  post "/domains/:d/presence/:package/subscribe" do
+    add_rule(conn, d, {:subscribe, package}, "presence/#{package}/subscribe")
+  end
+
+  patch "/domains/:d/presence/:package/subscribe/:n" do
+    domain_edit(conn, fn body, opts ->
+      Control.update_rule(d, {:subscribe, package}, n, body, opts)
+    end)
+  end
+
+  post "/domains/:d/presence/:package/subscribe/:n/move" do
+    move_rule(conn, d, {:subscribe, package}, n)
+  end
+
+  delete "/domains/:d/presence/:package/subscribe/:n" do
+    domain_edit(conn, fn _body, opts ->
+      Control.remove_rule(d, {:subscribe, package}, n, opts)
+    end)
+  end
+
+  post "/domains/:d/:list" when list in ["calls", "chat", "options"] do
+    add_rule(conn, d, rule_list(list), list)
+  end
+
+  patch "/domains/:d/:list/:n" when list in ["calls", "chat", "options"] do
+    domain_edit(conn, fn body, opts -> Control.update_rule(d, rule_list(list), n, body, opts) end)
+  end
+
+  post "/domains/:d/:list/:n/move" when list in ["calls", "chat", "options"] do
+    move_rule(conn, d, rule_list(list), n)
+  end
+
+  delete "/domains/:d/:list/:n" when list in ["calls", "chat", "options"] do
+    domain_edit(conn, fn _body, opts -> Control.remove_rule(d, rule_list(list), n, opts) end)
+  end
+
   # ── module-contributed commands (§8.1, FW-4) ───────────────────────────────────
   #
   # Everything under `/modules/<name>/` that is not the fixed config-reload route
@@ -400,6 +508,183 @@ defmodule Kelix.ControlAPI do
   defp body_map(%{body_params: %Plug.Conn.Unfetched{}}), do: %{}
   defp body_map(%{body_params: params}) when is_map(params), do: params
   defp body_map(_), do: %{}
+
+  # ── domain edit helpers ───────────────────────────────────────────────────────
+
+  # `fun` gets the command's JSON arguments, without `version`, and the opts every
+  # `Kelix.Control` domain edit takes; it answers that edit's result, or `{:bad,
+  # message}` for a body without what the route needs. With `location`, a success is
+  # a creation: `201` and a `Location:` built from the result and the body.
+  defp domain_edit(conn, location \\ nil, fun) do
+    body = conn |> body_map() |> Map.delete("version")
+
+    with {:ok, opts} <- edit_opts(conn),
+         {:ok, result} <- fun.(body, opts) do
+      case location do
+        nil ->
+          json(conn, 200, %{result: result})
+
+        location ->
+          conn
+          |> put_resp_header("location", location.(result, body))
+          |> json(201, %{result: result})
+      end
+    else
+      {:bad, message} -> json(conn, 400, %{error: "invalid", message: message})
+      {:error, reason} -> domain_error(conn, reason)
+    end
+  end
+
+  # `version` from the body or the query string, the admin from `X-Kelix-Admin`.
+  defp edit_opts(conn) do
+    conn = fetch_query_params(conn)
+    actor = conn |> get_req_header("x-kelix-admin") |> List.first()
+
+    case Map.get(body_map(conn), "version", conn.query_params["version"]) do
+      nil ->
+        {:ok, [actor: actor]}
+
+      v when is_integer(v) and v > 0 ->
+        {:ok, [actor: actor, version: v]}
+
+      v when is_binary(v) ->
+        case Integer.parse(v) do
+          {n, ""} when n > 0 -> {:ok, [actor: actor, version: n]}
+          _ -> {:bad, "`version` must be a positive integer"}
+        end
+
+      _ ->
+        {:bad, "`version` must be a positive integer"}
+    end
+  end
+
+  # The argument a route names in its body, and the others, for the command.
+  defp take_arg(body, key) do
+    case Map.pop(body, key) do
+      {value, rest} when is_binary(value) and value != "" -> {:ok, value, rest}
+      _ -> {:bad, "the body needs `#{key}`, a non-empty string"}
+    end
+  end
+
+  # A route whose body holds one argument and nothing else.
+  defp only_arg(body, key) do
+    case take_arg(body, key) do
+      {:ok, value, rest} when rest == %{} ->
+        {:ok, value}
+
+      {:ok, _value, rest} ->
+        {:bad, "unknown argument(s): #{rest |> Map.keys() |> Enum.sort() |> Enum.join(", ")}"}
+
+      bad ->
+        bad
+    end
+  end
+
+  # `pattern` is a dial pattern or `default`, as `<rule>` in `kelictl … add <rule>`;
+  # the answer's `at` is the number the rule took.
+  defp add_rule(conn, d, list, segment) do
+    location = fn result, _body -> "/domains/#{d}/#{segment}/#{result.at}" end
+
+    domain_edit(conn, location, fn body, opts ->
+      with {:ok, pattern, attrs} <- take_arg(body, "pattern"),
+           do: Control.add_rule(d, list, pattern, attrs, opts)
+    end)
+  end
+
+  defp move_rule(conn, d, list, n) do
+    domain_edit(conn, fn body, opts ->
+      case Map.keys(body) -- ["to"] do
+        [] -> Control.move_rule(d, list, n, body["to"], opts)
+        extra -> {:bad, "unknown argument(s): #{extra |> Enum.sort() |> Enum.join(", ")}"}
+      end
+    end)
+  end
+
+  defp rule_list("calls"), do: :call
+  defp rule_list("chat"), do: :chat
+  defp rule_list("options"), do: :options
+
+  defp purge_json(purged) do
+    Map.new(purged, fn
+      {module, {:ok, n}} -> {module, %{purged: n}}
+      {module, {:error, reason}} -> {module, %{error: inspect(reason)}}
+      {module, other} -> {module, other}
+    end)
+  end
+
+  # The statuses of §5; `error` is the reason a client tests, `message` what it shows.
+  defp domain_error(conn, :not_found),
+    do:
+      domain_error(
+        conn,
+        404,
+        :not_found,
+        "no such domain, or no such alias, block, package or rule in it"
+      )
+
+  defp domain_error(conn, :exists), do: domain_error(conn, 409, :exists, "it already exists")
+
+  defp domain_error(conn, :conflict),
+    do:
+      domain_error(
+        conn,
+        409,
+        :conflict,
+        "the domains changed since the version given, or while the command ran: read " <>
+          "them again (GET /domains/<domain>) and send the command again. Nothing was applied."
+      )
+
+  defp domain_error(conn, :file_changed),
+    do:
+      domain_error(
+        conn,
+        409,
+        :file_changed,
+        "domains.toml was edited by hand and not reloaded, and a write would erase that " <>
+          "edit: POST /domains/reload first. Nothing was applied."
+      )
+
+  defp domain_error(conn, {:invalid, message}), do: domain_error(conn, 400, :invalid, message)
+  defp domain_error(conn, {:scripts, message}), do: domain_error(conn, 400, :scripts, message)
+
+  defp domain_error(conn, {:read_only, %{path: path, reason: reason, user: user}}) do
+    json(conn, 503, %{
+      error: "read_only",
+      message:
+        "the node cannot write #{path} (#{file_reason(reason)}, running as #{user}): give " <>
+          "the file and its directory to #{user}, or point KELIXIP_DOMAINS to " <>
+          "/var/lib/kelixip/domains.toml. Nothing was applied.",
+      path: path,
+      reason: to_string(reason),
+      user: user
+    })
+  end
+
+  defp domain_error(conn, {:write_failed, %{path: path, reason: reason}}),
+    do:
+      domain_error(
+        conn,
+        500,
+        :write_failed,
+        "writing #{path} failed (#{file_reason(reason)}). Nothing was applied."
+      )
+
+  defp domain_error(conn, :no_domains_path),
+    do:
+      domain_error(
+        conn,
+        503,
+        :no_domains_path,
+        "this node reads no domains.toml (KELIXIP_DOMAINS is not set)"
+      )
+
+  defp domain_error(conn, other), do: domain_error(conn, 500, :error, inspect(other))
+
+  defp file_reason(reason) when is_atom(reason), do: "#{:file.format_error(reason)}, #{reason}"
+  defp file_reason(reason), do: inspect(reason)
+
+  defp domain_error(conn, status, error, message),
+    do: json(conn, status, %{error: error, message: message})
 
   # ── declared status / Location / errors (§8.3.4 item 4) ────────────────────────
 

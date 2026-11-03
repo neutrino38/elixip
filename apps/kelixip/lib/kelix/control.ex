@@ -41,6 +41,38 @@ defmodule Kelix.Control do
       module_status: module_status(),
       domains_version: safe(fn -> Kelix.Domains.current().version end, 0)
     }
+    |> Map.merge(domains_file())
+  end
+
+  # Whether a domain written through kelictl, the API or kelescope can reach the
+  # disk, and whether a hand edit not reloaded blocks it — checked now, so a
+  # permission fixed or a reload done shows without a restart.
+  defp domains_file() do
+    case Application.get_env(:kelixip, :domains_path) do
+      nil ->
+        %{
+          domains_path: nil,
+          domains_writable: nil,
+          domains_write_error: nil,
+          domains_file_changed: nil
+        }
+
+      path ->
+        changed = safe(fn -> Kelix.Domains.file_changed?(Kelix.Domains.current(), path) end, nil)
+
+        case Kelix.Domains.writable(path) do
+          :ok ->
+            %{domains_path: path, domains_writable: true, domains_write_error: nil}
+
+          {:error, {:read_only, %{reason: reason, user: user}}} ->
+            %{
+              domains_path: path,
+              domains_writable: false,
+              domains_write_error: %{reason: to_string(reason), user: user}
+            }
+        end
+        |> Map.put(:domains_file_changed, changed)
+    end
   end
 
   defp module_status() do
@@ -434,9 +466,18 @@ defmodule Kelix.Control do
   """
   @spec domain(String.t()) :: {:ok, map} | {:error, :not_found}
   def domain(name) when is_binary(name) do
-    case Kelix.Domains.lookup(current_domains(), name) do
-      nil -> {:error, :not_found}
-      d -> {:ok, describe_domain(d, active_calls(), loaded_scripts())}
+    snapshot = current_domains()
+
+    case Kelix.Domains.lookup(snapshot, name) do
+      nil ->
+        {:error, :not_found}
+
+      d ->
+        # the version an edit passes as `--version` to fail if the domains move first
+        {:ok,
+         d
+         |> describe_domain(active_calls(), loaded_scripts())
+         |> Map.put(:version, snapshot.version)}
     end
   end
 
@@ -461,6 +502,9 @@ defmodule Kelix.Control do
       presence: Enum.map(d.presence, &render_presence_block(&1, loaded)),
       dial_plan: Enum.map(d.dial_plan, &render_rule(&1, loaded)),
       chat: Enum.map(d.chat, &render_rule(&1, loaded)),
+      options: Enum.map(d.options, &render_rule(&1, loaded)),
+      options_keepalive:
+        d.options_keepalive && with_module(%{script: d.options_keepalive}, loaded),
       active_calls: Map.get(active, d.name, 0),
       registrations: map_size(registrations_for(d.name))
     }
@@ -686,11 +730,18 @@ defmodule Kelix.Control do
              | {:rejected, integer, String.t()}}
   def run_script(script, domain, args \\ %{})
       when is_binary(script) and is_binary(domain) and is_map(args) do
+    snapshot = current_domains()
+
     with :ok <- script_name(script),
-         %Kelix.Domain{} = d <-
-           Kelix.Domains.lookup(current_domains(), domain) || {:error, :not_found},
+         %Kelix.Domain{} = d <- Kelix.Domains.lookup(snapshot, domain) || {:error, :not_found},
          {:ok, _module} <- loadable(script) do
-      route = %{domain: d.name, function: :run, script: script, max_calls: d.max_calls}
+      route = %{
+        domain: d.name,
+        function: :run,
+        script: script,
+        max_calls: d.max_calls,
+        version: snapshot.version
+      }
 
       overrides =
         case Kelix.Router.media_override() do
@@ -843,11 +894,266 @@ defmodule Kelix.Control do
         {:error, :no_domains_path}
 
       path ->
+        before = domain_names()
+
         with :ok <- Kelix.Domains.reload(path, check_scripts: true) do
+          # A domain the file no longer has ends as `delete_domain/2` ends it.
+          version = current_domains().version
+
+          for name <- before -- domain_names() do
+            ended = end_domain(name, nil, version)
+            log_domain_write("reload removed", name, nil, version, ended)
+          end
+
           # a freshly enabled domain may need a module nobody installed (§8.3)
           Kelix.ModuleSupervisor.warn_missing_function_modules()
         end
     end
+  end
+
+  @doc """
+  Create a domain (`kelictl domain create`, `POST /domains`) and write it to
+  `domains.toml` (`docs/design/dynamic-domains-plan.md`). `attrs`: `aliases` (a
+  list, or comma-separated) and `max_calls`. The domain serves no function until
+  one is added. The registrations and published states a domain of that name may
+  have left are purged first.
+
+  `opts`, for this function and every domain edit below: `:actor`, who asked
+  (logged), and `:version`, the snapshot version the command was read against —
+  if the domains changed since, the write answers `:conflict`. Without it, the
+  command applies to the domains as they are when it runs.
+
+  `{:ok, %{name, version}}`, or `{:error, reason}` with nothing applied: `:exists`
+  (a domain already serves that name), `{:invalid, message}`, `{:scripts,
+  message}`, `:conflict`, `:file_changed` (the file was edited by hand and not
+  reloaded), `{:read_only, info}` (path, reason, user), `{:write_failed, info}`,
+  `:no_domains_path`. The edits answer the same, `:not_found` instead of
+  `:exists` for a domain, alias, block, package or rule number that does not
+  exist, and `:exists` for an alias or package the domain already has.
+  """
+  @spec create_domain(String.t(), map, keyword) :: {:ok, map} | {:error, term}
+  def create_domain(name, attrs \\ %{}, opts \\ []) when is_binary(name) and is_map(attrs) do
+    snapshot = current_domains()
+
+    with {:ok, path} <- domains_path(),
+         false <- Map.has_key?(snapshot.index, String.downcase(name)) && {:error, :exists},
+         {:ok, table} <- Kelix.Domains.Edit.new(name, attrs) do
+      purge_domain(name)
+      write_domain(table, "create", path, snapshot, opts)
+    end
+  end
+
+  @doc "Change a domain's own keys (`domain <d> set`): `max_calls`, `none` removes it."
+  @spec set_domain(String.t(), map, keyword) :: {:ok, map} | {:error, term}
+  def set_domain(name, attrs, opts \\ []), do: edit_domain(name, {:set, attrs}, opts)
+
+  @doc "Add an alias to a domain (`domain <d> alias add <host>`)."
+  @spec add_alias(String.t(), String.t(), keyword) :: {:ok, map} | {:error, term}
+  def add_alias(name, host, opts \\ []), do: edit_domain(name, {:alias_add, host}, opts)
+
+  @doc "Remove an alias from a domain (`domain <d> alias remove <host>`)."
+  @spec remove_alias(String.t(), String.t(), keyword) :: {:ok, map} | {:error, term}
+  def remove_alias(name, host, opts \\ []), do: edit_domain(name, {:alias_remove, host}, opts)
+
+  @doc """
+  Create or change the registrar block (`domain <d> registrar set`): `script`,
+  `default_expires`, `min_expires`, `keepalive_period`. Only the keys given change;
+  `none` removes an optional one. A new block needs `script`.
+  """
+  @spec set_registrar(String.t(), map, keyword) :: {:ok, map} | {:error, term}
+  def set_registrar(name, attrs, opts \\ []), do: edit_domain(name, {:registrar_set, attrs}, opts)
+
+  @doc "Remove the registrar block (`domain <d> registrar remove`)."
+  @spec remove_registrar(String.t(), keyword) :: {:ok, map} | {:error, term}
+  def remove_registrar(name, opts \\ []), do: edit_domain(name, :registrar_remove, opts)
+
+  @doc "Serve an event package (`domain <d> presence add <package>`): `subscribe`, `publish`."
+  @spec add_presence(String.t(), String.t(), map, keyword) :: {:ok, map} | {:error, term}
+  def add_presence(name, package, attrs, opts \\ []),
+    do: edit_domain(name, {:presence_add, package, attrs}, opts)
+
+  @doc """
+  Change an event package (`domain <d> presence set <package>`). `subscribe`
+  replaces the SUBSCRIBE rules with one catch-all script; `publish=none` removes the
+  PUBLISH script.
+  """
+  @spec set_presence(String.t(), String.t(), map, keyword) :: {:ok, map} | {:error, term}
+  def set_presence(name, package, attrs, opts \\ []),
+    do: edit_domain(name, {:presence_set, package, attrs}, opts)
+
+  @doc "Stop serving an event package (`domain <d> presence remove <package>`)."
+  @spec remove_presence(String.t(), String.t(), keyword) :: {:ok, map} | {:error, term}
+  def remove_presence(name, package, opts \\ []),
+    do: edit_domain(name, {:presence_remove, package}, opts)
+
+  @doc """
+  Add a rule to an ordered list (`domain <d> call|chat|options add`, `domain <d>
+  presence <package> subscribe add`). `list` is `:call`, `:chat`, `:options` or
+  `{:subscribe, package}`; `rule` a pattern or `"default"`. `attrs`: `script`,
+  `idle_timeout` for chat, and `at`, the number the rule takes — by default, just
+  before the catch-all. The answer carries `at`.
+  """
+  @spec add_rule(String.t(), Kelix.Domains.Edit.list_name(), String.t(), map, keyword) ::
+          {:ok, map} | {:error, term}
+  def add_rule(name, list, rule, attrs, opts \\ []),
+    do: edit_domain(name, {:rule_add, list, rule, attrs}, opts)
+
+  @doc "Change rule `n` of a list: `pattern` (or `default`), `script`, `idle_timeout` for chat."
+  @spec update_rule(String.t(), Kelix.Domains.Edit.list_name(), term, map, keyword) ::
+          {:ok, map} | {:error, term}
+  def update_rule(name, list, n, attrs, opts \\ []),
+    do: edit_domain(name, {:rule_update, list, n, attrs}, opts)
+
+  @doc "Move rule `n` of a list so that it becomes rule `to`."
+  @spec move_rule(String.t(), Kelix.Domains.Edit.list_name(), term, term, keyword) ::
+          {:ok, map} | {:error, term}
+  def move_rule(name, list, n, to, opts \\ []),
+    do: edit_domain(name, {:rule_move, list, n, to}, opts)
+
+  @doc "Remove rule `n` of a list."
+  @spec remove_rule(String.t(), Kelix.Domains.Edit.list_name(), term, keyword) ::
+          {:ok, map} | {:error, term}
+  def remove_rule(name, list, n, opts \\ []),
+    do: edit_domain(name, {:rule_remove, list, n}, opts)
+
+  @doc "Set the script answering an OPTIONS to the domain itself (`domain <d> options keepalive set`)."
+  @spec set_keepalive(String.t(), String.t(), keyword) :: {:ok, map} | {:error, term}
+  def set_keepalive(name, script, opts \\ []),
+    do: edit_domain(name, {:keepalive_set, script}, opts)
+
+  @doc "Remove the keepalive OPTIONS script (`domain <d> options keepalive remove`)."
+  @spec remove_keepalive(String.t(), keyword) :: {:ok, map} | {:error, term}
+  def remove_keepalive(name, opts \\ []), do: edit_domain(name, :keepalive_remove, opts)
+
+  @doc """
+  Delete one domain (`kelictl domain delete`, `DELETE /domains/:name`), by its
+  canonical name, and write `domains.toml` without it.
+
+  Never refused because the domain is in use. Once the snapshot without it is
+  swapped in, every scenario of the domain is asked to stop, as `kelictl stop`
+  asks, and the registrations and published states of the domain are purged. It
+  does not wait for the scenarios to end.
+
+  Same `opts` and refusals as `create_domain/3`, plus `{:error, :not_found}`.
+  `{:ok, %{name, version, stopped, purged}}`: `stopped` counts the scenarios asked
+  to stop, `purged` says per module what its purge did — `{:ok, count}`,
+  `:not_loaded`, or `{:error, reason}` for a module that failed; the domain is
+  deleted either way.
+  """
+  @spec delete_domain(String.t(), keyword) :: {:ok, map} | {:error, term}
+  def delete_domain(name, opts \\ []) when is_binary(name) do
+    with {:ok, path} <- domains_path(),
+         canonical when is_binary(canonical) <-
+           Enum.find(domain_names(), &same_name?(&1, name)) || {:error, :not_found},
+         {:ok, snapshot} <-
+           Kelix.Domains.delete_domain(canonical, write_opts(path, opts, check_scripts: false)) do
+      ended = end_domain(canonical, opts[:actor], snapshot.version)
+      log_domain_write("delete", canonical, opts[:actor], snapshot.version, ended)
+      Kelix.ModuleSupervisor.warn_missing_function_modules()
+      {:ok, Map.merge(%{name: canonical, version: snapshot.version}, ended)}
+    end
+  end
+
+  # A domain is named by its canonical name here, never an alias: an edit is about
+  # the domain as the file holds it.
+  defp edit_domain(name, command, opts) when is_binary(name) do
+    snapshot = current_domains()
+
+    with {:ok, path} <- domains_path(),
+         %{} = table <-
+           Enum.find(Map.get(snapshot.source, "domain", []), &same_name?(&1["name"], name)) ||
+             {:error, :not_found},
+         {:ok, changed} <- Kelix.Domains.Edit.change(table, command),
+         {:ok, written} <- write_domain(changed, command_label(command), path, snapshot, opts) do
+      {:ok, Map.merge(written, rule_position(command, table, changed))}
+    end
+  end
+
+  defp write_domain(table, what, path, snapshot, opts) do
+    version = Keyword.get(opts, :version) || snapshot.version
+
+    with {:ok, written} <- Kelix.Domains.put_domain(table, path: path, version: version) do
+      log_domain_write(what, table["name"], opts[:actor], written.version, nil)
+      Kelix.ModuleSupervisor.warn_missing_function_modules()
+      {:ok, %{name: table["name"], version: written.version}}
+    end
+  end
+
+  # The number a rule took when it was added, for the operator to address it next.
+  defp rule_position({:rule_add, list, _rule, _attrs}, before, changed) do
+    new = Kelix.Domains.Edit.rules(changed, list)
+    old = Kelix.Domains.Edit.rules(before, list)
+    at = Enum.find_index(Enum.zip(new, old ++ [nil]), fn {n, o} -> n != o end)
+    %{at: (at || length(old)) + 1}
+  end
+
+  defp rule_position(_command, _before, _changed), do: %{}
+
+  defp command_label({:set, _}), do: "set"
+  defp command_label({:alias_add, host}), do: "alias add #{host}"
+  defp command_label({:alias_remove, host}), do: "alias remove #{host}"
+  defp command_label({:registrar_set, _}), do: "registrar set"
+  defp command_label(:registrar_remove), do: "registrar remove"
+  defp command_label({:presence_add, p, _}), do: "presence add #{p}"
+  defp command_label({:presence_set, p, _}), do: "presence set #{p}"
+  defp command_label({:presence_remove, p}), do: "presence remove #{p}"
+  defp command_label({:rule_add, l, rule, _}), do: "#{list_label(l)} add #{rule}"
+  defp command_label({:rule_update, l, n, _}), do: "#{list_label(l)} update #{n}"
+  defp command_label({:rule_move, l, n, to}), do: "#{list_label(l)} move #{n} to #{to}"
+  defp command_label({:rule_remove, l, n}), do: "#{list_label(l)} remove #{n}"
+  defp command_label({:keepalive_set, _}), do: "options keepalive set"
+  defp command_label(:keepalive_remove), do: "options keepalive remove"
+
+  defp list_label({:subscribe, package}), do: "presence #{package} subscribe"
+  defp list_label(list), do: Atom.to_string(list)
+
+  defp domains_path() do
+    case Application.get_env(:kelixip, :domains_path) do
+      nil -> {:error, :no_domains_path}
+      path -> {:ok, path}
+    end
+  end
+
+  defp write_opts(path, opts, extra),
+    do: [path: path, version: opts[:version]] ++ extra
+
+  defp same_name?(a, b) when is_binary(a) and is_binary(b),
+    do: String.downcase(a) == String.downcase(b)
+
+  defp same_name?(_a, _b), do: false
+
+  # Steps 2 and 3 of a delete, once the snapshot without `name` is in place.
+  defp end_domain(name, actor, version) do
+    stopped =
+      safe(
+        fn -> Kelix.InstancePool.shutdown_domain(name, {:domain_deleted, actor}, version) end,
+        0
+      )
+
+    %{stopped: stopped, purged: purge_domain(name)}
+  end
+
+  defp purge_domain(name) do
+    Map.new(["registrar", "presence"], fn module ->
+      {module, Kelix.ModuleRegistry.facade(module, :purge_domain, [name], :not_loaded)}
+    end)
+  end
+
+  defp log_domain_write(what, name, actor, version, ended) do
+    tail =
+      case ended do
+        nil ->
+          ""
+
+        %{stopped: n, purged: purged} ->
+          ", #{n} scenario(s) asked to stop, purge " <>
+            Enum.map_join(purged, " ", fn {m, r} -> "#{m}=#{inspect(r)}" end)
+      end
+
+    Logger.info(
+      module: __MODULE__,
+      message: "domain #{what} #{name} by admin=#{actor || "unknown"}: v#{version}#{tail}"
+    )
   end
 
   @doc """

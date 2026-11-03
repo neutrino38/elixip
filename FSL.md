@@ -956,6 +956,9 @@ service: play a prompt, offer a redirect, place another call and bridge again. I
 meant to be **re-entered**: `{:bridge_break, message}` hands the call back untouched, and
 `bridge(resume: true)` picks it up. Between the two, in-dialog traffic keeps arriving and nothing answers
 it: an unanswered re-INVITE runs at timer B, so that interval is the scale of a prompt, not of a decision.
+The same re-entry serves `bridge(args: %{intercept: [{:caller, :INFO, "application/captioning+xml"}]})`:
+a matching in-dialog request is handed back as `{:bridge, :request, %{leg, method, req, transaction}}`
+instead of being relayed, and the script answers it with `b2bua_reply_on(leg, req, code, reason, fields)`.
 
 Specification and catalogue: [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md).
 Design: [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md).

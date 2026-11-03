@@ -369,7 +369,21 @@ defmodule SBB.Call do
         answered locally instead of being relayed, because our endpoint did not
         move and the far end has nothing to learn. Without a media server the two
         legs are the same offer/answer and everything crosses;
-      * `:max_duration` — the call's own bound, in ms (4 h by default).
+      * `:max_duration` — the call's own bound, in ms (4 h by default);
+      * `:intercept` — the in-dialog requests the script answers itself instead
+        of the relay, as `{leg, method, content_type}` triples:
+
+            bridge(args: %{intercept: [{:caller, :INFO, "application/captioning+xml"}]})
+
+        `leg` is `:caller` or `:callee`, `method` one of those the default relay
+        carries (INFO, MESSAGE, NOTIFY, REFER… — never INVITE, UPDATE, ACK or
+        BYE, which have rules of their own here), and `content_type` the media
+        type of the body, compared without its parameters and without case, or
+        `:any`. A matching request is not relayed: the block returns
+        `{:bridge, :request, %{leg, method, req, transaction}}`, the script
+        answers it — `b2bua_reply_on(leg, req, code, reason, fields)` — and
+        calls `bridge(resume: true)`, the same window as an interruption. A
+        request that matches nothing crosses as before.
 
     ## Interruption
 
@@ -386,7 +400,7 @@ defmodule SBB.Call do
 
     @sbb_namespace :bridge
 
-    @sbb_args [:media, :on_callee_hangup, :max_duration]
+    @sbb_args [:media, :on_callee_hangup, :max_duration, :intercept]
 
     @sbb_returns [
       caller_hung_up:
@@ -406,6 +420,10 @@ defmodule SBB.Call do
           "ends. With `on_callee_hangup: :keep_caller`, the callee's is `:callee_left` " <>
           "instead",
       interrupted: "a {:bridge_break, message} arrived; the call is untouched — %{message}",
+      request:
+        "an in-dialog request matched `:intercept` and was NOT relayed — %{leg: :caller | " <>
+          ":callee, method, req, transaction}. It is unanswered: the script answers it on " <>
+          "`leg` and resumes the bridge. Only ever returned to a script that asked for it",
       max_duration: "the call's own bound expired — %{}",
       media_lost:
         "the media plane is gone — %{reason: :media_lost | :server_disconnected}. Both " <>
@@ -566,18 +584,31 @@ defmodule SBB.Call do
           stay("ACK relayed (callee -> caller)")
 
         # Default relay, written out rather than assumed: everything else
-        # in-dialog (INFO, MESSAGE, REFER…), then the responses.
-        {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
-          b2bua_forward(req)
-          stay("relayed #{m} (callee -> caller)")
+        # in-dialog (INFO, MESSAGE, REFER…), then the responses. A request the
+        # script asked to see (`:intercept`) is handed back instead, unanswered.
+        {:outbound, {m, req, trans, _dlg}} when is_atom(m) ->
+          if intercepted?(sbb_data_get(:intercept), :callee, m, req) do
+            sbb_return(
+              {:bridge, :request, %{leg: :callee, method: m, req: req, transaction: trans}}
+            )
+          else
+            b2bua_forward(req)
+            stay("relayed #{m} (callee -> caller)")
+          end
 
         {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
           b2bua_forward_reply(resp)
           stay("relayed #{code} (callee -> caller)")
 
-        {m, req, _trans, _dlg} when is_atom(m) ->
-          b2bua_forward(req)
-          stay("relayed #{m} (caller -> callee)")
+        {m, req, trans, _dlg} when is_atom(m) ->
+          if intercepted?(sbb_data_get(:intercept), :caller, m, req) do
+            sbb_return(
+              {:bridge, :request, %{leg: :caller, method: m, req: req, transaction: trans}}
+            )
+          else
+            b2bua_forward(req)
+            stay("relayed #{m} (caller -> callee)")
+          end
 
         {code, resp, _trans, _dlg} when is_integer(code) ->
           b2bua_forward_reply(resp)
@@ -621,6 +652,28 @@ defmodule SBB.Call do
         _caller -> sbb_return({:bridge, :caller_hung_up, %{reason: reason}})
       end
     end
+
+    # Whether `req`, arrived on `leg`, is one the script asked to answer itself.
+    # The body's media type is the message layer's reading — parameters stripped,
+    # case folded — so the comparison only has to fold the configured one the
+    # same way.
+    defp intercepted?(nil, _leg, _method, _req), do: false
+
+    defp intercepted?(specs, leg, method, req) when is_list(specs) do
+      Enum.any?(specs, fn
+        {^leg, ^method, :any} ->
+          true
+
+        {^leg, ^method, type} when is_binary(type) ->
+          SIP.Msg.Ops.body_content_type(req) == media_type(type)
+
+        _other ->
+          false
+      end)
+    end
+
+    defp media_type(type),
+      do: type |> String.split(";", parts: 2) |> hd() |> String.trim() |> String.downcase()
 
     # Whether a re-offer can be answered locally instead of crossing. Returns the
     # kind too, so the caller can say which it was.

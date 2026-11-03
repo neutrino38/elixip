@@ -1,8 +1,8 @@
 # /etc/kelixip/config.toml — infrastructure configuration (restart-only).
 #
 # Every key is documented in /usr/share/doc/kelixip/installation.md. The served
-# domains and the dial-plan are NOT here: they live in domains.toml, which is
-# hot-reloadable (`kelictl domain reload-all` / `systemctl reload kelixip`).
+# domains and the dial-plan are NOT here: they live in
+# /var/lib/kelixip/domains.toml, which is hot-reloadable (`kelictl domain reload-all` / `systemctl reload kelixip`).
 #
 # This file is validated at every boot. Any error — a bad value, an unknown key,
 # a port that cannot be bound — aborts the start with the reason on stderr, rather
@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.8.2"
+# user_agent = "Kelixip/1.9.0"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 # max_message_size = 64000   # biggest inbound SIP message, in bytes; 513 beyond it
 
@@ -289,6 +289,25 @@ port = 9095
 # hence mode 0600). Without server_file a restart forgets them.
 #server_file        = "/var/lib/kelixip/sip_servers.json"
 #keepalive_interval = 30            # seconds between two OPTIONS to a server's URI
+
+#[module.captioning]                # dnf install kelixip-mod-captioning
+# The correction of a captioned call (call-captioning.exs): answers the client's
+# captioning INFO with the URL of a correction stream on the speech-server. This
+# node's address must be in the speech-server's control.allow.
+#control_url  = "http://10.0.0.12:9200"          # control API, admin network
+#public_url   = "wss://speech.example.net:9201"  # what the browser opens: wss:// only
+#ttl          = 60                               # token lifetime, seconds
+#timeout_ms   = 2000                             # bound on a token request
+#max_per_call = 5                                # renewals after the first token
+#min_interval = 10                               # seconds between two tokens of a call
+#retry_after  = 30                               # Retry-After of a 503
+#
+# One table per domain whose callers have the correction; the name is also the
+# account the speech-server bills the token to.
+#[[module.captioning.domain]]
+#name       = "visioassistance.net"
+#correction = true
+#lang       = "fr"                                # absent: the client chooses
 
 # The media servers, declared here and nowhere else: point-to-point calls take one
 # per call (round-robin + health-check), and the mcu module opens one control channel

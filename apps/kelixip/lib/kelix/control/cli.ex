@@ -64,10 +64,16 @@ defmodule Kelix.Control.CLI do
   `muted='{"audio":true}'` loses its inner quotes. That is what the list form fixes,
   and why the two clauses are not equivalent.
   """
+  #
+  # A non-zero code leaves as `exit({:shutdown, code})`: the `rpc` and `eval`
+  # commands of the release re-raise it in the operator's VM, which then halts with
+  # that status, prints nothing more, and leaves the node running.
   @spec rpc_main([String.t()] | String.t()) :: :ok
   def rpc_main(argv) when is_list(argv) do
-    {_code, output} = run(argv, node())
+    {code, output} = run(argv, node())
     IO.puts(output)
+    if code != 0, do: exit({:shutdown, code})
+    :ok
   end
 
   def rpc_main(arg_string) when is_binary(arg_string),
@@ -184,6 +190,58 @@ defmodule Kelix.Control.CLI do
   defp parse(["domain", "list"]), do: {:ok, :domains, :domains, []}
   defp parse(["domain", "show", name]), do: {:ok, :domain, :domain, [name]}
   defp parse(["domain", "reload-all"]), do: {:ok, :ok, :reload_domains, []}
+
+  defp parse(["domain", "delete" | rest]) do
+    case write_flags(rest) do
+      {:ok, opts, [name]} -> {:ok, :domain_delete, :delete_domain, [name, opts]}
+      {:ok, _opts, _args} -> {:error, usage_domain()}
+      err -> err
+    end
+  end
+
+  # The edits of one domain (`docs/design/dynamic-domains-plan.md`, §4): positional
+  # words name what is edited, `name=value` tokens are its arguments, and
+  # `--version` / `--admin` may come anywhere.
+  defp parse(["domain", "create", name | rest]),
+    do: domain_edit(rest, :created, :create_domain, &[name, &1, &2])
+
+  defp parse(["domain", d, "set" | rest]),
+    do: domain_edit(rest, :ok, :set_domain, &[d, &1, &2])
+
+  defp parse(["domain", d, "alias", op, host | rest]) when op in ["add", "remove"],
+    do: domain_edit(rest, :ok, :"#{op}_alias", fn _attrs, opts -> [d, host, opts] end, [])
+
+  defp parse(["domain", d, "registrar", "set" | rest]),
+    do: domain_edit(rest, :ok, :set_registrar, &[d, &1, &2])
+
+  defp parse(["domain", d, "registrar", "remove" | rest]),
+    do: domain_edit(rest, :ok, :remove_registrar, fn _attrs, opts -> [d, opts] end, [])
+
+  defp parse(["domain", d, "presence", op, package | rest]) when op in ["add", "set"],
+    do: domain_edit(rest, :ok, :"#{op}_presence", &[d, package, &1, &2])
+
+  defp parse(["domain", d, "presence", "remove", package | rest]),
+    do: domain_edit(rest, :ok, :remove_presence, fn _attrs, opts -> [d, package, opts] end, [])
+
+  defp parse(["domain", d, "presence", package, "subscribe" | rest]),
+    do: rule_edit(d, {:subscribe, package}, rest)
+
+  defp parse(["domain", d, "options", "keepalive", "set" | rest]) do
+    with {:ok, opts, tokens} <- write_flags(rest),
+         {:ok, %{"script" => script} = attrs} when map_size(attrs) == 1 <- name_values(tokens) do
+      {:ok, {:domain_edit, :ok}, :set_keepalive, [d, script, opts]}
+    else
+      {:error, _} = err -> err
+      _ -> {:error, usage_domain()}
+    end
+  end
+
+  defp parse(["domain", d, "options", "keepalive", "remove" | rest]),
+    do: domain_edit(rest, :ok, :remove_keepalive, fn _attrs, opts -> [d, opts] end, [])
+
+  defp parse(["domain", d, list | rest]) when list in ["call", "chat", "options"],
+    do: rule_edit(d, String.to_existing_atom(list), rest)
+
   # `domain` is a core noun, so it never reaches the module dispatch below: a
   # mistyped sub-command gets the domain usage rather than "unknown module".
   defp parse(["domain" | _]), do: {:error, usage_domain()}
@@ -192,14 +250,17 @@ defmodule Kelix.Control.CLI do
   defp parse(["mediaserver", "show", name]), do: {:ok, :mediaserver, :mediaserver, [name]}
 
   defp parse(["mediaserver", onoff, name]) when onoff in ["enable", "disable"],
-    do: {:ok, :ok, :mediaserver_toggle, [name, onoff == "enable"]}
+    do: {:ok, :mediaserver_toggle, :mediaserver_toggle, [name, onoff == "enable"]}
 
   # `mediaserver` is a core noun too — and the pool entry it names is not the `mcu`
   # module, which owns its own command namespace (`kelictl mcu conference.list`).
   defp parse(["mediaserver" | _]), do: {:error, usage_mediaserver()}
 
   defp parse(["module", "list"]), do: {:ok, :module_list, :module_commands, []}
-  defp parse(["module", "reload", name]), do: {:ok, :ok, :module_reload, [name]}
+
+  defp parse(["module", "reload", name]),
+    do: {:ok, {:module_reload, name}, :module_reload, [name]}
+
   # `module` is a core noun, like `domain` above: a mistyped sub-command gets this
   # usage instead of being taken for a module named "module".
   defp parse(["module" | _]), do: {:error, usage_module()}
@@ -211,7 +272,7 @@ defmodule Kelix.Control.CLI do
 
   defp parse(["stop", id]) do
     case Integer.parse(id) do
-      {n, ""} -> {:ok, :ok, :shutdown_scenario, [n]}
+      {n, ""} -> {:ok, {:stop, n}, :shutdown_scenario, [n]}
       _ -> {:error, "stop: <id> must be an integer"}
     end
   end
@@ -307,7 +368,61 @@ defmodule Kelix.Control.CLI do
 
   defp parse(_), do: {:error, usage()}
 
+  # `args.(attrs, opts)` builds the Kelix.Control arguments. `allowed` limits the
+  # name=value tokens; `nil` takes any, and Kelix.Control says which it refuses.
+  defp domain_edit(rest, kind, fun, args, allowed \\ nil) do
+    with {:ok, opts, tokens} <- write_flags(rest),
+         {:ok, attrs} <- name_values(tokens),
+         :ok <- if(allowed && attrs != %{}, do: {:error, usage_domain()}, else: :ok) do
+      {:ok, {:domain_edit, kind}, fun, args.(attrs, opts)}
+    end
+  end
+
+  defp rule_edit(d, list, ["add", rule | rest]),
+    do: domain_edit(rest, :added, :add_rule, &[d, list, rule, &1, &2])
+
+  defp rule_edit(d, list, ["update", n | rest]),
+    do: domain_edit(rest, :ok, :update_rule, &[d, list, n, &1, &2])
+
+  defp rule_edit(d, list, ["move", n | rest]) do
+    with {:ok, opts, tokens} <- write_flags(rest),
+         {:ok, %{"to" => to} = attrs} when map_size(attrs) == 1 <- name_values(tokens) do
+      {:ok, {:domain_edit, :ok}, :move_rule, [d, list, n, to, opts]}
+    else
+      {:error, _} = err -> err
+      _ -> {:error, usage_domain()}
+    end
+  end
+
+  defp rule_edit(d, list, ["remove", n | rest]),
+    do: domain_edit(rest, :ok, :remove_rule, fn _attrs, opts -> [d, list, n, opts] end, [])
+
+  defp rule_edit(_d, _list, _rest), do: {:error, usage_domain()}
+
+  defp name_values(tokens) do
+    case Enum.find(tokens, &(not String.contains?(&1, "="))) do
+      nil -> {:ok, Map.new(tokens, &(&1 |> String.split("=", parts: 2) |> List.to_tuple()))}
+      bad -> {:error, "domain: #{inspect(bad)} is not name=value"}
+    end
+  end
+
   defp pop_flag(args, flag), do: {flag in args, Enum.reject(args, &(&1 == flag))}
+
+  # `--version N` (the snapshot the command was read against) and `--admin NAME`
+  # (who asked, for the node's log), anywhere among the arguments.
+  defp write_flags(args) do
+    case OptionParser.parse(args, strict: [version: :integer, admin: :string]) do
+      {opts, rest, []} ->
+        {:ok,
+         Enum.map(opts, fn
+           {:admin, a} -> {:actor, a}
+           other -> other
+         end), rest}
+
+      {_opts, _rest, [{flag, _} | _]} ->
+        {:error, "domain: bad option #{flag} — --version takes an integer, --admin a name"}
+    end
+  end
 
   # The `name=value` tokens an operator types become the named arguments a module
   # declares (`describe_control/0` `args:`, which is also what `<module> help`
@@ -373,7 +488,7 @@ defmodule Kelix.Control.CLI do
   # down, which is when an operator reaches for it.
   @completion_verbs %{
     "registration" => ["list", "show", "remove", "help"],
-    "domain" => ["list", "show", "reload-all", "help"],
+    "domain" => ["list", "show", "reload-all", "create", "delete", "help"],
     "mediaserver" => ["list", "show", "enable", "disable", "help"],
     "module" => ["list", "reload", "help"],
     "debug" => ["list", "show", "help"]
@@ -416,8 +531,29 @@ defmodule Kelix.Control.CLI do
   defp complete(["registration", verb, domain], prefix) when verb in ["show", "remove"],
     do: {:complete, {:registrations, [domain], :aors}, prefix, []}
 
-  defp complete(["domain", "show"], prefix),
+  defp complete(["domain", verb], prefix) when verb in ["show", "delete"],
     do: {:complete, {:domains, [], :named_rows}, prefix, []}
+
+  # `domain` is followed by a verb, or by the name of the domain to edit.
+  defp complete(["domain"], prefix),
+    do: {:complete, {:domains, [], :named_rows}, prefix, @completion_verbs["domain"]}
+
+  defp complete(["domain", d], prefix) when d not in ["list", "reload-all", "create", "help"],
+    do: {:complete, nil, prefix, ~w(set alias registrar presence call chat options)}
+
+  defp complete(["domain", _d, element], prefix) do
+    words =
+      case element do
+        "alias" -> ~w(add remove)
+        "registrar" -> ~w(set remove)
+        "presence" -> ~w(add set remove)
+        "options" -> ~w(add update move remove keepalive)
+        list when list in ["call", "chat"] -> ~w(add update move remove)
+        _ -> []
+      end
+
+    {:complete, nil, prefix, words}
+  end
 
   defp complete(["mediaserver", verb], prefix) when verb in ["show", "enable", "disable"],
     do: {:complete, {:mediaservers, [], :named_rows}, prefix, []}
@@ -542,10 +678,26 @@ defmodule Kelix.Control.CLI do
   defp render(:run, {:error, {:rejected, code, reason}}),
     do: {@exit_unavailable, "run: refused, #{code} #{reason}"}
 
-  defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
-  defp render(:reg_domain, {:error, :not_found}), do: {1, "no such domain"}
-  defp render(:registration, {:error, :not_found}), do: {1, "no such registration"}
-  defp render(:mediaserver, {:error, :not_found}), do: {1, "no such media server"}
+  defp render(:domain, {:error, :not_found}), do: {@exit_not_found, "no such domain"}
+
+  defp render(:domain_delete, {:error, :not_found}), do: {@exit_not_found, "no such domain"}
+
+  defp render(tag, {:error, reason})
+       when tag == :domain_delete or (is_tuple(tag) and elem(tag, 0) == :domain_edit),
+       do: domain_write_error(reason)
+
+  defp render(:reg_domain, {:error, :not_found}), do: {@exit_not_found, "no such domain"}
+  defp render(:registration, {:error, :not_found}), do: {@exit_not_found, "no such registration"}
+  defp render(:mediaserver, {:error, :not_found}), do: {@exit_not_found, "no such media server"}
+
+  defp render({:stop, id}, {:error, :not_found}),
+    do: {@exit_not_found, "no scenario #{id} in progress (kelictl monitor)"}
+
+  defp render(:mediaserver_toggle, {:error, :unknown}),
+    do: {@exit_not_found, "no such media server"}
+
+  defp render({:module_reload, name}, {:error, :not_configured}),
+    do: {@exit_not_found, "no [module.#{name}] block is configured"}
 
   # A command that already phrased its own failure (the TOML/script reasons of
   # `reload_domains`, multi-line and meant to be read) is printed as written:
@@ -563,6 +715,7 @@ defmodule Kelix.Control.CLI do
         "active calls:    #{Map.get(s.instances, :active, 0)}",
         "listeners:       #{format_listeners(Map.get(s, :listeners, []))}",
         "domains version: #{s.domains_version}",
+        "domains file:    #{format_domains_file(s)}",
         "modules:         #{Enum.join(s.modules, ", ")}",
         "media pool:      #{format_pool(s.media_pool)}"
       ] ++ module_status_lines(Map.get(s, :module_status, %{}))
@@ -657,6 +810,7 @@ defmodule Kelix.Control.CLI do
         "max calls:     #{if d.max_calls, do: d.max_calls, else: "unlimited"}",
         "active calls:  #{d.active_calls}",
         "registrations: #{d.registrations}",
+        "version:       #{Map.get(d, :version, "unknown")}",
         "registrar:     #{format_function(d.registrar)}",
         if(d.presence == [], do: "presence:      (disabled)", else: "presence:")
       ] ++
@@ -664,7 +818,8 @@ defmodule Kelix.Control.CLI do
         [if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")] ++
         format_dial_plan(d.dial_plan) ++
         [if(Map.get(d, :chat, []) == [], do: "chat:          (disabled)", else: "chat:")] ++
-        format_dial_plan(Map.get(d, :chat, []))
+        format_dial_plan(Map.get(d, :chat, [])) ++
+        format_options(Map.get(d, :options, []), Map.get(d, :options_keepalive))
 
     {0, Enum.join(lines, "\n")}
   end
@@ -761,7 +916,24 @@ defmodule Kelix.Control.CLI do
     {if(Kelix.Control.reload_ok?(report), do: 0, else: 1), Enum.join(lines, "\n")}
   end
 
-  defp render(:ok, :ok), do: {0, "ok"}
+  defp render(tag, :ok) when tag == :ok or tag == :mediaserver_toggle, do: {0, "ok"}
+  defp render({tag, _}, :ok) when tag in [:stop, :module_reload], do: {0, "ok"}
+
+  defp render({:domain_edit, :created}, {:ok, %{name: name, version: v}}),
+    do: {0, "domain #{name} created (v#{v})"}
+
+  defp render({:domain_edit, :added}, {:ok, %{at: at, version: v}}),
+    do: {0, "rule #{at} added (v#{v})"}
+
+  defp render({:domain_edit, :ok}, {:ok, %{version: v}}), do: {0, "ok (v#{v})"}
+
+  defp render(:domain_delete, {:ok, %{name: name, version: v, stopped: n, purged: purged}}) do
+    lines =
+      ["domain #{name} deleted (v#{v}): #{n} scenario(s) asked to stop"] ++
+        for {module, result} <- Enum.sort(purged), do: "  #{module}: #{purge_line(result)}"
+
+    {0, Enum.join(lines, "\n")}
+  end
 
   defp render(:run, {:ok, %{id: id}}),
     do: {0, "instance #{id} started (kelictl monitor; kelictl stop #{id})"}
@@ -816,7 +988,7 @@ defmodule Kelix.Control.CLI do
   defp render({:trace, :ladder, full?}, {:ok, trace}),
     do: {0, Kelix.Control.Ladder.render(trace.events, trace.meta, full: full?)}
 
-  defp render(:ok, :notfound), do: {1, "not found"}
+  defp render(:ok, :notfound), do: {@exit_not_found, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
 
   # ── monitor continuous (live push display) ────────────────────────────────────
@@ -1283,8 +1455,8 @@ defmodule Kelix.Control.CLI do
 
   defp presence_rows(b) do
     subscribe =
-      for rule <- subscribe_rules(b.subscribe),
-          do: {b.event_package, "SUBSCRIBE #{rule.pattern || "(default)"}", rule}
+      for {rule, i} <- Enum.with_index(subscribe_rules(b.subscribe), 1),
+          do: {b.event_package, "SUBSCRIBE #{i}. #{rule.pattern || "(default)"}", rule}
 
     subscribe ++ [{b.event_package, "PUBLISH", b.publish}]
   end
@@ -1319,6 +1491,16 @@ defmodule Kelix.Control.CLI do
         "#{String.pad_trailing(r.script, sw)}  #{format_script_module(r)}" <>
         format_idle_timeout(Map.get(r, :idle_timeout))
     end)
+  end
+
+  # The keepalive script answers an OPTIONS to the domain itself and is no rule: it
+  # is shown apart, unnumbered, so the numbers are the ones an edit takes.
+  defp format_options([], nil), do: ["options:       (core answer)"]
+
+  defp format_options(rules, keepalive) do
+    ["options:"] ++
+      if(keepalive, do: ["  keepalive -> #{format_presence_script(keepalive)}"], else: []) ++
+      format_dial_plan(rules)
   end
 
   # A chat rule's silence before its conversation ends; a call rule has none.
@@ -1663,6 +1845,10 @@ defmodule Kelix.Control.CLI do
       domain list                     served domains + their properties
       domain show <domain>            one domain in detail (name or alias)
       domain reload-all               hot-reload domains.toml
+      domain create <domain>          create a domain, serving nothing yet
+      domain <domain> set|alias|registrar|presence|call|chat|options …
+                                      edit one element (kelictl domain help)
+      domain delete <domain>          delete a domain, ending its calls
       mediaserver list                the media-server pool + its state
       mediaserver show <name>         one media server in detail
       mediaserver enable|disable <name>  take a media server in/out of the pool
@@ -1747,8 +1933,41 @@ defmodule Kelix.Control.CLI do
       domain list                 [GET /domains]        served domains + counters
       domain show <domain>        [GET /domains/<domain>]  one domain in detail
       domain reload-all           [POST /domains/reload]   hot-reload domains.toml
+      domain delete <domain> [--version N] [--admin NAME]
+                                  [DELETE /domains/<domain>]  delete a domain
 
-    Both read the LIVE domains.toml snapshot — what the router is using right now,
+    Editing a domain, one element per command. <rule> is a dial pattern, or
+    `default` for the catch-all; <n> and <m> are rule numbers as `show` prints them.
+    Every edit takes --version N and --admin NAME too. The REST API has one route
+    per command (docs/kelixip/rest-api.md, "Editing domains").
+
+      domain create <domain> [aliases=a,b] [max_calls=N]
+      domain <domain> set max_calls=N|none
+      domain <domain> alias add|remove <host>
+      domain <domain> registrar set script=X [default_expires=N|none]
+                                [min_expires=N|none] [keepalive_period=N|none]
+      domain <domain> registrar remove
+      domain <domain> presence add <package> subscribe=X [publish=Y]
+      domain <domain> presence set <package> [subscribe=X] [publish=Y|none]
+      domain <domain> presence remove <package>
+      domain <domain> call|chat|options add <rule> script=X [at=N]
+      domain <domain> call|chat|options update <n> [pattern=P|default] [script=X]
+      domain <domain> call|chat|options move <n> to=<m>
+      domain <domain> call|chat|options remove <n>
+      domain <domain> presence <package> subscribe add|update|move|remove …
+      domain <domain> options keepalive set script=X
+      domain <domain> options keepalive remove
+
+    A chat rule also takes idle_timeout=N. `add` puts the rule just before the
+    catch-all unless at=N says where; the answer gives its number. `set` changes
+    only what it is given, and `none` removes an optional value. `presence set
+    <package> subscribe=X` replaces the SUBSCRIBE rules with the one script X.
+
+    A rule number changes when a rule is added, moved or removed before it. `show`
+    prints the version of the domains: pass it as --version N, and the edit is
+    refused if anything changed since, rather than changing the wrong rule.
+
+    `list` and `show` read the LIVE domains.toml snapshot — what the router is using right now,
     which after a rejected reload is not what is on disk (the version is in
     `kelictl status`). `show` resolves its argument against the name AND the
     aliases, case-insensitively.
@@ -1765,6 +1984,18 @@ defmodule Kelix.Control.CLI do
 
     `domain reload-all` is all-or-nothing: the file is accepted only if it parses,
     its patterns compile, and every script it names is servable. See `help reload`.
+
+    The edits and `delete` write domains.toml themselves, and take the domain's
+    name, not an alias. `create` starts from nothing: whatever a deleted domain of
+    that name left is purged. `delete` is never refused because the domain is in
+    use: its calls are asked to stop, its registrations and published states are
+    purged.
+
+    A write rewrites the file without its comments. It is refused, and nothing is
+    applied, when the file was edited by hand and not reloaded (run `domain
+    reload-all` first), when the node cannot write it, or with --version N when the
+    domains changed since version N (`kelictl status`). --admin names who asked, in
+    the node's log; kelictl passes your user name when it is not given.
 
     Full documentation: docs/kelixip/administration.md
     """
@@ -1927,8 +2158,80 @@ defmodule Kelix.Control.CLI do
       "registration remove <domain> <aor> [contact]"
   end
 
-  defp usage_domain(),
-    do: "usage: kelictl domain list | domain show <domain> | domain reload-all"
+  defp usage_domain() do
+    "usage: kelictl domain list | domain show <domain> | domain reload-all\n" <>
+      "       kelictl domain create <domain> [aliases=a,b] [max_calls=N]\n" <>
+      "       kelictl domain <domain> set|alias|registrar|presence|call|chat|options …\n" <>
+      "       kelictl domain delete <domain>\n" <>
+      "       (kelictl domain help for every form)"
+  end
+
+  defp domain_write_error(:not_found),
+    do: {@exit_not_found, "no such domain, or no such alias, block, package or rule in it"}
+
+  defp domain_write_error(:exists), do: {@exit_conflict, "it already exists"}
+
+  defp domain_write_error(:conflict),
+    do:
+      {@exit_conflict,
+       "the domains changed since the version given with --version, or while the " <>
+         "command ran: read them again (kelictl domain show) and run the command again. " <>
+         "Nothing was applied."}
+
+  defp domain_write_error(:file_changed),
+    do:
+      {@exit_conflict,
+       "domains.toml was edited by hand and not reloaded, and a write would erase that " <>
+         "edit: run `kelictl domain reload-all` first. Nothing was applied."}
+
+  defp domain_write_error({:read_only, %{path: path, reason: reason, user: user}}),
+    do:
+      {@exit_unavailable,
+       "the node cannot write #{path} (#{file_reason(reason)}, running as #{user}): give " <>
+         "the file and its directory to #{user}, or point KELIXIP_DOMAINS to " <>
+         "/var/lib/kelixip/domains.toml. Nothing was applied."}
+
+  defp domain_write_error({:write_failed, %{path: path, reason: reason}}),
+    do: {1, "writing #{path} failed (#{file_reason(reason)}). Nothing was applied."}
+
+  defp domain_write_error({:invalid, message}), do: {1, "invalid domain: #{message}"}
+  defp domain_write_error({:scripts, message}), do: {1, message}
+
+  defp domain_write_error(:no_domains_path),
+    do: {1, "this node reads no domains.toml (KELIXIP_DOMAINS is not set)"}
+
+  defp domain_write_error(other), do: {1, "error: #{inspect(other)}"}
+
+  defp file_reason(reason) when is_atom(reason), do: "#{:file.format_error(reason)}, #{reason}"
+  defp file_reason(reason), do: inspect(reason)
+
+  defp purge_line({:ok, n}), do: "#{n} purged"
+  defp purge_line(:not_loaded), do: "not loaded, nothing held"
+
+  defp purge_line({:error, reason}),
+    do: "purge FAILED (#{inspect(reason)}) — purged again when the name is created"
+
+  defp purge_line(other), do: inspect(other)
+
+  defp format_domains_file(%{domains_path: nil}), do: "none"
+
+  defp format_domains_file(%{domains_path: path} = s),
+    do: "#{path}, " <> writable_text(s) <> changed_text(Map.get(s, :domains_file_changed))
+
+  defp format_domains_file(_status), do: "unknown"
+
+  defp writable_text(%{domains_writable: true}), do: "writable"
+
+  defp writable_text(%{domains_write_error: %{reason: r, user: u}}),
+    do: "NOT writable (#{r}, node runs as #{u}): domain edits will fail"
+
+  defp writable_text(_status), do: "unknown"
+
+  defp changed_text(true),
+    do:
+      "; EDITED BY HAND and not reloaded: domain edits are refused until `kelictl domain reload-all`"
+
+  defp changed_text(_), do: ""
 
   defp usage_mediaserver() do
     "usage: kelictl mediaserver list | mediaserver show <name> | " <>

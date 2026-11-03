@@ -58,6 +58,27 @@ defmodule Kelix.Metrics.Emit do
     :telemetry.execute([:kelix, :mcu, :call], %{count: 1}, %{result: to_string(result)})
   end
 
+  @doc """
+  One correction token for a captioned call, by `result`: `:obtained`, or why
+  not — `:forbidden` and `:busy` (refused here, no request made, `duration`
+  `nil`), `:down`, `:timeout`, `:invalid_response`, `:speech_<status>`. A request
+  that reached the speech-server also reports its duration, in native units.
+  """
+  @spec captioning_token(atom, integer | nil) :: :ok
+  def captioning_token(result, duration_native) do
+    :telemetry.execute([:kelix, :captioning, :token], %{count: 1}, %{result: to_string(result)})
+
+    if duration_native,
+      do:
+        :telemetry.execute(
+          [:kelix, :captioning, :token_request],
+          %{duration: duration_native},
+          %{}
+        )
+
+    :ok
+  end
+
   @doc "One MCU control RPC: its wall-clock duration in native units."
   @spec mcu_rpc(String.t(), integer) :: :ok
   def mcu_rpc(method, duration_native) do

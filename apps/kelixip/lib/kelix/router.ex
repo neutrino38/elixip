@@ -242,7 +242,8 @@ defmodule Kelix.Router do
           function: function,
           script: script,
           max_calls: domain.max_calls,
-          conversation: conversation
+          conversation: conversation,
+          version: domains.version
         }
 
         emit_accept(

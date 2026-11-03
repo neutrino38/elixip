@@ -25,6 +25,7 @@ loads exactly the modules it needs.
 | `silo` | `Kelix.Mod.Silo` | Store-and-forward of instant messages, in SQL | `kelixip-mod-silo` | [silo.md](silo.md) |
 | `conversation` | `Kelix.Mod.Conversation` | Hibernated chat conversations, in SQL | `kelixip-mod-conversation` | [conversation.md](conversation.md) |
 | `sip_servers` | `Kelix.Mod.SipServers` | Remote SIP servers of a domain: application servers, proxies, trunks; liveness, trunk registration | `kelixip-mod-sip_servers` / `kelixip-mod-sip-servers` | [sip_servers.md](sip_servers.md) |
+| `captioning` | `Kelix.Mod.Captioning` | Correction of a captioned call: answers the client's captioning INFO, mints the speech-server token | `kelixip-mod-captioning` | [captioning.md](captioning.md) |
 
 The module name is the one to use in a `[module.<name>]` block and in a script's
 `uses_modules`; the Elixir module is what a script imports the facades from.

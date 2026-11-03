@@ -22,7 +22,7 @@ default = fn fhs -> if config_env() == :prod, do: fhs, else: nil end
 
 config :kelixip,
   config_path: System.get_env("KELIXIP_CONFIG", default.("/etc/kelixip/config.toml")),
-  domains_path: System.get_env("KELIXIP_DOMAINS", default.("/etc/kelixip/domains.toml"))
+  domains_path: System.get_env("KELIXIP_DOMAINS", default.("/var/lib/kelixip/domains.toml"))
 
 # The release's log sinks are the ones `[log] target` names: stdout, which systemd
 # captures, plus syslog on demand. The umbrella config also adds a file backend for

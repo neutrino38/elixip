@@ -109,6 +109,50 @@ the request was forwarded, and puts **our** Contact in a `2xx`/`3xx` to an INVIT
 after a CANCEL is automatic; `100 Trying` is not.
 
 ```elixir
+b2bua_reply_on(leg, req, code, reason \\ nil, upd_fields \\ [])   # answer on :caller or :callee
+```
+
+`b2bua_reply_on/3..5` names the leg instead. It is the answer to a request a
+block handed back — `bridge/1`'s `{:bridge, :request, %{leg: leg, req: req}}`,
+below — since the event matched then is the block's return, which came from no
+leg. A body goes in `upd_fields` as a part list:
+`body: [%{contenttype: "application/captioning+xml", data: xml}]`.
+
+#### Answering an in-dialog request instead of relaying it
+
+`bridge/1` relays every in-dialog request. A script that must answer some of
+them itself names them in `:intercept`, as `{leg, method, content_type}`:
+
+```elixir
+state connected do
+  bridge(args: %{media: @media, intercept: [{:caller, :INFO, "application/captioning+xml"}]})
+
+  on_events do
+    {:bridge, :request, %{leg: leg, req: req}} ->
+      b2bua_reply_on(leg, req, 200, "OK", body: [%{contenttype: @ct, data: answer}])
+      goto(connected_again, "INFO answered")
+    # …
+  end
+end
+
+state connected_again do
+  bridge(resume: true)
+  # the same arms
+end
+```
+
+- `leg` is `:caller` or `:callee`; `content_type` is compared without its
+  parameters and without case, or is `:any`.
+- Only the methods the default relay carries can be intercepted — INFO,
+  MESSAGE, NOTIFY, REFER… INVITE, UPDATE, ACK and BYE have rules of their own in
+  the block and are never handed back.
+- A request matching nothing crosses as before; a script without `:intercept`
+  sees no change.
+- Between the return and `bridge(resume: true)` nothing relays, as after an
+  interruption: the script's work there is the scale of a lookup, not of a
+  decision.
+
+```elixir
 b2bua_send_BYE()   # hang the outbound leg up on our own initiative
 ```
 

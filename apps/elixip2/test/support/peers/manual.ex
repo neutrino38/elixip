@@ -99,6 +99,19 @@ defmodule SIP.Test.Peers.Manual do
     Mockup.tell_peer(t_pid, {:refresh_session, headers})
   end
 
+  @doc """
+  Send any other in-dialog request — an INFO, a MESSAGE — delivered inbound like
+  `hangup/1` and built the same way. `fields` are merged into it: a `body:` part
+  list and its `contenttype:`, typically.
+
+  What it is for: a request arriving on the CALLEE's leg, which a B2BUA must tell
+  apart from the same request arriving on the caller's.
+  """
+  @spec send_request(pid(), atom(), keyword() | map()) :: :ok
+  def send_request(t_pid, method, fields \\ []) when is_atom(method) do
+    Mockup.tell_peer(t_pid, {:send_request, method, Map.new(fields)})
+  end
+
   # ── Peer callbacks ──────────────────────────────────────────────────────────
 
   @impl true
@@ -198,6 +211,16 @@ defmodule SIP.Test.Peers.Manual do
   def on_command(:hangup, state), do: send_in_dialog(state, :BYE, "hang up")
 
   def on_command({:retag, totag}, state), do: {[], %{state | totag: totag}}
+
+  def on_command({:send_request, method, fields}, state) do
+    case send_in_dialog(state, method, "send #{method}") do
+      {[{:inject, req, after_ms}], state} ->
+        {[{:inject, Map.merge(req, fields), after_ms}], state}
+
+      other ->
+        other
+    end
+  end
 
   def on_command({:refresh_session, headers}, state) do
     case send_in_dialog(state, :UPDATE, "refresh the session") do

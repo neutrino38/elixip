@@ -337,4 +337,196 @@ defmodule Kelix.CallCaptioningScriptTest do
     assert_receive {:instance_done, :ok}, 10_000
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
+
+  # ── The captioning INFO (phase 2) ──────────────────────────────────────────
+
+  alias Kelix.Mod.Captioning
+  alias Kelix.Test.SpeechServerStub, as: Stub
+
+  @ct "application/captioning+xml"
+
+  defp with_captioning(stub, extra \\ %{}) do
+    config =
+      Map.merge(
+        %{
+          "control_url" => stub.url,
+          "public_url" => "wss://speech.example.net:9201",
+          "domain" => [%{"name" => @realm, "correction" => true, "lang" => "fr"}]
+        },
+        extra
+      )
+
+    {:ok, cfg} = Captioning.parse_config(config)
+    start_supervised!(%{id: Captioning, start: {Captioning, :start_link, [[cfg: cfg]]}})
+    :ok = Kelix.ModuleRegistry.register("captioning", Captioning, config)
+    on_exit(fn -> Kelix.ModuleRegistry.unregister("captioning") end)
+    :ok
+  end
+
+  # An established captioned call; returns what an in-dialog request needs.
+  defp connected_call(module, callid) do
+    :ok = create_trunk()
+    tp = trunk_mockup()
+    {:ok, dialog} = MockDialog.start_link(self())
+
+    {instance, ref, req} = authenticated_call(module, dialog, callid, @audio_text)
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 5_000
+    Manual.simulate(tp, 200, 50)
+    assert_receive {:replied, 200, _reason, _f, %{method: :INVITE}}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, req), self(), dialog})
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
+
+    %{instance: instance, ref: ref, req: req, dialog: dialog, tp: tp}
+  end
+
+  defp send_info(call, cseq, contenttype, data) do
+    info =
+      %{
+        in_dialog(:INFO, call.req)
+        | cseq: [cseq, :INFO],
+          body: [%{contenttype: contenttype, data: data}],
+          contentlength: byte_size(data)
+      }
+      |> Map.put(:contenttype, contenttype)
+
+    send(call.instance, {:INFO, info, self(), call.dialog})
+  end
+
+  defp send_captioning(call, cseq, comp),
+    do:
+      send_info(
+        call,
+        cseq,
+        @ct,
+        ~s(<captioning><inbound><stt comp="#{comp}"/></inbound></captioning>)
+      )
+
+  defp hang_up(call, cseq) do
+    send(
+      call.instance,
+      {:BYE, %{in_dialog(:BYE, call.req) | cseq: [cseq, :BYE]}, self(), call.dialog}
+    )
+
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+    assert_receive {:instance_done, :ok}, 10_000
+    ref = call.ref
+    assert_receive {:DOWN, ^ref, :process, _, _}, 5_000
+  end
+
+  defp answered_body(fields) do
+    [%{contenttype: @ct, data: xml}] = Keyword.fetch!(fields, :body)
+    xml
+  end
+
+  test "comp=true: 200 with the correction URL, and the trunk never sees the INFO",
+       %{scenario: module} do
+    stub = Stub.start()
+    with_captioning(stub)
+    call = connected_call(module, "cc-info-comp")
+
+    send_captioning(call, 3, true)
+
+    assert_receive {:replied, 200, "OK", fields, %{method: :INFO}}, 5_000
+
+    assert answered_body(fields) =~
+             ~r{comp="true" uri="wss://speech.example.net:9201/streaming/comp/[A-Za-z0-9_-]+\?lang=fr"}
+
+    assert_received {:speech_token_request, %{"account" => @realm}}
+    refute_received {:sip_mockup, {:request_sent, :INFO, _}}
+
+    # The call is still up and still relayed.
+    hang_up(call, 4)
+  end
+
+  test "comp=false: 200 without uri, no token asked", %{scenario: module} do
+    stub = Stub.start()
+    with_captioning(stub)
+    call = connected_call(module, "cc-info-nocomp")
+
+    send_captioning(call, 3, false)
+    assert_receive {:replied, 200, "OK", fields, %{method: :INFO}}, 5_000
+    assert answered_body(fields) =~ ~s(comp="false")
+    refute answered_body(fields) =~ "uri="
+    refute_received {:speech_token_request, _}
+
+    hang_up(call, 4)
+  end
+
+  test "a domain without the correction gets 403, the call goes on", %{scenario: module} do
+    stub = Stub.start()
+    with_captioning(stub, %{"domain" => [%{"name" => @realm, "correction" => false}]})
+    call = connected_call(module, "cc-info-403")
+
+    send_captioning(call, 3, true)
+    assert_receive {:replied, 403, "Forbidden", _fields, %{method: :INFO}}, 5_000
+
+    hang_up(call, 4)
+  end
+
+  test "a body that is not a captioning document gets 400", %{scenario: module} do
+    stub = Stub.start()
+    with_captioning(stub)
+    call = connected_call(module, "cc-info-400")
+
+    send_info(call, 3, @ct, "<captioning><inbound>")
+    assert_receive {:replied, 400, "Bad Request", _fields, %{method: :INFO}}, 5_000
+
+    hang_up(call, 4)
+  end
+
+  test "renewals up to the bound, then 503 with Retry-After", %{scenario: module} do
+    stub = Stub.start()
+    with_captioning(stub, %{"max_per_call" => 2, "min_interval" => 0, "retry_after" => 40})
+    call = connected_call(module, "cc-info-renew")
+
+    for cseq <- 3..5 do
+      send_captioning(call, cseq, true)
+      assert_receive {:replied, 200, "OK", _fields, %{method: :INFO}}, 5_000
+    end
+
+    send_captioning(call, 6, true)
+    assert_receive {:replied, 503, _reason, fields, %{method: :INFO}}, 5_000
+    assert {"Retry-After", "40"} in fields
+
+    hang_up(call, 7)
+  end
+
+  test "the speech-server gone mid-call: 503, the call and its relay intact",
+       %{scenario: module} do
+    stub = Stub.start()
+    with_captioning(stub, %{"min_interval" => 0})
+    call = connected_call(module, "cc-info-down")
+
+    send_captioning(call, 3, true)
+    assert_receive {:replied, 200, "OK", _fields, %{method: :INFO}}, 5_000
+
+    Stub.answer(stub, {500, %{"error" => "internal"}})
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      send_captioning(call, 4, true)
+      assert_receive {:replied, 503, _reason, fields, %{method: :INFO}}, 5_000
+      assert {"Retry-After", "30"} in fields
+    end)
+
+    refute_received {:sip_mockup, {:request_sent, :BYE, _}}
+    assert Process.alive?(call.instance)
+
+    # Other in-dialog traffic still crosses: the DTMF goes to the trunk.
+    send_info(call, 5, "application/dtmf-relay", "Signal=5\r\nDuration=160\r\n")
+    assert_receive {:sip_mockup, {:request_sent, :INFO, dtmf}}, 5_000
+    assert SIP.Msg.Ops.body_content_type(dtmf) == "application/dtmf-relay"
+
+    hang_up(call, 6)
+  end
+
+  test "without the captioning module, the captions alone", %{scenario: module} do
+    call = connected_call(module, "cc-info-nomod")
+
+    send_captioning(call, 3, true)
+    assert_receive {:replied, 200, "OK", fields, %{method: :INFO}}, 5_000
+    assert answered_body(fields) =~ ~s(comp="false")
+    refute_received {:sip_mockup, {:request_sent, :INFO, _}}
+
+    hang_up(call, 4)
+  end
 end
