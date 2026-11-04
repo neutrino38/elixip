@@ -9,7 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.9.0
+Version:        1.9.1
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
@@ -46,6 +46,11 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Wed Nov 04 2026 Emmanuel BUU <latribuu@proton.me> - 1.9.1-1
+- Released together with kelixip 1.9.1-1.
+- Digest: the RFC 8760 spelling SHA-256 is accepted, and challenges advertise it.
+- User-Agent is now Elixipp-1.9.1.
+
 * Mon Oct 26 2026 Emmanuel BUU <latribuu@proton.me> - 1.9.0-1
 - Released together with kelixip 1.9.0-1.
 - bridge/1 intercept: and b2bua_reply_on/5; SIPMsg.register_redactor/2.

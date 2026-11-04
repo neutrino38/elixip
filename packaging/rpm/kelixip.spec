@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.9.0
+Version:        1.9.1
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        4%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -435,6 +435,18 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Captioning*.beam
 
 %changelog
+* Wed Nov 04 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.1-1
+- captioning: the correction is offered to every call of the script once the
+  module is loaded. The [[module.captioning.domain]] tables are gone, and a
+  config.toml that still has one is refused. The script passes the account
+  billed and the language of the correction to answer/2, both empty by default.
+- captioning: an optional backup speech-server, backup_control_url and
+  backup_public_url, asked when the main one does not answer.
+- call-captioning.exs authenticates on the domain the call is served on;
+  @realm imposes another one.
+- Digest: the RFC 8760 spelling SHA-256 is accepted, and challenges advertise it.
+- User-Agent is now Kelixip/1.9.1.
+
 * Sun Nov 01 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-4
 - bandit 1.14.1, the HTTP server of the REST control API and of the metrics
   endpoint. 1.13.1 carried ten high and two medium advisories (HTTP/1.1

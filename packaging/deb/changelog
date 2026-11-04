@@ -1,3 +1,20 @@
+kelixip (1.9.1-1) stable; urgency=medium
+
+  * captioning: the correction is offered to every call of the script once
+    the module is loaded. The [[module.captioning.domain]] tables are gone,
+    and a config.toml that still has one is refused. The script passes the
+    account billed and the language of the correction to answer/2, both
+    empty by default.
+  * captioning: an optional backup speech-server, backup_control_url and
+    backup_public_url, asked when the main one does not answer.
+  * call-captioning.exs authenticates on the domain the call is served on;
+    @realm imposes another one.
+  * Digest: the RFC 8760 spelling SHA-256 is accepted, and challenges
+    advertise it.
+  * User-Agent is now Kelixip/1.9.1.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Wed, 04 Nov 2026 12:00:00 +0000
+
 kelixip (1.9.0-4) stable; urgency=high
 
   * bandit 1.14.1, the HTTP server of the REST control API and of the
