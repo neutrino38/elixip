@@ -1409,6 +1409,85 @@ defmodule SIP.Msg.Ops do
   def target_aor(msg) when is_map(msg), do: uri_userpart(Map.get(msg, :ruri))
 
   @doc """
+  Every user name a request gives for its **caller**: the user part of From,
+  then the user part of each P-Asserted-Identity value (RFC 3325 §9.1: a `sip:`
+  and a `tel:`, on one line or on two). Deduplicated, in that order; `[]` when
+  none yields a name.
+
+  The question "does this call come from user X", answered by any of the names
+  the request carries for its sender — what a debug trigger's `caller` filter
+  matches against. Unlike `asserted_username/1`, nothing is ranked and the
+  digest username is not one of them: it names the account authenticating, not
+  the party calling.
+  """
+  @spec caller_users(map()) :: [String.t()]
+  def caller_users(msg) when is_map(msg) do
+    [uri_userpart(Map.get(msg, :from)) | header_userparts(msg, "p-asserted-identity")]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  @doc """
+  Every user name a request gives for its **callee**: the user part of To, then
+  the user part of the Request-URI. Deduplicated, in that order; `[]` when
+  neither yields a name.
+
+  The two differ as soon as anything retargets the request — a forward, a
+  registrar lookup, a dial-plan rewrite upstream — and "the call to X" may mean
+  either: a debug trigger's `callee` filter matches against both.
+  """
+  @spec callee_users(map()) :: [String.t()]
+  def callee_users(msg) when is_map(msg) do
+    [uri_userpart(Map.get(msg, :to)), uri_userpart(Map.get(msg, :ruri))]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  # Every user part a header gives, across its occurrences and the values each
+  # occurrence holds — `header_userpart/2` stops at the first one.
+  defp header_userparts(msg, lowercase_name) do
+    msg
+    |> header_values(lowercase_name)
+    |> Enum.flat_map(&value_userparts/1)
+  end
+
+  defp value_userparts(value) when is_binary(value) do
+    value |> split_header_values() |> Enum.map(&uri_userpart/1) |> Enum.reject(&is_nil/1)
+  end
+
+  defp value_userparts(other), do: other |> uri_userpart() |> List.wrap()
+
+  # Split one header line into its comma-separated values. A comma inside a
+  # quoted display name (`"Dupont, Jean" <sip:j@x>`) or inside angle brackets is
+  # part of the value, not a separator.
+  defp split_header_values(text), do: split_header_values(text, "", [], false, 0)
+
+  defp split_header_values("", cur, acc, _quoted, _depth),
+    do: Enum.reverse([cur | acc]) |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+  defp split_header_values("\\" <> <<c::utf8, rest::binary>>, cur, acc, true, depth),
+    do: split_header_values(rest, cur <> "\\" <> <<c::utf8>>, acc, true, depth)
+
+  defp split_header_values("\"" <> rest, cur, acc, quoted, depth),
+    do: split_header_values(rest, cur <> "\"", acc, not quoted, depth)
+
+  defp split_header_values("<" <> rest, cur, acc, false, depth),
+    do: split_header_values(rest, cur <> "<", acc, false, depth + 1)
+
+  defp split_header_values(">" <> rest, cur, acc, false, depth) when depth > 0,
+    do: split_header_values(rest, cur <> ">", acc, false, depth - 1)
+
+  defp split_header_values("," <> rest, cur, acc, false, 0),
+    do: split_header_values(rest, "", [cur | acc], false, 0)
+
+  defp split_header_values(<<c::utf8, rest::binary>>, cur, acc, quoted, depth),
+    do: split_header_values(rest, cur <> <<c::utf8>>, acc, quoted, depth)
+
+  # Not UTF-8: no value worth splitting, keep what was read.
+  defp split_header_values(<<_byte, rest::binary>>, cur, acc, quoted, depth),
+    do: split_header_values(rest, cur, acc, quoted, depth)
+
+  @doc """
   The user and the host of an address header, as `{user, domain}` — `{nil, nil}`
   when the header is absent or unparsable.
 
@@ -1472,6 +1551,19 @@ defmodule SIP.Msg.Ops do
 
       _ ->
         nil
+    end
+  end
+
+  @doc """
+  The address a request came from — the IP of `source_flow/1` — or `nil` for a
+  request that did not come off the network. What a debug trigger's `source`
+  filter matches against.
+  """
+  @spec source_ip(map()) :: :inet.ip_address() | nil
+  def source_ip(msg) when is_map(msg) do
+    case source_flow(msg) do
+      {_transport, ip, _port} -> ip
+      nil -> nil
     end
   end
 
