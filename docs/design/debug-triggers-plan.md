@@ -1,6 +1,6 @@
 # debug-triggers-plan.md — journals started by a rule
 
-**Status: plan, 2026-11-06. T1 to T4 implemented 2026-11-06. Decisions 1 to 6 taken
+**Status: plan, 2026-11-06. T1 to T5 implemented 2026-11-06. Decisions 1 to 6 taken
 2026-11-06 (§3).**
 
 ## 1. Scope
@@ -222,12 +222,14 @@ Its specification goes in `kelescope/docs/conception/declencheurs-debug/SPEC.md`
 (French, like the other kelescope specs), on the model of
 `journal-scenario/SPEC.md` and `domaines-editables/SPEC.md`.
 
-**Link.** `Kelescope.Kelixip.DebugTriggersLink` in `kelescope_monitor`, modelled
-on `TracesLink`: it subscribes once per node with
-`Kelix.Control.subscribe_debug_triggers/1`, keeps the snapshot and rebroadcasts
-the pushes on a PubSub topic, which both the monitor and the Domaines screen
-subscribe to. A node without the contract (kelixip before the release that ships
-T4) gets no trigger UI at all, as `traces_mode` does for journals.
+**Link.** `Kelescope.Kelixip.DebugTriggersLink` in `kelescope_core`, modelled
+on `TracesLink`. In the core, not in a part: the Domaines screen and the monitor
+both use it, and no kelescope part depends on another (kelescope ADR-002). It
+subscribes once per node with `Kelix.Control.subscribe_debug_triggers/1`, keeps
+the snapshot and rebroadcasts the pushes on a PubSub topic, which both the
+monitor and the Domaines screen subscribe to. A node without the contract
+(kelixip before the release that ships T4) gets no trigger UI at all, as
+`traces_mode` does for journals.
 
 **Rights.** Reading a rule follows the domain: whoever sees the domain sees its
 rules. Setting or removing one needs `Scope.can?(scope, :debug, domain)` — the
