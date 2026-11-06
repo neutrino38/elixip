@@ -1,7 +1,10 @@
 # Release 1.9.1
 
-2026-11-04 — since 1.9.0 (2026-11-01). Theme: the correction of a captioned call
-without per-domain configuration, and a backup speech-server.
+2026-11-06 — since 1.9.0 (2026-11-01). Themes: the correction of a captioned
+call without per-domain configuration, with a backup speech-server; debug
+triggers, which journal the next runs of a script.
+
+Package 1.9.1-1 was built but not delivered. The release is package 1.9.1-2.
 
 ## Captioned calls: the correction
 
@@ -76,11 +79,64 @@ The reference script challenges the caller on the domain the call is served on.
 
 It passes no `account` and no `lang`.
 
+## Debug triggers: journal the next runs of a script
+
+`kelictl debug <id> on` journals a call already in progress. The call to trace
+has often not started yet. A debug trigger journals the next runs of one script
+on one domain, from their first state, the request that started each run
+included. Documentation:
+[administration](../kelixip/administration.md#journaling-the-next-runs-of-a-script)
+and [REST API](../kelixip/rest-api.md#debug-triggers).
+
+```console
+$ kelictl debug trigger set example.com relay.exs count=5 for=2h caller=1001
+$ kelictl debug trigger list
+domain       script     runs left  time left  filter       set by
+example.com  relay.exs  4/5        1h 42m     caller=1001  alice
+$ kelictl debug list
+id  scenario  domain       script     origin  written (UTC)        instance  SIP  size    kept for
+31  Relay.V3  example.com  relay.exs  rule    2026-11-06 14:20:03  ended     11   9120 B  0h59m51s
+```
+
+- **One rule per script and domain**: N runs, within a window of minutes,
+  hours, days or months (a month is 30 days, 12 at most). N is at most
+  `[debug] max_traces`.
+- **At most one filter**: `caller` (user part of `From` or
+  `P-Asserted-Identity`), `callee` (user part of `To` or of the Request-URI),
+  `source` (an address or a prefix). User parts are compared without case.
+- **A run counts when the node starts it.** A request refused with `404`, `500`
+  or `503`, or one the filter does not match, consumes nothing.
+- **A rule ends** after its last run, at the end of its window, or when its
+  domain stops serving the script.
+- **The journals** are kept, listed and drawn like the others. `kelictl debug
+  list` gains an `origin` column, `rule` or `operator`; `GET /traces` an
+  `origin` field.
+- **The rules survive a restart**, in `/var/lib/kelixip/debug_triggers.json`.
+- **REST**: `GET /debug/triggers[?domain=]`, and `GET`, `PUT`, `DELETE` on
+  `/debug/triggers/<domain>/<script>`.
+- **kelescope** shows each rule on its script in Domaines › Scénarios, edits it
+  there, counts a domain's rules on its overview, and lists every rule of the
+  node in a monitor panel.
+
+Every change is logged with who asked, and so is every run a rule journals. A
+journal holds whole SIP messages: a rule without filter on a busy script
+journals the calls of anyone, up to its count.
+
 ## Digest: the SHA-256 spelling of RFC 8760
 
 A challenge naming `algorithm=SHA-256`, the spelling RFC 8760 defines, is
 answered. It used to raise: only `SHA256` was known. Both spellings are read, in
 any case. The challenges kelixip sends name `SHA-256`.
+
+## Framework
+
+`SIP.Msg.Ops` reads the parties of a request for the triggers, and for any
+caller that needs the same answer:
+
+- `caller_users/1`: the user part of `From`, then of each `P-Asserted-Identity`
+  value, on one line or on two;
+- `callee_users/1`: the user part of `To`, then of the Request-URI;
+- `source_ip/1`: the address the request came from.
 
 ## Upgrading
 
@@ -93,4 +149,8 @@ any case. The challenges kelixip sends name `SHA-256`.
    still works, with its `@realm` as the `account` and as the realm.
 4. `systemctl restart kelixip`.
 
-elixipp 1.9.1-1 carries the SHA-256 spelling. Nothing else changes for it.
+elixipp 1.9.1-1 carries the SHA-256 spelling. Nothing else changes for it: its
+package stays 1.9.1-1.
+
+kelescope shows the debug triggers from kelixip 1.9.1-2. Against an older node it
+offers none.

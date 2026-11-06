@@ -32,7 +32,7 @@ Version:        1.9.1
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -435,6 +435,14 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Captioning*.beam
 
 %changelog
+* Fri Nov 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.1-2
+- Debug triggers: journal the next N runs of a script on a domain, within a
+  window, optionally filtered on the caller, the callee or the source address
+  (kelictl debug trigger, REST /debug/triggers). The rules are kept in
+  /var/lib/kelixip/debug_triggers.json.
+- kelictl debug list and GET /traces show the origin of each journal, rule or
+  operator.
+
 * Wed Nov 04 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.1-1
 - captioning: the correction is offered to every call of the script once the
   module is loaded. The [[module.captioning.domain]] tables are gone, and a

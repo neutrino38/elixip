@@ -1,6 +1,6 @@
 # debug-triggers-plan.md — journals started by a rule
 
-**Status: plan, 2026-11-06. T1 to T5 implemented 2026-11-06. Decisions 1 to 6 taken
+**Status: implemented 2026-11-06 (T1 to T6), in package 1.9.1-2. Decisions 1 to 6 taken
 2026-11-06 (§3).**
 
 ## 1. Scope

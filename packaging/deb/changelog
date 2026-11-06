@@ -1,3 +1,14 @@
+kelixip (1.9.1-2) stable; urgency=medium
+
+  * Debug triggers: journal the next N runs of a script on a domain, within
+    a window, optionally filtered on the caller, the callee or the source
+    address (kelictl debug trigger, REST /debug/triggers). The rules are kept
+    in /var/lib/kelixip/debug_triggers.json.
+  * kelictl debug list and GET /traces show the origin of each journal, rule
+    or operator.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Fri, 06 Nov 2026 12:00:00 +0000
+
 kelixip (1.9.1-1) stable; urgency=medium
 
   * captioning: the correction is offered to every call of the script once

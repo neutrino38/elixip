@@ -62,6 +62,8 @@ do about it — the release's own script would only say `cat: Permission denied`
 | `kelictl debug <id> on\|off` | W | Start the journal of a live scenario now, or write it now — [below](#the-journal-of-a-live-scenario) |
 | `kelictl debug list` | R | The journals kept in memory |
 | `kelictl debug show <id> [--full] [--format-puml]` | R | One journal, as a sngrep-like ladder (default) or PlantUML |
+| `kelictl debug trigger list [<domain>]` / `show <domain> <script>` | R | The debug triggers, with the runs and the time each has left — [below](#journaling-the-next-runs-of-a-script) |
+| `kelictl debug trigger set <domain> <script> …` / `remove <domain> <script>` | W | Journal the next runs of a script, or stop — *idem* |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
 | `kelictl module list` | R | Loaded modules: version, implementation, how many commands and facades each contributes |
 | `kelictl module reload <name>` | W | Reload a module's config |
@@ -108,8 +110,9 @@ $ kelictl registration show acme.tld <TAB>  the AORs registered in acme.tld
 $ kelictl mcu <TAB>                         the commands the mcu module declares
 $ kelictl mcu conference.create <TAB>       domain=  name=  layout=  …
 $ kelictl stop <TAB>                        the ids of the scenarios in progress
-$ kelictl debug <TAB>                       the same ids, and list / show / help
+$ kelictl debug <TAB>                       the same ids, and list / show / trigger / help
 $ kelictl debug show <TAB>                  the ids that have a diagram kept
+$ kelictl debug trigger set acme.tld <TAB>  the scripts acme.tld serves
 ```
 
 The script holds **no** command name: it calls `kelictl complete <words…>`, which
@@ -324,8 +327,8 @@ $ kelictl debug 12 off
 journal of scenario 12 written — `kelictl debug show 12`
 
 $ kelictl debug list
-id  scenario  domain       script     written (UTC)        instance  SIP  size     kept for
-12  Relay.V3  example.com  relay.exs  2026-09-28 14:02:11  running   9    14230 B  0h59m48s
+id  scenario  domain       script     origin    written (UTC)        instance  SIP  size     kept for
+12  Relay.V3  example.com  relay.exs  operator  2026-09-28 14:02:11  running   9    14230 B  0h59m48s
 
 $ kelictl debug show 12
 Scenario : Relay.V3   (#PID<0.412.0>)
@@ -373,6 +376,73 @@ apply, all set in [installation.md](installation.md):
 Only messages that go through a transaction of the scenario's dialogs are
 recorded. A stateless reply of the dialog layer, or an OPTIONS outside any
 dialog, is not.
+
+### Journaling the next runs of a script
+
+The call to trace often has not started yet. A **debug trigger** journals the
+next runs of one script on one domain, from their first state:
+
+```console
+$ kelictl debug trigger set example.com relay.exs count=5 for=2h caller=1001 --admin alice
+debug trigger set
+domain:     example.com
+script:     relay.exs
+runs left:  5/5
+time left:  2h 0m (until 2026-11-06 16:02:11 UTC)
+filter:     caller=1001
+set by:     alice at 2026-11-06 14:02:11 UTC
+
+$ kelictl debug trigger list
+domain       script     runs left  time left  filter       set by
+example.com  relay.exs  4/5        1h 42m     caller=1001  alice
+
+$ kelictl debug list
+id  scenario  domain       script     origin  written (UTC)        instance  SIP  size    kept for
+31  Relay.V3  example.com  relay.exs  rule    2026-11-06 14:20:03  ended     11   9120 B  0h59m51s
+
+$ kelictl debug trigger remove example.com relay.exs
+debug trigger removed
+```
+
+- **One rule per script and domain.** `<domain>` is the canonical name, and the
+  domain must serve `<script>`. `set` on a pair that has a rule replaces it.
+- **`count=N`**: the runs to journal, from 1 to `[debug] max_traces`. More
+  journals than the node keeps would push the first ones out before anybody
+  reads them.
+- **`for=<n>m|h|d|mo`**: the window, from now. A month is 30 days, 12 months at
+  most.
+- **At most one filter**, compared without case:
+  - `caller=<user>`: the user part of `From` or of `P-Asserted-Identity`;
+  - `callee=<user>`: the user part of `To` or of the Request-URI;
+  - `source=<ip>[/len]`: the address the request came from, IPv4 or IPv6.
+
+  A user part is matched as written: `+33612345678` and `0612345678` are two
+  users. A run no request started (`kelictl run`) matches only a rule without
+  filter.
+- **A run counts** when the node starts it. A request refused with `404`,
+  `500` or `503` consumes nothing, and neither does a request the filter does
+  not match.
+- **A rule ends** after its last run or when its window closes, whichever comes
+  first. It also ends when its domain stops serving its script: domain deleted,
+  rule removed, `reload-all`. Reloading the script keeps it.
+- **The journals** are the journals of the previous section: same store, same
+  limits, `kelictl debug show <id>`. `debug list` shows their origin, `rule` or
+  `operator`.
+- **The rules survive a restart.** They are kept in
+  `/var/lib/kelixip/debug_triggers.json`, next to `domains.toml`. A rule that
+  expired while the node was down is dropped at boot. A file the node cannot
+  read is renamed `debug_triggers.json.corrupt`, and the node starts without
+  rules. When the file cannot be written, `set` and `remove` are refused and
+  change nothing.
+- **Every change is logged** with who asked (`--admin NAME`, REST
+  `X-Kelix-Admin`), and so is every run a rule journals.
+
+Exit codes: `2` for a refused value (count, duration, filter), `3` for an unknown
+domain, a script the domain does not serve, or no rule, `5` when the rules
+cannot be written.
+
+A journal holds whole SIP messages: names, numbers, addresses. A rule without
+filter on a busy script journals the calls of anyone, up to `count`.
 
 ### Editing a domain
 
