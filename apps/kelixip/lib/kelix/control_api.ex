@@ -24,6 +24,10 @@ defmodule Kelix.ControlAPI do
   | `shutdown_scenario/1` | `POST /scenarios/:id/shutdown` |
   | `debug_scenario/2` | `POST /scenarios/:id/debug` (body `{"enabled": bool}`) |
   | `traces/0` | `GET /traces` |
+  | `debug_triggers/1` | `GET /debug/triggers[?domain=]` |
+  | `debug_trigger/2` | `GET /debug/triggers/:domain/:script` |
+  | `set_debug_trigger/4` | `PUT /debug/triggers/:domain/:script` (body `{"count", "duration", "filter"}`) |
+  | `remove_debug_trigger/3` | `DELETE /debug/triggers/:domain/:script` → `204` |
   | `trace/1` | `GET /traces/:id` (the journal, unrendered, secrets masked) |
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
   | `run_script/3` | `POST /scripts/:name/run` (body `{"domain": …, "args": {…}}`) → `202` |
@@ -198,6 +202,42 @@ defmodule Kelix.ControlAPI do
 
       _ ->
         json(conn, 400, %{error: "id must be an integer"})
+    end
+  end
+
+  # ── debug triggers (debug-triggers-plan.md) ──────────────────────────────────
+  #
+  # A script name may hold a `/` (a sub-directory of script_dir), hence the glob:
+  # everything after the domain is the script.
+
+  get "/debug/triggers" do
+    conn = fetch_query_params(conn)
+    rules = Control.debug_triggers(presence(conn.query_params["domain"]))
+    json(conn, 200, Enum.map(rules, &trigger_json/1))
+  end
+
+  get "/debug/triggers/:domain/*script" do
+    case Control.debug_trigger(domain, Enum.join(script, "/")) do
+      {:ok, rule} -> json(conn, 200, trigger_json(rule))
+      {:error, reason} -> trigger_error(conn, reason)
+    end
+  end
+
+  put "/debug/triggers/:domain/*script" do
+    script = Enum.join(script, "/")
+
+    case Control.set_debug_trigger(domain, script, body_map(conn), actor: admin_header(conn)) do
+      {:ok, rule} -> json(conn, 200, %{result: trigger_json(rule)})
+      {:error, reason} -> trigger_error(conn, reason)
+    end
+  end
+
+  delete "/debug/triggers/:domain/*script" do
+    script = Enum.join(script, "/")
+
+    case Control.remove_debug_trigger(domain, script, actor: admin_header(conn)) do
+      :ok -> send_resp(conn, 204, "")
+      {:error, reason} -> trigger_error(conn, reason)
     end
   end
 
@@ -740,6 +780,26 @@ defmodule Kelix.ControlAPI do
   # a per-name result map (reload_script): the status is the aggregate outcome
   defp respond(conn, %{} = map), do: json(conn, 200, jsonable(map))
   defp respond(conn, other), do: json(conn, 200, jsonable(other))
+
+  # A debug trigger as JSON: times in ISO 8601 (`jsonable/1` would turn a
+  # DateTime into the map of its fields).
+  defp trigger_json(rule) do
+    rule
+    |> Map.update!(:created_at, &DateTime.to_iso8601/1)
+    |> Map.update!(:expires_at, &DateTime.to_iso8601/1)
+  end
+
+  defp trigger_error(conn, reason) do
+    {class, message} = Control.debug_trigger_error(reason)
+    status = %{not_found: 404, invalid: 400, unavailable: 503}[class]
+    json(conn, status, %{error: to_string(class), message: message})
+  end
+
+  defp admin_header(conn), do: conn |> get_req_header("x-kelix-admin") |> List.first()
+
+  defp presence(nil), do: nil
+  defp presence(""), do: nil
+  defp presence(value), do: value
 
   # A kept journal as JSON: times in ISO 8601, and the `config` of its metadata
   # masked as the renderers mask it — a REST client is not trusted to.

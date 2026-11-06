@@ -73,6 +73,18 @@ defmodule Kelix.DebugTriggersPoolTest do
     assert Enum.any?(trace.events, &match?(%{kind: :transition, to: :initial_state}, &1))
   end
 
+  test "kelictl debug list shows the journal under origin rule", %{dom: dom} do
+    {:ok, _} = DebugTriggers.set(dom, @waiter, %{count: 1, duration: "1h"}, "test")
+    {id, _pid} = spawn_run(dom, register("alice", dom))
+    assert await(fn -> traced?(id) end)
+    assert Control.shutdown_scenario(id) == :ok
+    assert kept(id)
+
+    assert {0, out} = Kelix.Control.CLI.run(["debug", "list"], node())
+    assert out =~ "origin"
+    assert out =~ ~r/^#{id}\s.*#{Regex.escape(dom)}\s.*waiter\.exs\s+rule\s/m
+  end
+
   test "a run the filter does not match is not journaled and consumes nothing", %{dom: dom} do
     spec = %{count: 2, duration: "1h", filter: %{caller: "alice"}}
     {:ok, _} = DebugTriggers.set(dom, @waiter, spec, "test")
