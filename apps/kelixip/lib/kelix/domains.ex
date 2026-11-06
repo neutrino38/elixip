@@ -394,6 +394,19 @@ defmodule Kelix.Domains do
     |> Enum.uniq_by(&elem(&1, 0))
   end
 
+  @doc """
+  The scripts domain `name` serves (its canonical name, not an alias), deduped,
+  in `script_refs/1` order — or `nil` when the snapshot has no such domain. What
+  a debug trigger is checked against (debug-triggers-plan.md, decision 5).
+  """
+  @spec scripts_of(t, String.t()) :: [String.t()] | nil
+  def scripts_of(%__MODULE__{domains: domains}, name) when is_binary(name) do
+    case Enum.find(domains, &(&1.name == name)) do
+      nil -> nil
+      domain -> domain |> domain_script_refs() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+    end
+  end
+
   defp domain_script_refs(%Domain{} = d) do
     registrar_refs =
       for block <- List.wrap(d.registrar),
