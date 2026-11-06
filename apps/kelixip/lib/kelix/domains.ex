@@ -79,7 +79,8 @@ defmodule Kelix.Domains do
   def reload(path, opts \\ []) do
     case load(path, Keyword.get(opts, :check_scripts, false)) do
       {:ok, snapshot} ->
-        GenServer.call(__MODULE__, {:swap, snapshot})
+        with :ok <- GenServer.call(__MODULE__, {:swap, snapshot}),
+             do: accepted(snapshot, :ok)
 
       {:error, reason} = err ->
         Logger.error(
@@ -204,8 +205,29 @@ defmodule Kelix.Domains do
              do: tag(check_scripts(snapshot), :scripts),
              else: :ok
            ) do
-      GenServer.call(__MODULE__, {:write, snapshot, text, path, Keyword.get(opts, :version)})
+      with {:ok, snapshot} = ok <-
+             GenServer.call(
+               __MODULE__,
+               {:write, snapshot, text, path, Keyword.get(opts, :version)}
+             ),
+           do: accepted(snapshot, ok)
     end
+  end
+
+  # What follows a snapshot the node now serves, in the caller's process — never
+  # inside our own handle_call: the debug trigger store reads `current/0` while it
+  # validates a rule, and a call from here into it could cross that one. A rule
+  # whose domain stopped serving its script goes (debug-triggers-plan.md,
+  # decision 5); a node without the store (elixipp, some tests) has none to prune.
+  defp accepted(snapshot, reply) do
+    _ =
+      try do
+        Kelix.DebugTriggers.prune(snapshot)
+      catch
+        :exit, _ -> []
+      end
+
+    reply
   end
 
   defp tag({:error, message}, tag) when is_binary(message), do: {:error, {tag, message}}
