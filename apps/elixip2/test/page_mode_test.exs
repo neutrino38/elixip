@@ -345,8 +345,7 @@ defmodule SIP.Test.PageMode do
     # The journal holds both transactions, the text in neither.
     path = SequenceDiagram.filename(%{scenario: inspect(Forwarder), pid: instance})
     on_exit(fn -> File.rm(path) end)
-    assert eventually(fn -> File.exists?(path) end)
-    content = File.read!(path)
+    content = read_journal(path)
 
     assert content =~ ~r/-> local : \+\d+ms MESSAGE #77/
     assert content =~ ~r/local --> \w+ : \+\d+ms 202 [^\/]*\/ 77 MESSAGE/
@@ -417,8 +416,7 @@ defmodule SIP.Test.PageMode do
     path = SequenceDiagram.filename(%{scenario: inspect(Talker), pid: instance})
     on_exit(fn -> File.rm(path) end)
     send(:persistent_term.get({ConversationUAS, :live}), {:conversation, :idle})
-    assert eventually(fn -> File.exists?(path) end)
-    content = File.read!(path)
+    content = read_journal(path)
 
     assert length(Regex.scan(~r/-> local : \+\d+ms MESSAGE #77/, content)) == 2
     assert length(Regex.scan(~r/local --> \w+ : \+\d+ms 200 [^\/]*\/ 77 MESSAGE/, content)) == 2
@@ -517,6 +515,12 @@ defmodule SIP.Test.PageMode do
     after
       3_000 -> flunk("no final response to the MESSAGE on call #{callid}")
     end
+  end
+
+  # File.write/2 creates the file before it fills it: existing is not written.
+  defp read_journal(path) do
+    assert eventually(fn -> match?({:ok, %{size: size}} when size > 0, File.stat(path)) end)
+    File.read!(path)
   end
 
   defp eventually(fun, tries \\ 50) do

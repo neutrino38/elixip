@@ -39,6 +39,7 @@ defmodule Kelix.Traces do
           scenario: String.t(),
           domain: String.t() | nil,
           script: String.t() | nil,
+          origin: :operator | :rule,
           written_at: DateTime.t(),
           expires_at: DateTime.t(),
           running: boolean,
@@ -142,6 +143,8 @@ defmodule Kelix.Traces do
       scenario: Map.get(meta, :scenario),
       domain: row && row.domain,
       script: row && row.script,
+      # Who asked for it: a debug trigger, or an operator (`kelictl debug <id> on`).
+      origin: (row && Map.get(row, :journal_origin)) || :operator,
       pid: from_pid,
       monitor: Process.monitor(from_pid),
       written_at: now,
@@ -253,7 +256,17 @@ defmodule Kelix.Traces do
 
   defp summary(entry) do
     entry
-    |> Map.take([:id, :scenario, :domain, :script, :written_at, :expires_at, :sip_count, :bytes])
+    |> Map.take([
+      :id,
+      :scenario,
+      :domain,
+      :script,
+      :origin,
+      :written_at,
+      :expires_at,
+      :sip_count,
+      :bytes
+    ])
     |> Map.put(:running, entry.monitor != nil)
   end
 

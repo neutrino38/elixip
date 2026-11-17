@@ -11,14 +11,13 @@ defmodule Kelix.CallCaptioningScriptTest do
   alias SIP.Test.Transport.Mockup
 
   @domain "example.com"
-  @realm "visioassistance.net"
   @caller "alice"
   @password "secret"
   @dialled "0612345678"
   @ruri "sip:#{@dialled}@example.com"
   @trunk_peer "cc-trunk"
 
-  @ha1 SIP.Auth.compute_ha1("MD5", @caller, @realm, @password)
+  @ha1 SIP.Auth.compute_ha1("MD5", @caller, @domain, @password)
 
   @audio """
   v=0\r
@@ -89,7 +88,7 @@ defmodule Kelix.CallCaptioningScriptTest do
     start_supervised!(SipServers.child_spec(:sip_servers, %{}))
 
     Application.put_env(:kelixip, :authdb_ha1_lookup, fn
-      @caller, @realm -> {:ok, @ha1}
+      @caller, @domain -> {:ok, @ha1}
       _user, _realm -> :notfound
     end)
 
@@ -197,6 +196,8 @@ defmodule Kelix.CallCaptioningScriptTest do
     assert_receive {:replied, 100, "Trying", _f, _r}, 5_000
     assert_receive {:replied, 407, _reason, fields, _req}, 5_000
     challenge = Keyword.fetch!(fields, :proxyauthenticate)
+    # Without a realm imposed by the script, the domain the call is served on.
+    assert challenge["realm"] == @domain
 
     auth_req = invite(callid, sdp, credentials(challenge))
     send(instance, {:INVITE, auth_req, self(), dialog})
@@ -350,8 +351,7 @@ defmodule Kelix.CallCaptioningScriptTest do
       Map.merge(
         %{
           "control_url" => stub.url,
-          "public_url" => "wss://speech.example.net:9201",
-          "domain" => [%{"name" => @realm, "correction" => true, "lang" => "fr"}]
+          "public_url" => "wss://speech.example.net:9201"
         },
         extra
       )
@@ -429,9 +429,10 @@ defmodule Kelix.CallCaptioningScriptTest do
     assert_receive {:replied, 200, "OK", fields, %{method: :INFO}}, 5_000
 
     assert answered_body(fields) =~
-             ~r{comp="true" uri="wss://speech.example.net:9201/streaming/comp/[A-Za-z0-9_-]+\?lang=fr"}
+             ~r{comp="true" uri="wss://speech.example.net:9201/streaming/comp/[A-Za-z0-9_-]+"}
 
-    assert_received {:speech_token_request, %{"account" => @realm}}
+    assert_received {:speech_token_request, sent}
+    refute Map.has_key?(sent, "account")
     refute_received {:sip_mockup, {:request_sent, :INFO, _}}
 
     # The call is still up and still relayed.
@@ -448,17 +449,6 @@ defmodule Kelix.CallCaptioningScriptTest do
     assert answered_body(fields) =~ ~s(comp="false")
     refute answered_body(fields) =~ "uri="
     refute_received {:speech_token_request, _}
-
-    hang_up(call, 4)
-  end
-
-  test "a domain without the correction gets 403, the call goes on", %{scenario: module} do
-    stub = Stub.start()
-    with_captioning(stub, %{"domain" => [%{"name" => @realm, "correction" => false}]})
-    call = connected_call(module, "cc-info-403")
-
-    send_captioning(call, 3, true)
-    assert_receive {:replied, 403, "Forbidden", _fields, %{method: :INFO}}, 5_000
 
     hang_up(call, 4)
   end

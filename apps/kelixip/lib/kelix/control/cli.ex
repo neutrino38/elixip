@@ -314,6 +314,40 @@ defmodule Kelix.Control.CLI do
     end
   end
 
+  # Debug triggers (debug-triggers-plan.md): before `debug <id> on|off`, whose
+  # first argument is any word.
+  defp parse(["debug", "trigger", "list"]), do: {:ok, :triggers, :debug_triggers, [nil]}
+
+  defp parse(["debug", "trigger", "list", domain]),
+    do: {:ok, :triggers, :debug_triggers, [domain]}
+
+  defp parse(["debug", "trigger", "show", domain, script]),
+    do: {:ok, :trigger, :debug_trigger, [domain, script]}
+
+  # `count=N for=<duration> [caller=U | callee=U | source=IP[/len]]`, `--admin`
+  # anywhere. `for` reads better on a command line; the node calls it `duration`.
+  defp parse(["debug", "trigger", "set", domain, script | rest]) do
+    with {:ok, actor, tokens} <- trigger_flags(rest),
+         {:ok, attrs} <- trigger_attrs(tokens) do
+      {:ok, :trigger_set, :set_debug_trigger, [domain, script, attrs, [actor: actor]]}
+    end
+  end
+
+  defp parse(["debug", "trigger", "remove", domain, script | rest]) do
+    case trigger_flags(rest) do
+      {:ok, actor, []} ->
+        {:ok, :trigger_removed, :remove_debug_trigger, [domain, script, [actor: actor]]}
+
+      {:ok, _actor, _extra} ->
+        {:error, usage_trigger()}
+
+      err ->
+        err
+    end
+  end
+
+  defp parse(["debug", "trigger" | _]), do: {:error, usage_trigger()}
+
   defp parse(["debug", id, onoff]) when onoff in ["on", "off"] do
     case Integer.parse(id) do
       {n, ""} -> {:ok, {:debug, n, onoff}, :debug_scenario, [n, String.to_atom(onoff)]}
@@ -408,6 +442,31 @@ defmodule Kelix.Control.CLI do
 
   defp pop_flag(args, flag), do: {flag in args, Enum.reject(args, &(&1 == flag))}
 
+  defp trigger_flags(args) do
+    case OptionParser.parse(args, strict: [admin: :string]) do
+      {opts, rest, []} -> {:ok, opts[:admin], rest}
+      {_opts, _rest, [{flag, _} | _]} -> {:error, "debug trigger: bad option #{flag}"}
+    end
+  end
+
+  defp trigger_attrs(tokens) do
+    case Enum.find(tokens, &(not String.contains?(&1, "="))) do
+      nil ->
+        attrs =
+          Map.new(tokens, fn token ->
+            case String.split(token, "=", parts: 2) do
+              ["for", value] -> {"duration", value}
+              [name, value] -> {name, value}
+            end
+          end)
+
+        {:ok, attrs}
+
+      bad ->
+        {:error, "debug trigger: #{inspect(bad)} is not name=value\n" <> usage_trigger()}
+    end
+  end
+
   # `--version N` (the snapshot the command was read against) and `--admin NAME`
   # (who asked, for the node's log), anywhere among the arguments.
   defp write_flags(args) do
@@ -491,7 +550,7 @@ defmodule Kelix.Control.CLI do
     "domain" => ["list", "show", "reload-all", "create", "delete", "help"],
     "mediaserver" => ["list", "show", "enable", "disable", "help"],
     "module" => ["list", "reload", "help"],
-    "debug" => ["list", "show", "help"]
+    "debug" => ["list", "show", "trigger", "help"]
   }
 
   defp complete([], prefix),
@@ -507,12 +566,32 @@ defmodule Kelix.Control.CLI do
   # `debug <id> on|off` takes a running instance, `debug show <id>` a kept trace:
   # the ids come from two different places.
   defp complete(["debug"], prefix),
-    do: {:complete, {:monitor, [], :instance_ids}, prefix, ["list", "show", "help"]}
+    do: {:complete, {:monitor, [], :instance_ids}, prefix, @completion_verbs["debug"]}
+
+  defp complete(["debug", "trigger"], prefix),
+    do: {:complete, nil, prefix, ~w(list show set remove)}
+
+  defp complete(["debug", "trigger", verb], prefix) when verb in ~w(list show set remove),
+    do: {:complete, {:domains, [], :named_rows}, prefix, []}
+
+  # `show` and `remove` take a script that has a rule, `set` any script the
+  # domain serves.
+  defp complete(["debug", "trigger", verb, domain], prefix) when verb in ~w(show remove),
+    do: {:complete, {:debug_triggers, [domain], :trigger_scripts}, prefix, []}
+
+  defp complete(["debug", "trigger", "set", domain], prefix),
+    do: {:complete, {:domain_scripts, [domain], :ok_strings}, prefix, []}
+
+  defp complete(["debug", "trigger", "set", _domain, _script | _typed], prefix),
+    do: {:complete, nil, prefix, ~w(count= for= caller= callee= source= --admin)}
+
+  defp complete(["debug", "trigger", "remove", _domain, _script | _typed], prefix),
+    do: {:complete, nil, prefix, ["--admin"]}
 
   defp complete(["debug", "show" | _typed], prefix),
     do: {:complete, {:traces, [], :instance_ids}, prefix, ["--format-puml", "--full"]}
 
-  defp complete(["debug", id], prefix) when id not in ["list", "show", "help"],
+  defp complete(["debug", id], prefix) when id not in ["list", "show", "trigger", "help"],
     do: {:complete, nil, prefix, ["on", "off"]}
 
   defp complete(["monitor"], prefix), do: {:complete, nil, prefix, ["continuous"]}
@@ -620,6 +699,10 @@ defmodule Kelix.Control.CLI do
 
   defp completion_names(:named_rows, rows) when is_list(rows), do: Enum.map(rows, & &1.name)
   defp completion_names(:strings, names) when is_list(names), do: names
+  defp completion_names(:ok_strings, {:ok, names}) when is_list(names), do: names
+
+  defp completion_names(:trigger_scripts, rules) when is_list(rules),
+    do: Enum.map(rules, & &1.script)
 
   defp completion_names(:instance_ids, rows) when is_list(rows),
     do: for(%{id: id} <- rows, id != nil, do: to_string(id))
@@ -664,6 +747,12 @@ defmodule Kelix.Control.CLI do
       {@exit_conflict,
        "the journal of scenario #{id} was already written, and a scenario has only one — " <>
          "`kelictl debug show #{id}`"}
+
+  defp render(tag, {:error, reason}) when tag in [:trigger, :trigger_set, :trigger_removed] do
+    {class, message} = Kelix.Control.debug_trigger_error(reason)
+    code = %{not_found: @exit_not_found, invalid: 2, unavailable: @exit_unavailable}[class]
+    {code, "error: " <> message}
+  end
 
   defp render(:run, {:error, :not_found}), do: {@exit_not_found, "no such domain"}
 
@@ -947,6 +1036,31 @@ defmodule Kelix.Control.CLI do
   defp render({:debug, id, "off"}, :ok),
     do: {0, "journal of scenario #{id} written — `kelictl debug show #{id}`"}
 
+  defp render(:triggers, []), do: {0, "no debug trigger"}
+
+  defp render(:triggers, rules) when is_list(rules) do
+    {0,
+     table(
+       ["domain", "script", "runs left", "time left", "filter", "set by"],
+       rules,
+       &[
+         &1.domain,
+         &1.script,
+         "#{&1.remaining}/#{&1.total}",
+         format_left(&1.seconds_left),
+         trigger_filter_text(&1.filter),
+         dash(&1.created_by)
+       ]
+     )}
+  end
+
+  defp render(:trigger, {:ok, rule}), do: {0, trigger_detail(rule)}
+
+  defp render(:trigger_set, {:ok, rule}),
+    do: {0, "debug trigger set\n" <> trigger_detail(rule)}
+
+  defp render(:trigger_removed, :ok), do: {0, "debug trigger removed"}
+
   defp render(:traces, []), do: {0, "no journal kept"}
 
   defp render(:traces, rows) when is_list(rows) do
@@ -959,6 +1073,7 @@ defmodule Kelix.Control.CLI do
          "scenario",
          "domain",
          "script",
+         "origin",
          "written (UTC)",
          "instance",
          "SIP",
@@ -971,6 +1086,7 @@ defmodule Kelix.Control.CLI do
          dash(&1.scenario),
          dash(&1.domain),
          dash(&1.script),
+         to_string(Map.get(&1, :origin, :operator)),
          Calendar.strftime(&1.written_at, "%Y-%m-%d %H:%M:%S"),
          if(&1.running, do: "running", else: "ended"),
          to_string(&1.sip_count),
@@ -1805,6 +1921,40 @@ defmodule Kelix.Control.CLI do
   defp blank_is_any(addr) when addr in [nil, ""], do: "* (every interface)"
   defp blank_is_any(addr), do: to_string(addr)
 
+  defp trigger_detail(rule) do
+    [
+      "domain:     #{rule.domain}",
+      "script:     #{rule.script}",
+      "runs left:  #{rule.remaining}/#{rule.total}",
+      "time left:  #{format_left(rule.seconds_left)} " <>
+        "(until #{Calendar.strftime(rule.expires_at, "%Y-%m-%d %H:%M:%S")} UTC)",
+      "filter:     #{trigger_filter_text(rule.filter)}",
+      "set by:     #{dash(rule.created_by)} " <>
+        "at #{Calendar.strftime(rule.created_at, "%Y-%m-%d %H:%M:%S")} UTC"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp trigger_filter_text(nil), do: "-"
+
+  defp trigger_filter_text(filter),
+    do: Enum.map_join(filter, ", ", fn {k, v} -> "#{k}=#{v}" end)
+
+  # The two largest units that say something: `6d 3h`, `1h 42m`, `5m 10s`.
+  defp format_left(seconds) do
+    d = div(seconds, 86_400)
+    h = div(rem(seconds, 86_400), 3_600)
+    m = div(rem(seconds, 3_600), 60)
+    s = rem(seconds, 60)
+
+    cond do
+      d > 0 -> "#{d}d #{h}h"
+      h > 0 -> "#{h}h #{m}m"
+      m > 0 -> "#{m}m #{s}s"
+      true -> "#{s}s"
+    end
+  end
+
   defp format_uptime(ms) do
     s = div(ms, 1000)
     "#{div(s, 3600)}h#{rem(div(s, 60), 60)}m#{rem(s, 60)}s"
@@ -1861,6 +2011,9 @@ defmodule Kelix.Control.CLI do
       debug show <id> [--full]        print one as a ladder, with each
                                       message's text if --full
       debug show <id> --format-puml   print one as PlantUML
+      debug trigger list|show|set|remove …
+                                      journal the next runs of a script
+                                      (kelictl debug help)
       reload-all                      reload domains.toml + the scripts + the
                                       module configs that can be applied live
                                       (what systemctl reload runs; config.toml
@@ -2140,6 +2293,31 @@ defmodule Kelix.Control.CLI do
     dropped first, and each cut at [debug] max_trace_bytes of message text
     (1 MiB); config.toml sets all three. A restart loses them.
 
+    kelictl debug trigger — journal the next runs of a script
+
+      debug trigger list [<domain>]       [GET /debug/triggers[?domain=]]
+          Every rule: domain, script, runs left, time left, filter, who set it.
+      debug trigger show <domain> <script>
+                                          [GET /debug/triggers/<domain>/<script>]
+      debug trigger set <domain> <script> count=N for=<n>m|h|d|mo
+                        [caller=U | callee=U | source=IP[/len]] [--admin NAME]
+                                          [PUT /debug/triggers/<domain>/<script>]
+          Journal the next N runs of <script> on <domain> (its canonical name)
+          started within the duration — a month is 30 days, 12 at most. At
+          most one filter: caller matches the user part of From or of
+          P-Asserted-Identity, callee that of To or of the Request-URI, source
+          the address the request came from. User parts are compared ignoring
+          case. A run no request started (`kelictl run`) only matches a rule
+          without filter. One rule per script and domain: set replaces it.
+          N is at most [debug] max_traces.
+      debug trigger remove <domain> <script> [--admin NAME]
+                                          [DELETE /debug/triggers/<domain>/<script>]
+
+    A rule ends after its last run or when its time is up. It is kept in
+    debug_triggers.json next to domains.toml, so it survives a restart; it is
+    removed when its domain stops serving the script. The journals it starts
+    are listed by `debug list` with origin `rule`.
+
     Full documentation: docs/kelixip/running.md
     """
   end
@@ -2151,7 +2329,14 @@ defmodule Kelix.Control.CLI do
   defp usage_debug(),
     do:
       "usage: kelictl debug <id> on|off | debug list | " <>
-        "debug show <id> [--full] [--format-puml]"
+        "debug show <id> [--full] [--format-puml]\n" <> usage_trigger()
+
+  defp usage_trigger(),
+    do:
+      "usage: kelictl debug trigger list [<domain>] | " <>
+        "debug trigger show|remove <domain> <script>\n" <>
+        "       kelictl debug trigger set <domain> <script> count=N for=<n>m|h|d|mo " <>
+        "[caller=U | callee=U | source=IP[/len]] [--admin NAME]"
 
   defp usage_registration() do
     "usage: kelictl registration list [domain] | registration show <domain> <aor> | " <>

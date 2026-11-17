@@ -14,14 +14,17 @@ defmodule Kelix.Mod.Captioning do
 
       <public_url>/streaming/comp/<token>[?lang=<lang>]
 
-  What it decides, per domain of the authenticated caller:
+  A node that loads this module offers the correction to every call of the
+  script. What it decides is how often a call may ask: `max_per_call` renewals
+  after the first token, at least `min_interval` seconds apart (spec §7.4) — past
+  that, `503` with `Retry-After`, which a client takes as "stop for this call".
+  The `account` the speech-server bills the token to and the `lang` of the
+  correction are the script's, passed to `answer/2`.
 
-    * whether the correction is part of the service at all (`correction`) — a
-      domain without it answers `403` to `comp="true"`;
-    * how often a call may ask: `max_per_call` renewals after the first token, at
-      least `min_interval` seconds apart (spec §7.4) — past that, `503` with
-      `Retry-After`, which a client takes as "stop for this call";
-    * the `account` the speech-server bills the token to: the domain's name.
+  A token is asked of the speech-server, then of the backup one when it is
+  configured and the first did not answer: a token is only valid on the server
+  that minted it, so the URL handed out is that server's `public_url`. A refusal
+  (4xx) is not retried elsewhere, the request itself being at fault.
 
   A speech-server that is down, slow (`timeout_ms`) or refuses the token is a
   `503` with `Retry-After`, never a failed call: the correction helps, it never
@@ -47,9 +50,8 @@ defmodule Kelix.Mod.Captioning do
     retry_after: 30
   }
 
-  @config_keys ~w(module call_timeout_ms control_url public_url ttl timeout_ms
-                  max_per_call min_interval retry_after domain)
-  @domain_keys ~w(name correction lang)
+  @config_keys ~w(module call_timeout_ms control_url public_url backup_control_url
+                  backup_public_url ttl timeout_ms max_per_call min_interval retry_after)
 
   # The speech-server's rule for `account` (1 to 64 of [A-Za-z0-9._-]).
   @account ~r/\A[A-Za-z0-9._-]{1,64}\z/
@@ -107,8 +109,9 @@ defmodule Kelix.Mod.Captioning do
         args: [],
         render: %{
           kind: :detail,
-          fields: ~w(control_url public_url ttl timeout_ms max_per_call min_interval
-                     retry_after domains active_calls requested obtained refused latency_ms)
+          fields: ~w(control_url public_url backup_control_url backup_public_url ttl
+                     timeout_ms max_per_call min_interval retry_after active_calls
+                     requested obtained refused latency_ms)
         },
         help: "Effective configuration, tokens requested / obtained / refused, active calls"
       }
@@ -125,15 +128,17 @@ defmodule Kelix.Mod.Captioning do
   # ── Facades ──────────────────────────────────────────────────────────────────
 
   @doc """
-  Answer a captioning INFO from a caller of `domain`, as `b2bua_reply_on/5` takes
-  it: `{code, reason, upd_fields}`.
+  Answer a captioning INFO, as `b2bua_reply_on/5` takes it: `{code, reason,
+  upd_fields}`. `opts`: `account:` the label the speech-server bills the token
+  to, `lang:` the language of the correction, added to the URL; both absent by
+  default. A bare string is taken as the `account`.
 
   | Situation | Answer |
   |---|---|
   | no `comp`, or `comp="false"` | `200`, `comp="false"`, no `uri` |
   | `comp="true"`, token obtained | `200`, `comp="true" uri="wss://…"` |
-  | `comp="true"`, domain without the correction | `403` |
   | not a captioning document | `400` |
+  | `account` or `lang` invalid | `500` |
   | renewals past the bounds | `503` + `Retry-After` |
   | speech-server down, slow, refusing | `503` + `Retry-After` |
 
@@ -141,12 +146,14 @@ defmodule Kelix.Mod.Captioning do
   through `Kelix.ModuleRegistry.facade/4`, so a node without this module answers
   its own default instead.
   """
-  @spec answer(map, String.t()) :: {pos_integer, String.t(), keyword}
-  def answer(req, domain) when is_map(req) and is_binary(domain) do
+  @spec answer(map, keyword | String.t()) :: {pos_integer, String.t(), keyword}
+  def answer(req, account) when is_binary(account), do: answer(req, account: account)
+
+  def answer(req, opts) when is_map(req) and is_list(opts) do
     call_id = Map.get(req, :callid)
 
     with {:ok, request} <- parse_request(req),
-         {:ok, granted} <- activate(call_id, domain, request) do
+         {:ok, granted} <- activate(call_id, request, opts) do
       if granted.comp,
         do:
           Logger.info(
@@ -159,13 +166,13 @@ defmodule Kelix.Mod.Captioning do
       {:error, :malformed} ->
         {400, "Bad Request", []}
 
-      {:error, :forbidden} ->
-        Logger.info(
+      {:error, {:bad_option, key, value}} ->
+        Logger.error(
           module: __MODULE__,
-          message: "#{call_id}: correction refused, #{domain} not entitled"
+          message: "#{call_id}: the script passed an invalid #{key}: #{inspect(value)}"
         )
 
-        {403, "Forbidden", []}
+        {500, "Server Internal Error", []}
 
       {:error, {:busy, retry_after}} ->
         Logger.info(
@@ -205,43 +212,50 @@ defmodule Kelix.Mod.Captioning do
   end
 
   @doc """
-  Grant what the INFO asked for, for the call `call_id` of a caller of `domain`.
+  Grant what the INFO asked for, for the call `call_id`. `opts` as `answer/2`.
 
   `{:ok, %{comp: false}}` when the correction was not asked for — nothing is
   minted. Otherwise `{:ok, %{comp: true, uri: uri}}`, or:
 
-    * `{:error, :forbidden}` — the domain does not have the correction;
+    * `{:error, {:bad_option, key, value}}` — `account` or `lang` is invalid;
     * `{:error, {:busy, retry_after}}` — renewals past the bounds;
     * `{:error, {:unavailable, reason, retry_after}}` — the speech-server did not
       give a token: `:down`, `:timeout`, `:invalid_response` or
       `{:speech, status, reason}`;
     * `{:error, :down | :timeout}` — this module itself is not answering.
   """
-  @spec activate(String.t() | nil, String.t(), %{comp: boolean}) ::
+  @spec activate(String.t() | nil, %{comp: boolean}, keyword) ::
           {:ok, %{comp: false} | %{comp: true, uri: String.t()}} | {:error, term}
-  def activate(_call_id, _domain, %{comp: false}), do: {:ok, %{comp: false}}
+  def activate(_call_id, %{comp: false}, _opts), do: {:ok, %{comp: false}}
 
-  def activate(call_id, domain, %{comp: true}) do
-    case Kelix.Module.safe_call(__MODULE__, {:reserve, call_id, domain_name(domain)}) do
-      {:ok, grant} ->
-        started = System.monotonic_time()
-        result = Token.request(grant.cfg, grant.account)
-        elapsed = System.monotonic_time() - started
-        GenServer.cast(__MODULE__, {:token, outcome(result), elapsed})
+  def activate(call_id, %{comp: true}, opts) do
+    with {:ok, account} <- option(opts, :account, @account),
+         {:ok, lang} <- option(opts, :lang, @lang),
+         {:ok, cfg} <- Kelix.Module.safe_call(__MODULE__, {:reserve, call_id}) do
+      started = System.monotonic_time()
+      result = request_token(cfg, call_id, account)
+      elapsed = System.monotonic_time() - started
+      GenServer.cast(__MODULE__, {:token, outcome(result), elapsed})
 
-        case result do
-          {:ok, token} ->
-            {:ok, %{comp: true, uri: stream_uri(grant, token)}}
+      case result do
+        {:ok, server, token} ->
+          {:ok, %{comp: true, uri: stream_uri(server.public_url, token, lang)}}
 
-          {:error, reason} ->
-            log_refusal(call_id, reason)
-            {:error, {:unavailable, reason, grant.cfg.retry_after}}
-        end
-
-      other ->
-        other
+        {:error, reason} ->
+          {:error, {:unavailable, reason, cfg.retry_after}}
+      end
     end
   end
+
+  defp option(opts, key, format) do
+    case Keyword.get(opts, key) do
+      nil -> {:ok, nil}
+      value when is_binary(value) -> if value =~ format, do: {:ok, value}, else: bad(key, value)
+      value -> bad(key, value)
+    end
+  end
+
+  defp bad(key, value), do: {:error, {:bad_option, key, value}}
 
   @doc "The body part of a `200 OK`, as `upd_fields`' `body:` takes it."
   @spec response_body(%{comp: boolean}) :: %{contenttype: String.t(), data: binary}
@@ -280,32 +294,25 @@ defmodule Kelix.Mod.Captioning do
   end
 
   @impl true
-  def handle_call({:reserve, call_id, domain}, _from, state) do
+  def handle_call({:reserve, call_id}, _from, state) do
     now = System.monotonic_time(:millisecond)
     state = update_in(state.stats.requested, &(&1 + 1))
 
-    case Map.get(state.cfg.domains, domain) do
-      %{correction: true} = dom ->
-        case Map.get(state.calls, call_id) do
-          %{count: count} when count > state.cfg.max_per_call ->
-            {:reply, {:error, {:busy, state.cfg.retry_after}}, refuse(state, :busy)}
+    case Map.get(state.calls, call_id) do
+      %{count: count} when count > state.cfg.max_per_call ->
+        {:reply, {:error, {:busy, state.cfg.retry_after}}, refuse(state, :busy)}
 
-          %{last: last} when now - last < state.cfg.min_interval * 1_000 ->
-            {:reply, {:error, {:busy, state.cfg.retry_after}}, refuse(state, :busy)}
+      %{last: last} when now - last < state.cfg.min_interval * 1_000 ->
+        {:reply, {:error, {:busy, state.cfg.retry_after}}, refuse(state, :busy)}
 
-          entry ->
-            entry = %{
-              count: ((entry && entry.count) || 0) + 1,
-              last: now,
-              since: (entry && entry.since) || now
-            }
+      entry ->
+        entry = %{
+          count: ((entry && entry.count) || 0) + 1,
+          last: now,
+          since: (entry && entry.since) || now
+        }
 
-            grant = %{cfg: state.cfg, account: dom.name, lang: dom.lang}
-            {:reply, {:ok, grant}, %{state | calls: Map.put(state.calls, call_id, entry)}}
-        end
-
-      _not_entitled ->
-        {:reply, {:error, :forbidden}, refuse(state, :forbidden)}
+        {:reply, {:ok, state.cfg}, %{state | calls: Map.put(state.calls, call_id, entry)}}
     end
   end
 
@@ -338,7 +345,7 @@ defmodule Kelix.Mod.Captioning do
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp refuse(state, cause) do
-    if cause in [:forbidden, :busy], do: Kelix.Metrics.Emit.captioning_token(cause, nil)
+    if cause == :busy, do: Kelix.Metrics.Emit.captioning_token(cause, nil)
     update_in(state.stats.refused, &Map.update(&1, cause, 1, fn n -> n + 1 end))
   end
 
@@ -358,16 +365,13 @@ defmodule Kelix.Mod.Captioning do
     %{
       control_url: cfg.control_url,
       public_url: cfg.public_url,
+      backup_control_url: cfg.backup_control_url,
+      backup_public_url: cfg.backup_public_url,
       ttl: cfg.ttl,
       timeout_ms: cfg.timeout_ms,
       max_per_call: cfg.max_per_call,
       min_interval: cfg.min_interval,
       retry_after: cfg.retry_after,
-      domains:
-        cfg.domains
-        |> Map.values()
-        |> Enum.sort_by(& &1.name)
-        |> Enum.map(&%{name: &1.name, correction: &1.correction, lang: &1.lang}),
       active_calls: map_size(state.calls),
       requested: stats.requested,
       obtained: stats.obtained,
@@ -382,32 +386,62 @@ defmodule Kelix.Mod.Captioning do
 
   # ── Tokens ───────────────────────────────────────────────────────────────────
 
-  defp stream_uri(grant, token) do
-    base = String.trim_trailing(grant.cfg.public_url, "/") <> "/streaming/comp/" <> token
-    if grant.lang, do: base <> "?lang=" <> grant.lang, else: base
+  # The servers in the order they are asked: the main one, then the backup.
+  defp servers(%{backup_control_url: nil} = cfg),
+    do: [%{control_url: cfg.control_url, public_url: cfg.public_url}]
+
+  defp servers(cfg) do
+    [
+      %{control_url: cfg.control_url, public_url: cfg.public_url},
+      %{control_url: cfg.backup_control_url, public_url: cfg.backup_public_url}
+    ]
+  end
+
+  defp request_token(cfg, call_id, account) do
+    Enum.reduce_while(servers(cfg), nil, fn server, _last ->
+      case Token.request(server.control_url, cfg, account) do
+        {:ok, token} ->
+          {:halt, {:ok, server, token}}
+
+        {:error, reason} = error ->
+          log_refusal(call_id, server.control_url, reason)
+          if refused?(reason), do: {:halt, error}, else: {:cont, error}
+      end
+    end)
+  end
+
+  defp refused?({:speech, status, _reason}), do: status in 400..499
+  defp refused?(_reason), do: false
+
+  defp stream_uri(public_url, token, lang) do
+    base = String.trim_trailing(public_url, "/") <> "/streaming/comp/" <> token
+    if lang, do: base <> "?lang=" <> lang, else: base
   end
 
   # A bounded label: the reason a server gives goes to the log, not to a metric.
-  defp outcome({:ok, _token}), do: :obtained
+  defp outcome({:ok, _server, _token}), do: :obtained
   defp outcome({:error, {:speech, status, _reason}}), do: :"speech_#{status}"
   defp outcome({:error, reason}) when is_atom(reason), do: reason
 
   # A 400 / 403 / 413 / 415 is ours to fix — our request, or the deployment
   # (`control.allow`) — so an error; anything else is the speech-server away.
-  defp log_refusal(call_id, {:speech, status, reason}) when status in [400, 403, 413, 415] do
+  defp log_refusal(call_id, url, {:speech, status, reason})
+       when status in [400, 403, 413, 415] do
     Logger.error(
       module: __MODULE__,
       message:
-        "#{call_id}: the speech-server refused the token request: #{status} #{reason || ""}" <>
+        "#{call_id}: the speech-server #{url} refused the token request: " <>
+          "#{status} #{reason || ""}" <>
           if(status == 403, do: " (is this node in its control.allow?)", else: "")
     )
   end
 
-  defp log_refusal(call_id, reason) do
+  defp log_refusal(call_id, url, reason) do
     Logger.warning(
       module: __MODULE__,
       message:
-        "#{call_id}: no correction token, speech-server unavailable: #{describe_reason(reason)}"
+        "#{call_id}: no correction token, speech-server #{url} unavailable: " <>
+          describe_reason(reason)
     )
   end
 
@@ -427,17 +461,18 @@ defmodule Kelix.Mod.Captioning do
          {:ok, max_per_call} <- integer(config, "max_per_call", 0..100),
          {:ok, min_interval} <- integer(config, "min_interval", 0..3600),
          {:ok, retry_after} <- integer(config, "retry_after", 1..3600),
-         {:ok, domains} <- domains(Map.get(config, "domain", [])) do
+         {:ok, backup_control_url, backup_public_url} <- backup(config) do
       {:ok,
        %{
          control_url: control_url,
          public_url: public_url,
+         backup_control_url: backup_control_url,
+         backup_public_url: backup_public_url,
          ttl: ttl,
          timeout_ms: timeout_ms,
          max_per_call: max_per_call,
          min_interval: min_interval,
-         retry_after: retry_after,
-         domains: domains
+         retry_after: retry_after
        }}
     end
   end
@@ -475,59 +510,20 @@ defmodule Kelix.Mod.Captioning do
     end
   end
 
-  defp domains(list) when is_list(list) do
-    Enum.reduce_while(list, {:ok, %{}}, fn entry, {:ok, acc} ->
-      case domain(entry) do
-        {:ok, dom} -> {:cont, {:ok, Map.put(acc, String.downcase(dom.name), dom)}}
-        error -> {:halt, error}
-      end
-    end)
-  end
+  # The backup server is a pair: a token is only valid on the server that minted
+  # it, so the URL a client opens must be the one of the server that answered.
+  defp backup(config) do
+    case {Map.has_key?(config, "backup_control_url"), Map.has_key?(config, "backup_public_url")} do
+      {false, false} ->
+        {:ok, nil, nil}
 
-  defp domains(_), do: {:error, "domain must be a list of [[module.captioning.domain]] tables"}
+      {true, true} ->
+        with {:ok, control_url} <- url(config, "backup_control_url", ["http", "https"]),
+             {:ok, public_url} <- url(config, "backup_public_url", ["wss"]),
+             do: {:ok, control_url, public_url}
 
-  # The domain's name is the token's `account`: it must pass the speech-server's
-  # rule, so an IDN goes in as its punycode.
-  defp domain(entry) when is_map(entry) do
-    name = Map.get(entry, "name")
-
-    cond do
-      (error = reject_unknown(entry, @domain_keys, "domain: ")) != :ok ->
-        error
-
-      not (is_binary(name) and name =~ @account) ->
-        {:error,
-         "domain name #{inspect(name)} must be 1 to 64 of [A-Za-z0-9._-] (punycode for an IDN)"}
-
-      not is_boolean(Map.get(entry, "correction", false)) ->
-        {:error, "domain #{name}: correction must be true or false"}
-
-      not (is_nil(Map.get(entry, "lang")) or Map.get(entry, "lang") =~ @lang) ->
-        {:error, "domain #{name}: lang must be a short language code (fr, en, pt-BR…)"}
-
-      true ->
-        {:ok,
-         %{
-           name: name,
-           correction: Map.get(entry, "correction", false),
-           lang: Map.get(entry, "lang")
-         }}
+      _ ->
+        {:error, "backup_control_url and backup_public_url go together"}
     end
-  end
-
-  defp domain(_), do: {:error, "domain must be a list of [[module.captioning.domain]] tables"}
-
-  # A served domain's canonical name, an alias folded into it; the name as given
-  # when this node does not serve it, or when there is no configuration to ask.
-  defp domain_name(domain) do
-    folded =
-      with pid when is_pid(pid) <- Process.whereis(Kelix.Domains),
-           %Kelix.Domain{name: name} <- Kelix.Domains.lookup(Kelix.Domains.current(), domain) do
-        name
-      else
-        _ -> domain
-      end
-
-    String.downcase(folded)
   end
 end

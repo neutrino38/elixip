@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.9.0
+Version:        1.9.1
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        4%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -187,7 +187,7 @@ Requires:       %{name} = %{version}
 
 %description mod-captioning
 Answers the captioning INFO a client sends during a call placed by
-call-captioning.exs and, for the domains that have the service, hands it the
+call-captioning.exs and hands it the
 URL of a correction stream on the speech-server, with a single-use token minted
 on the speech-server's control API. Renewals are bounded per call, and the token
 is masked in every log and trace. Enable it with a [module.captioning] block in
@@ -435,6 +435,26 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Captioning*.beam
 
 %changelog
+* Fri Nov 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.1-2
+- Debug triggers: journal the next N runs of a script on a domain, within a
+  window, optionally filtered on the caller, the callee or the source address
+  (kelictl debug trigger, REST /debug/triggers). The rules are kept in
+  /var/lib/kelixip/debug_triggers.json.
+- kelictl debug list and GET /traces show the origin of each journal, rule or
+  operator.
+
+* Wed Nov 04 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.1-1
+- captioning: the correction is offered to every call of the script once the
+  module is loaded. The [[module.captioning.domain]] tables are gone, and a
+  config.toml that still has one is refused. The script passes the account
+  billed and the language of the correction to answer/2, both empty by default.
+- captioning: an optional backup speech-server, backup_control_url and
+  backup_public_url, asked when the main one does not answer.
+- call-captioning.exs authenticates on the domain the call is served on;
+  @realm imposes another one.
+- Digest: the RFC 8760 spelling SHA-256 is accepted, and challenges advertise it.
+- User-Agent is now Kelixip/1.9.1.
+
 * Sun Nov 01 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.9.0-4
 - bandit 1.14.1, the HTTP server of the REST control API and of the metrics
   endpoint. 1.13.1 carried ten high and two medium advisories (HTTP/1.1

@@ -88,6 +88,10 @@ defmodule Kelix.Application do
       # (SIP.FSL.Host.monitor_columns/0): the registry is generic and merges
       # whatever the embedding declares.
       {FSL.Monitor, columns: SIP.FSL.Host.monitor_columns()},
+      # Debug triggers (debug-triggers-plan.md): the rules that journal the next
+      # runs of a script. After Config ([debug] max_traces) and Domains (a rule
+      # names a script its domain serves), before the pool that claims them.
+      Kelix.DebugTriggers,
       # Script loading/versioning (§5) and the shared instance factory (§4.2).
       Kelix.ScriptRegistry,
       Kelix.InstancePool,

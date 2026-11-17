@@ -868,6 +868,167 @@ defmodule Kelix.Control do
   @spec unsubscribe_traces(pid) :: :ok
   def unsubscribe_traces(pid), do: safe(fn -> Kelix.Traces.unsubscribe(pid) end, :ok)
 
+  # ── debug triggers (debug-triggers-plan.md) ──────────────────────────────────
+
+  @doc """
+  The debug triggers of the node (`kelictl debug trigger list`), the one ending
+  first first, or those of one domain. Each rule carries `remaining` / `total`
+  runs and `seconds_left`.
+  """
+  @spec debug_triggers(String.t() | nil) :: [map]
+  def debug_triggers(domain \\ nil) do
+    rules = safe(fn -> Kelix.DebugTriggers.list() end, [])
+    if domain, do: Enum.filter(rules, &(&1.domain == domain)), else: rules
+  end
+
+  @doc "The debug trigger of `script` on `domain` (`kelictl debug trigger show`)."
+  @spec debug_trigger(String.t(), String.t()) :: {:ok, map} | {:error, :not_found}
+  def debug_trigger(domain, script),
+    do: safe(fn -> Kelix.DebugTriggers.get(domain, script) end, {:error, :not_found})
+
+  @doc """
+  Set the debug trigger of `script` on `domain`, replacing any
+  (`kelictl debug trigger set`, `PUT /debug/triggers/…`, kelescope).
+
+  `attrs` is what a frontal received, string or atom keys:
+
+  - `count` — the runs to journal, an integer or its text;
+  - `duration` — `"30m"`, `"2h"`, `"7d"`, `"3mo"`, or seconds;
+  - at most one filter, either flat (`caller`, `callee`, `source`, what a
+    command line gives) or as a `filter` map (what JSON gives).
+
+  `opts`: `:actor`, who asked, recorded as `created_by`. Answers the rule, or
+  `{:error, reason}` — `debug_trigger_error/1` says it in words.
+  """
+  @spec set_debug_trigger(String.t(), String.t(), map, keyword) :: {:ok, map} | {:error, term}
+  def set_debug_trigger(domain, script, attrs, opts \\ []) when is_map(attrs) do
+    attrs = Map.new(attrs, fn {k, v} -> {to_string(k), v} end)
+
+    with :ok <- known_trigger_keys(attrs),
+         {:ok, count} <- trigger_count(Map.get(attrs, "count")),
+         {:ok, filter} <- trigger_filter(attrs) do
+      spec = %{count: count, duration: Map.get(attrs, "duration"), filter: filter}
+
+      safe(
+        fn -> Kelix.DebugTriggers.set(domain, script, spec, opts[:actor]) end,
+        {:error, :unavailable}
+      )
+    end
+  end
+
+  @doc "Remove the debug trigger of `script` on `domain`. `opts`: `:actor`."
+  @spec remove_debug_trigger(String.t(), String.t(), keyword) :: :ok | {:error, term}
+  def remove_debug_trigger(domain, script, opts \\ []),
+    do:
+      safe(
+        fn -> Kelix.DebugTriggers.remove(domain, script, opts[:actor]) end,
+        {:error, :unavailable}
+      )
+
+  @doc """
+  The scripts `domain` serves (its canonical name) — what a debug trigger can be
+  set on, and what `kelictl` completes. `{:error, :not_found}` for no such domain.
+  """
+  @spec domain_scripts(String.t()) :: {:ok, [String.t()]} | {:error, :not_found}
+  def domain_scripts(domain) do
+    case safe(fn -> Kelix.Domains.scripts_of(current_domains(), domain) end, nil) do
+      nil -> {:error, :not_found}
+      scripts -> {:ok, scripts}
+    end
+  end
+
+  @doc """
+  Subscribe `pid` to the debug triggers (kelescope), on the model of
+  `subscribe_traces/1`: returns `%{rules: […]}`, then `pid` receives
+  `{:kelix_debug_triggers, {:upsert, rule}}` on every set and counted run, and
+  `{:kelix_debug_triggers, {:remove, {domain, script}, reason}}` when a rule ends
+  (`:exhausted`, `:expired`, `:removed`, `:orphan`).
+  """
+  @spec subscribe_debug_triggers(pid) :: map
+  def subscribe_debug_triggers(pid),
+    do: safe(fn -> Kelix.DebugTriggers.subscribe(pid) end, %{rules: []})
+
+  @doc "Stop a subscription started by `subscribe_debug_triggers/1`."
+  @spec unsubscribe_debug_triggers(pid) :: :ok
+  def unsubscribe_debug_triggers(pid),
+    do: safe(fn -> Kelix.DebugTriggers.unsubscribe(pid) end, :ok)
+
+  @doc """
+  A refused debug trigger in words, and the class of the refusal — `:not_found`,
+  `:invalid` or `:unavailable` — which each frontal maps to its own status (404 /
+  400 / 503, exit 3 / 2 / 5).
+  """
+  @spec debug_trigger_error(term) :: {:not_found | :invalid | :unavailable, String.t()}
+  def debug_trigger_error(:not_found), do: {:not_found, "no debug trigger on this script"}
+  def debug_trigger_error({:unknown_domain, d}), do: {:not_found, "no domain #{d}"}
+
+  def debug_trigger_error({:unknown_script, s}),
+    do: {:not_found, "the domain serves no script #{s}"}
+
+  def debug_trigger_error({:bad_count, n, max}),
+    do:
+      {:invalid,
+       "count must be an integer from 1 to #{max} ([debug] max_traces), not #{inspect(n)}"}
+
+  def debug_trigger_error({:bad_duration, d}),
+    do:
+      {:invalid,
+       "duration must be N followed by m, h, d or mo (a month is 30 days), " <>
+         "12 months at most, not #{inspect(d)}"}
+
+  def debug_trigger_error({:bad_filter, f}),
+    do:
+      {:invalid,
+       "at most one filter: caller=<user>, callee=<user> or source=<ip>[/len], " <>
+         "not #{inspect(f)}"}
+
+  def debug_trigger_error({:unknown_key, k}),
+    do: {:invalid, "unknown argument #{k} — count, duration, caller, callee, source"}
+
+  def debug_trigger_error({:write_failed, %{path: p, reason: r}}),
+    do: {:unavailable, "cannot write #{p}: #{inspect(r)}"}
+
+  def debug_trigger_error(:domains_unavailable),
+    do: {:unavailable, "the domain configuration did not answer"}
+
+  def debug_trigger_error(:unavailable),
+    do: {:unavailable, "the debug trigger store is not running"}
+
+  def debug_trigger_error(other), do: {:unavailable, inspect(other)}
+
+  @trigger_keys ~w(count duration caller callee source filter)
+
+  defp known_trigger_keys(attrs) do
+    case Enum.find(Map.keys(attrs), &(&1 not in @trigger_keys)) do
+      nil -> :ok
+      key -> {:error, {:unknown_key, key}}
+    end
+  end
+
+  defp trigger_count(n) when is_integer(n), do: {:ok, n}
+
+  defp trigger_count(text) when is_binary(text) do
+    case Integer.parse(String.trim(text)) do
+      {n, ""} -> {:ok, n}
+      _ -> {:ok, text}
+    end
+  end
+
+  # Missing or of another type: the store refuses it, with the bound in the reason.
+  defp trigger_count(other), do: {:ok, other}
+
+  # Flat keys and a `filter` map are two spellings of one filter, never both.
+  defp trigger_filter(attrs) do
+    flat = Map.take(attrs, ~w(caller callee source))
+
+    case {flat, Map.get(attrs, "filter")} do
+      {flat, nil} when flat == %{} -> {:ok, nil}
+      {flat, nil} -> {:ok, flat}
+      {flat, %{} = filter} when flat == %{} -> {:ok, filter}
+      {flat, filter} -> {:error, {:bad_filter, Map.put(flat, "filter", filter)}}
+    end
+  end
+
   @doc """
   Reload one or more scenario scripts by name (`kelictl reload-script <name…>`).
   Returns `%{name => :ok | {:error, reason}}`. `notify?` is accepted for parity

@@ -695,6 +695,7 @@ defmodule Kelix.InstancePool do
 
       {:ok, module, version} ->
         id = state.next_id
+        {overrides, journal_origin} = debug_trigger(domain, script, req, overrides, id)
 
         {pid, ref} =
           SIP.Scenario.Runner.spawn_uas_instance(
@@ -719,7 +720,8 @@ defmodule Kelix.InstancePool do
           function: function,
           script: script,
           version: version,
-          conversation: nil
+          conversation: nil,
+          journal_origin: journal_origin
         }
 
         {state, inst} = register_conversation(state, inst, ref, Map.get(route, :conversation))
@@ -752,6 +754,27 @@ defmodule Kelix.InstancePool do
     end
   end
 
+  # A debug trigger (debug-triggers-plan.md): asked once the slot and the script
+  # are secured — a request answered 404/503/500 above consumed nothing — and
+  # right before the spawn. A matching run starts with its journal on from the
+  # first state (`debug: true`, FSL.Runner), the request that started it included.
+  defp debug_trigger(domain, script, req, overrides, id) do
+    case Kelix.DebugTriggers.claim(domain, script, req) do
+      {:journal, rule} ->
+        Logger.info(
+          module: __MODULE__,
+          message:
+            "debug trigger #{domain}/#{script}: instance #{id} journaled " <>
+              "(#{rule.remaining}/#{rule.total} runs left)"
+        )
+
+        {Keyword.put(overrides, :debug, true), :rule}
+
+      :no ->
+        {overrides, nil}
+    end
+  end
+
   # The snapshot `subscribe_monitor/1` answers with: this pool's rows joined with
   # the FSM view. Reading `FSL.Monitor` from inside a call of ours is safe — that
   # registry reads its own state and calls nobody — and subscribing is rare
@@ -774,8 +797,16 @@ defmodule Kelix.InstancePool do
 
   defp to_list_row(i), do: base_row(i)
 
-  defp base_row(i),
-    do: %{id: i.id, pid: i.pid, domain: i.domain, function: i.function, script: i.script}
+  defp base_row(i) do
+    row = %{id: i.id, pid: i.pid, domain: i.domain, function: i.function, script: i.script}
+
+    # Only on a run a debug trigger journals: `Kelix.Traces` files its journal
+    # under `origin: :rule`, every other one is the operator's.
+    case Map.get(i, :journal_origin) do
+      nil -> row
+      origin -> Map.put(row, :journal_origin, origin)
+    end
+  end
 
   defp find_instance(state, id), do: Enum.find(Map.values(state.instances), &(&1.id == id))
 

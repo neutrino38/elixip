@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.9.0"
+# user_agent = "Kelixip/1.9.1"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 # max_message_size = 64000   # biggest inbound SIP message, in bytes; 513 beyond it
 
@@ -293,21 +293,17 @@ port = 9095
 #[module.captioning]                # dnf install kelixip-mod-captioning
 # The correction of a captioned call (call-captioning.exs): answers the client's
 # captioning INFO with the URL of a correction stream on the speech-server. This
-# node's address must be in the speech-server's control.allow.
-#control_url  = "http://10.0.0.12:9200"          # control API, admin network
-#public_url   = "wss://speech.example.net:9201"  # what the browser opens: wss:// only
-#ttl          = 60                               # token lifetime, seconds
-#timeout_ms   = 2000                             # bound on a token request
-#max_per_call = 5                                # renewals after the first token
-#min_interval = 10                               # seconds between two tokens of a call
-#retry_after  = 30                               # Retry-After of a 503
-#
-# One table per domain whose callers have the correction; the name is also the
-# account the speech-server bills the token to.
-#[[module.captioning.domain]]
-#name       = "visioassistance.net"
-#correction = true
-#lang       = "fr"                                # absent: the client chooses
+# node's address must be in the speech-server's control.allow. The account billed
+# and the language of the correction are the script's.
+#control_url        = "http://10.0.0.12:9200"          # control API, admin network
+#public_url         = "wss://speech.example.net:9201"  # what the browser opens: wss:// only
+#backup_control_url = "http://10.0.0.13:9200"          # asked when the first does not answer;
+#backup_public_url  = "wss://speech2.example.net:9201" #   the two go together
+#ttl                = 60                               # token lifetime, seconds
+#timeout_ms         = 2000                             # bound on a token request, per server
+#max_per_call       = 5                                # renewals after the first token
+#min_interval       = 10                               # seconds between two tokens of a call
+#retry_after        = 30                               # Retry-After of a 503
 
 # The media servers, declared here and nowhere else: point-to-point calls take one
 # per call (round-robin + health-check), and the mcu module opens one control channel

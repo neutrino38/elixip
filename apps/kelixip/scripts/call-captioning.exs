@@ -26,8 +26,8 @@
 # application/captioning+xml: it confirms the captions — already on — and may ask
 # for the correction of what the user types. That INFO is the caller's business
 # with us, never relayed to the trunk: the captioning module answers it, with the
-# URL of a correction stream when the caller's domain has the service. Without
-# the module the answer is the captions alone. No answer to it touches the call.
+# URL of a correction stream. Without the module the answer is the captions
+# alone. No answer to it touches the call.
 defmodule Kelix.CallCaptioning do
   use SIP.Scenario
   use SBB.Call
@@ -38,7 +38,8 @@ defmodule Kelix.CallCaptioning do
   config(uses_modules: [:auth_db, :sip_servers])
 
   @trunk "sip-trunk-prod"
-  @realm "visioassistance.net"
+  # The realm the caller authenticates in. nil: the domain the call is served on.
+  @realm nil
 
   @captioning "application/captioning+xml"
 
@@ -192,7 +193,7 @@ defmodule Kelix.CallCaptioning do
     on_events do
       {:bridge, :request, %{leg: leg, req: req}} ->
         {code, reason, fields} =
-          Kelix.ModuleRegistry.facade("captioning", :answer, [req, @realm], @captions_only)
+          Kelix.ModuleRegistry.facade("captioning", :answer, [req, []], @captions_only)
 
         b2bua_reply_on(leg, req, code, reason, fields)
         goto(connected, "captioning INFO answered #{code}")

@@ -79,7 +79,8 @@ defmodule Kelix.Domains do
   def reload(path, opts \\ []) do
     case load(path, Keyword.get(opts, :check_scripts, false)) do
       {:ok, snapshot} ->
-        GenServer.call(__MODULE__, {:swap, snapshot})
+        with :ok <- GenServer.call(__MODULE__, {:swap, snapshot}),
+             do: accepted(snapshot, :ok)
 
       {:error, reason} = err ->
         Logger.error(
@@ -204,8 +205,29 @@ defmodule Kelix.Domains do
              do: tag(check_scripts(snapshot), :scripts),
              else: :ok
            ) do
-      GenServer.call(__MODULE__, {:write, snapshot, text, path, Keyword.get(opts, :version)})
+      with {:ok, snapshot} = ok <-
+             GenServer.call(
+               __MODULE__,
+               {:write, snapshot, text, path, Keyword.get(opts, :version)}
+             ),
+           do: accepted(snapshot, ok)
     end
+  end
+
+  # What follows a snapshot the node now serves, in the caller's process — never
+  # inside our own handle_call: the debug trigger store reads `current/0` while it
+  # validates a rule, and a call from here into it could cross that one. A rule
+  # whose domain stopped serving its script goes (debug-triggers-plan.md,
+  # decision 5); a node without the store (elixipp, some tests) has none to prune.
+  defp accepted(snapshot, reply) do
+    _ =
+      try do
+        Kelix.DebugTriggers.prune(snapshot)
+      catch
+        :exit, _ -> []
+      end
+
+    reply
   end
 
   defp tag({:error, message}, tag) when is_binary(message), do: {:error, {tag, message}}
@@ -392,6 +414,19 @@ defmodule Kelix.Domains do
     domains
     |> Enum.flat_map(&domain_script_refs/1)
     |> Enum.uniq_by(&elem(&1, 0))
+  end
+
+  @doc """
+  The scripts domain `name` serves (its canonical name, not an alias), deduped,
+  in `script_refs/1` order — or `nil` when the snapshot has no such domain. What
+  a debug trigger is checked against (debug-triggers-plan.md, decision 5).
+  """
+  @spec scripts_of(t, String.t()) :: [String.t()] | nil
+  def scripts_of(%__MODULE__{domains: domains}, name) when is_binary(name) do
+    case Enum.find(domains, &(&1.name == name)) do
+      nil -> nil
+      domain -> domain |> domain_script_refs() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+    end
   end
 
   defp domain_script_refs(%Domain{} = d) do

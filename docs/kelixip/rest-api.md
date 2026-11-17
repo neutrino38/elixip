@@ -61,7 +61,11 @@ cert) with a JSON body `{"error": "…"}`.
 | `DELETE /domains/<domain>/registrations/<aor>` | W | `kelictl registration remove` — *idem* |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
 | `POST /scenarios/<id>/debug` (body `{"enabled": true\|false}`) | W | `kelictl debug <id> on\|off` — `409` when the journal was already written |
-| `GET /traces` | R | `kelictl debug list` |
+| `GET /traces` | R | `kelictl debug list` — each journal carries `origin`, `rule` or `operator` |
+| `GET /debug/triggers[?domain=]` | R | `kelictl debug trigger list` — see [below](#debug-triggers) |
+| `GET /debug/triggers/<domain>/<script>` | R | `kelictl debug trigger show` — *idem* |
+| `PUT /debug/triggers/<domain>/<script>` | W | `kelictl debug trigger set` — *idem* |
+| `DELETE /debug/triggers/<domain>/<script>` | W | `kelictl debug trigger remove` — `204` — *idem* |
 | `GET /traces/<id>` | R | the journal of `kelictl debug show <id>`, **unrendered**: its summary, `meta` (the scenario's config with its secrets masked) and `events` (the `FSL.Journal` events, SIP messages with their text). Drawing it is the client's job |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
 | `POST /scripts/<name>/run` (body `{"domain": …, "args": {…}}`) | W | `kelictl run` — start a script now; `202 {"result": {"id": n}}`, see [below](#running-a-script-on-demand) |
@@ -361,6 +365,49 @@ to show, and its journal (`POST /scenarios/<id>/debug`) is the way to follow it.
 
 `kelictl run <name> <domain> [key=value…]` is the same verb; each `key=value`
 becomes a string entry of `run_args`.
+
+## Debug triggers
+
+A debug trigger journals the next runs of one script on one domain
+([administration](administration.md#journaling-the-next-runs-of-a-script)).
+`<script>` is the rest of the path, so a script name holding a `/` needs no
+encoding: `/debug/triggers/example.com/calls/relay.exs`.
+
+```console
+$ curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'X-Kelix-Admin: alice' \
+     -H 'content-type: application/json' \
+     -d '{"count": 5, "duration": "2h", "filter": {"caller": "1001"}}' \
+     $BASE/debug/triggers/example.com/relay.exs
+```
+
+```json
+{"result": {"domain": "example.com", "script": "relay.exs",
+            "total": 5, "remaining": 5, "seconds_left": 7200,
+            "filter": {"caller": "1001"},
+            "created_at": "2026-11-06T14:02:11Z", "expires_at": "2026-11-06T16:02:11Z",
+            "created_by": "alice"}}
+```
+
+The body of `PUT`:
+
+| Key | Value |
+|---|---|
+| `count` | the runs to journal, 1 to `[debug] max_traces` |
+| `duration` | `"30m"`, `"2h"`, `"7d"`, `"3mo"` (a month is 30 days, 12 at most), or seconds |
+| `filter` | optional, one key: `caller`, `callee` or `source` |
+
+`PUT` replaces the rule of the pair, if any. `GET /debug/triggers` answers the rules
+of the node, the one ending first first; `?domain=` keeps one domain's. Each rule
+carries `remaining`, `total` and `seconds_left`. `X-Kelix-Admin` names who asked; it
+becomes `created_by` and goes to the node's log.
+
+| Status | When |
+|---|---|
+| `200` | `GET`, `PUT`: the rule |
+| `204` | `DELETE`: removed |
+| `400` `{"error": "invalid", "message": …}` | a refused count, duration or filter, or an unknown key |
+| `404` `{"error": "not_found", "message": …}` | no such domain, a script the domain does not serve, or no rule |
+| `503` `{"error": "unavailable", "message": …}` | `/var/lib/kelixip/debug_triggers.json` cannot be written |
 
 ## Module endpoints
 

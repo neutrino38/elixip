@@ -475,6 +475,62 @@ event ::                                     # oldest first; `at` in monotonic �
 Everything is plain data and crosses the distribution as is. A node older than a
 field sends none (`redacted` reads `false`).
 
+### 11.2 Debug triggers
+
+A rule journals the next runs of a script, before they start
+([debug-triggers-plan.md](debug-triggers-plan.md)). One rule per `{domain,
+script}`: N runs within a window, at most one filter (`caller`, `callee`,
+`source`).
+
+- **`Kelix.DebugTriggers`** owns the rules, mirrored in a protected ETS table.
+  It sits after `Kelix.Domains` (a rule names a script its domain serves) and
+  before `Kelix.InstancePool` in the supervision tree.
+- **The pool claims.** `InstancePool.spawn_instance/9` calls `claim/4` once the
+  slot and the script are secured, right before the spawn. A pair without a rule
+  costs one ETS lookup in the pool process; a matching run is counted in the
+  store's own process, so N is exact under concurrency. A matching run spawns
+  with `config_overrides: [debug: true]`: `FSL.Runner` opens the journal before
+  `initial_state`, and `SIP.FSL.Host.journal_started/1` records the request that
+  started it. A missing store answers `:no`: a rule never refuses a call.
+- **The filters read the request through `SIP.Msg.Ops`**: `caller_users/1`,
+  `callee_users/1`, `source_ip/1`. The store asks, it does not parse.
+- **The journal's origin.** The instance row carries `journal_origin: :rule`;
+  `Kelix.Traces` files the journal under `origin: :rule`, every other one under
+  `:operator`.
+- **Orphans.** `Kelix.Domains` calls `prune/1` after every snapshot it accepts,
+  from the caller's process: the store reads `Kelix.Domains.current/0` while it
+  validates a rule, so a call from inside `Kelix.Domains` could deadlock.
+- **State file.** `/var/lib/kelixip/debug_triggers.json` (next to
+  `domains.toml`; `:kelixip, :debug_triggers_path` overrides it), rewritten
+  through a `.tmp` and a rename on every change. `set` and `remove` fail when it
+  cannot be written; a claim or an end is logged and kept in memory. Expired
+  rules are dropped at boot; an unreadable file is moved to `.corrupt`.
+- **Timers.** One per rule, re-armed at most daily: `Process.send_after/3` takes
+  at most ~49 days, and a rule lasts up to 12 months.
+
+The contract kelescope codes against, in `Kelix.Control`:
+
+```elixir
+debug_triggers(domain \\ nil) :: [rule]        # the one ending first first
+debug_trigger(domain, script) :: {:ok, rule} | {:error, :not_found}
+set_debug_trigger(domain, script, attrs, actor: admin) :: {:ok, rule} | {:error, reason}
+  # attrs, string or atom keys: count, duration ("2h", "3mo" or seconds),
+  # and caller | callee | source, flat or as a `filter` map
+remove_debug_trigger(domain, script, actor: admin) :: :ok | {:error, reason}
+domain_scripts(domain) :: {:ok, [script]} | {:error, :not_found}
+debug_trigger_error(reason) :: {:not_found | :invalid | :unavailable, message}
+
+subscribe_debug_triggers(pid) :: %{rules: [rule]}
+unsubscribe_debug_triggers(pid) :: :ok
+# pushed: {:kelix_debug_triggers, {:upsert, rule}}                 — set, or a run counted
+#         {:kelix_debug_triggers, {:remove, {domain, script}, why}} — :exhausted | :expired
+#                                                                    | :removed | :orphan
+
+rule :: %{domain:, script:, total:, remaining:,
+          filter: nil | %{caller:} | %{callee:} | %{source:},
+          created_at:, expires_at:, created_by:, seconds_left:}
+```
+
 ---
 
 ## 12. Packaging

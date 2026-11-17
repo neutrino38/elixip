@@ -6,8 +6,8 @@ defmodule Kelix.Mod.Captioning.Token do
       POST /control/token
       {"function": "comp", "ttl": 60, "account": "visioassistance.net"}
 
-  The request carries those three fields and nothing else: the server refuses an
-  unknown one. Only a `201` whose `token` is a non-empty base64url string and
+  The request carries those fields and nothing else: the server refuses an
+  unknown one. `account` is optional, and left out when the script gives none. Only a `201` whose `token` is a non-empty base64url string and
   whose `function` is `comp` is a token — the token goes as it is into the path
   of the URL handed to the client. Its length is the server's business, not a
   contract, and is not checked.
@@ -22,13 +22,14 @@ defmodule Kelix.Mod.Captioning.Token do
           :timeout | :down | :invalid_response | {:speech, pos_integer, String.t() | nil}
 
   @doc """
-  Ask for a token. `cfg` carries `control_url`, `ttl` and `timeout_ms`; `account`
-  is the label the speech-server bills it to.
+  Ask `control_url` for a token. `cfg` carries `ttl` and `timeout_ms`; `account`
+  is the label the speech-server bills it to, or nil.
   """
-  @spec request(map, String.t()) :: {:ok, String.t()} | {:error, error}
-  def request(cfg, account) do
-    url = String.trim_trailing(cfg.control_url, "/") <> "/control/token"
-    payload = %{"function" => "comp", "ttl" => cfg.ttl, "account" => account}
+  @spec request(String.t(), map, String.t() | nil) :: {:ok, String.t()} | {:error, error}
+  def request(control_url, cfg, account) do
+    url = String.trim_trailing(control_url, "/") <> "/control/token"
+    payload = %{"function" => "comp", "ttl" => cfg.ttl}
+    payload = if account, do: Map.put(payload, "account", account), else: payload
 
     task =
       Task.async(fn ->
